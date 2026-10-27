@@ -1,10 +1,10 @@
 import { Button, CheckBox, ComboBox, LineEdit, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { ProcRow, Resource, ResourceKind, ResourceTint } from "types.slint";
-import { ProcessPage } from "process-page.slint";
+import { ColumnLayout, ProcRow, Resource, ResourceKind, ResourceTint } from "types.slint";
+import { ProcessPage, Columns } from "process-page.slint";
 import { PerformancePage } from "performance-page.slint";
 
-export { ProcRow, Resource, ResourceKind, ResourceTint }
+export { ColumnLayout, ProcRow, Resource, ResourceKind, ResourceTint, Columns }
 
 component Tab inherits Rectangle {
     in property <string> text;
@@ -116,8 +116,11 @@ component ConfirmDialog inherits Rectangle {
 
 export component AppWindow inherits Window {
     title: @tr("任务管理器 Lite");
-    preferred-width: 1040px;
-    preferred-height: 700px;
+    // 初始大小由 Rust 在显示前按设置写入。
+    in property <length> initial-width: 1040px;
+    in property <length> initial-height: 700px;
+    preferred-width: root.initial-width;
+    preferred-height: root.initial-height;
     min-width: 760px;
     min-height: 480px;
     default-font-family: "Microsoft YaHei UI";

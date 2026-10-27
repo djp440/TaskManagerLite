@@ -13,6 +13,14 @@ export struct ProcRow {
     critical: bool,
 }
 
+// 进程列表各数值列的有效宽度。
+export struct ColumnLayout {
+    pid: length,
+    cpu: length,
+    memory: length,
+    disk: length,
+}
+
 // 资源类型：右侧详情区按类型分支，便于为某类资源定制详情。
 export enum ResourceKind {
     cpu,

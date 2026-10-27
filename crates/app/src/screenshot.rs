@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use slint::{ComponentHandle, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
+use slint::platform::{PointerEventButton, WindowEvent};
+use slint::{ComponentHandle, LogicalPosition, LogicalSize, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
 
-use crate::AppWindow;
+use crate::{AppWindow, Columns};
 
 type Step = (&'static str, fn(&AppWindow));
 
@@ -44,7 +45,49 @@ const STEPS: &[Step] = &[
         ui.set_page(1);
         ui.invoke_resource_selected("cpu".into());
     }),
+    // 用真实的指针事件拖动表头：“内存”列左边缘向左 60 像素，“PID”列向左 30 像素。
+    ("09-列宽拖动-深色", |ui| {
+        ui.invoke_set_dark(true);
+        ui.set_page(0);
+        let cols = ui.global::<Columns>();
+        let right = ui.window().size().to_logical(ui.window().scale_factor()).width - 10.0;
+        let left_of = |widths: f32| right - widths;
+        // 列从右向左排列：磁盘、内存、CPU、PID。
+        let memory_left = left_of(cols.get_disk() + cols.get_memory());
+        drag(ui, memory_left, -60.0);
+        let pid_left = left_of(cols.get_disk() + cols.get_memory() + cols.get_cpu() + cols.get_pid());
+        drag(ui, pid_left, -30.0);
+    }),
+    // 窗口缩到接近最小宽度、四列都是最大宽度（例如最大化时拉宽后又缩小窗口）：
+    // 名称列至少保留 180px，数值列按比例缩小，表头与数据列对齐。
+    ("10-窄窗口超宽列宽-深色", |ui| {
+        ui.window().set_size(LogicalSize::new(780.0, 560.0));
+        let cols = ui.global::<Columns>();
+        cols.set_pid(480.0);
+        cols.set_cpu(480.0);
+        cols.set_memory(480.0);
+        cols.set_disk(480.0);
+    }),
+    // 同样的设定值回到宽窗口：保存值没有被改动，列宽恢复为设定的 480。
+    ("11-窗口放大后列宽恢复-深色", |ui| {
+        ui.window().set_size(LogicalSize::new(2000.0, 700.0));
+    }),
 ];
+
+/// 在表头（y = 56 + 17）的 `x` 处按下并水平拖动 `dx` 逻辑像素。
+fn drag(ui: &AppWindow, x: f32, dx: f32) {
+    let y = 56.0 + 17.0;
+    let w = ui.window();
+    let at = |x: f32| LogicalPosition::new(x, y);
+    // 抓在列边缘右侧 2 像素处，落在 8 像素宽的拖动区内。
+    let start = x + 2.0;
+    w.dispatch_event(WindowEvent::PointerMoved { position: at(start) });
+    w.dispatch_event(WindowEvent::PointerPressed { position: at(start), button: PointerEventButton::Left });
+    for i in 1..=6 {
+        w.dispatch_event(WindowEvent::PointerMoved { position: at(start + dx * i as f32 / 6.0) });
+    }
+    w.dispatch_event(WindowEvent::PointerReleased { position: at(start + dx), button: PointerEventButton::Left });
+}
 
 /// 先采样一段时间让曲线有内容，再逐步截图，最后退出。
 pub fn run(ui: &AppWindow, dir: PathBuf, warmup: Duration) {

@@ -4202,9 +4202,11 @@ name = "tml-app"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "serde_json",
  "slint",
  "slint-build",
  "tml-core",
+ "windows",
 ]
 
 [[package]]
