@@ -46,9 +46,7 @@ impl Instance {
 pub fn summary_instances() -> Vec<Instance> {
     vec![
         Instance::new(CPU, ResourceKind::Cpu, ResourceTint::Cpu, "CPU", "% 利用率", &["利用率", "逻辑处理器", "进程数"]),
-        Instance::new(MEMORY, ResourceKind::Memory, ResourceTint::Memory, "内存", "内存使用量", &[
-            "使用中", "可用", "总量",
-        ]),
+        Instance::new(MEMORY, ResourceKind::Memory, ResourceTint::Memory, "内存", "内存使用量", &[]),
         Instance::new(DISK, ResourceKind::Disk, ResourceTint::Disk, "磁盘", "% 活动时间", &[
             "活动时间",
             "读取速度",

@@ -7,7 +7,7 @@ use crate::control::is_critical;
 use crate::memory::{MemoryHardware, MemoryStatus, read_hardware, read_status};
 use crate::nt::ProcessQuery;
 use crate::snapshot::{Baseline, ProcessKey, ProcessSnapshot};
-use crate::system::{CpuTimes, DiskCounters, SystemMetrics, cpu_times, memory, network_octets};
+use crate::system::{CpuTimes, DiskCounters, SystemMetrics, cpu_times, network_octets};
 
 pub struct Sample {
     pub snapshot: ProcessSnapshot,
@@ -57,8 +57,9 @@ impl Sampler {
         // 只保留仍在运行的进程，避免缓存无限增长。
         self.critical = seen;
 
-        let (memory_used, memory_total) = memory();
+        // 内存只读一次，SystemMetrics 与 MemoryStatus 共用同一份数据。
         let memory_status = read_status(self.query.compressed_working_set);
+        let (memory_used, memory_total) = (memory_status.in_use(), memory_status.total);
         // SMBIOS 解析稍慢，放在首次采样之后，避免拖慢第一个快照。
         let memory_hardware = (!first && !std::mem::replace(&mut self.hardware_tried, true)).then(read_hardware);
 

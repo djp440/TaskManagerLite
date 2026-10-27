@@ -178,7 +178,6 @@ pub struct MemoryDevice {
     pub configured_speed: u32,
     pub form_factor: u8,
     pub memory_type: u8,
-    pub locator: String,
 }
 
 impl MemoryDevice {
@@ -234,27 +233,14 @@ pub fn parse_memory_devices(table: &[u8]) -> Vec<MemoryDevice> {
             break;
         }
         if kind == SMBIOS_TYPE_MEMORY_DEVICE {
-            let strings = &table[strings_start..end];
-            out.push(parse_memory_device(formatted, strings));
+            out.push(parse_memory_device(formatted));
         }
         pos = end + 2;
     }
     out
 }
 
-/// 取字符串集合里第 `index` 个字符串（从 1 开始，0 表示没有）。
-fn smbios_string(strings: &[u8], index: u8) -> String {
-    if index == 0 {
-        return String::new();
-    }
-    strings
-        .split(|&b| b == 0)
-        .nth(index as usize - 1)
-        .map(|s| String::from_utf8_lossy(s).trim().to_string())
-        .unwrap_or_default()
-}
-
-fn parse_memory_device(d: &[u8], strings: &[u8]) -> MemoryDevice {
+fn parse_memory_device(d: &[u8]) -> MemoryDevice {
     // 容量：0 空插槽；0xFFFF 未知；0x7FFF 见扩展容量；最高位为 1 时单位是 KB，否则 MB。
     let size_field = u16_at(d, 0x0C).unwrap_or(0);
     let (size_mb, size_unknown) = match size_field {
@@ -274,14 +260,12 @@ fn parse_memory_device(d: &[u8], strings: &[u8]) -> MemoryDevice {
         s => u32::from(s),
     };
     MemoryDevice {
-        // 容量为 0 的空插槽：速度、规格没有意义，但外形规格仍保留（有的固件会填）。
         size_mb,
         size_unknown,
         speed,
         configured_speed,
         form_factor: d.get(0x0E).copied().unwrap_or(0),
         memory_type: d.get(0x12).copied().unwrap_or(0),
-        locator: smbios_string(strings, d.get(0x10).copied().unwrap_or(0)),
     }
 }
 
@@ -436,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_populated_device_with_strings() {
+    fn parses_device_followed_by_string_tables() {
         let t = table(&[
             other_struct(),
             build(&Dev {
@@ -456,7 +440,6 @@ mod tests {
         assert_eq!(devs[0].speed, 3200);
         assert_eq!(devs[0].configured_speed, 2933);
         assert_eq!(devs[0].form_factor, 0x0D);
-        assert_eq!(devs[0].locator, "ChannelA-DIMM0");
         assert!(devs[0].populated());
     }
 
@@ -536,11 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_string_and_truncated_table() {
-        // 字符串索引指向不存在的字符串：返回空。
-        assert_eq!(smbios_string(b"A\0B\0", 3), "");
-        assert_eq!(smbios_string(b"A\0B\0", 2), "B");
-        assert_eq!(smbios_string(b"", 1), "");
+    fn truncated_table_and_garbage() {
         // 截断：第二个条目缺少终止符，只保留第一个。
         let mut t = table(&[build(&Dev { size: 4096, locator: Some("A"), ..Default::default() })]);
         t.extend_from_slice(&build(&Dev { size: 4096, ..Default::default() })[..0x30]);

@@ -6,7 +6,6 @@ use windows::Win32::System::Performance::{
     PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PdhAddEnglishCounterW, PdhCloseQuery,
     PdhCollectQueryData, PdhGetFormattedCounterValue, PdhOpenQueryW,
 };
-use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows::Win32::System::Threading::GetSystemTimes;
 use windows::core::{PCWSTR, w};
 
@@ -43,14 +42,6 @@ pub(crate) fn cpu_times() -> CpuTimes {
     }
     // 内核时间已包含空闲时间。
     CpuTimes { idle: filetime(idle), total: filetime(kernel) + filetime(user) }
-}
-
-pub(crate) fn memory() -> (u64, u64) {
-    let mut m = MEMORYSTATUSEX { dwLength: size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
-    if unsafe { GlobalMemoryStatusEx(&mut m) }.is_err() {
-        return (0, 0);
-    }
-    (m.ullTotalPhys - m.ullAvailPhys, m.ullTotalPhys)
 }
 
 /// 网卡累计收发字节数。只统计物理网卡，跳过过滤层与回环，避免重复计数。
