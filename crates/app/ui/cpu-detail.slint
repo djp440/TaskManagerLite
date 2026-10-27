@@ -1,5 +1,6 @@
-import { Palette } from "std-widgets.slint";
+import { Palette, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { StatItem, StatsPanel } from "stats-panel.slint";
 
 // 逻辑处理器网格里的一张小图。曲线路径由 Rust 按小图的实际尺寸生成。
 export struct CoreGraph {
@@ -9,18 +10,14 @@ export struct CoreGraph {
     area: string,
 }
 
-// “基本信息”键值区的一行。
-export struct InfoRow {
-    label: string,
-    value: string,
-}
-
 // CPU 详情的数据与视图状态。放在全局对象里，不占用 AppWindow / PerformancePage 的属性。
 export global CpuData {
     // 为 true 时显示每个逻辑处理器一张小图，否则显示整体曲线。
     in-out property <bool> per-core: false;
     in property <[CoreGraph]> cores;
-    in property <[InfoRow]> info;
+    // 大号数值统计项（利用率、速度、进程、线程、句柄、正常运行时间）与基本信息键值，交给通用 StatsPanel 显示。
+    in property <[StatItem]> stats;
+    in property <[StatItem]> info;
     // 网格中单张小图内部的绘制尺寸，由布局得出，Rust 据此生成曲线。
     in-out property <length> cell-width;
     in-out property <length> cell-height;
@@ -171,79 +168,20 @@ export component CpuCoreGrid inherits Rectangle {
     }
 }
 
-// CPU 页底部：左侧是“标签 + 大号数值”的统计项（与其他资源页一致），右侧是“基本信息”键值区。
-// 宽度不足时基本信息折到统计项下方。
-export component CpuBottom inherits Rectangle {
-    in property <[string]> labels;
-    in property <[string]> values;
+// CPU 详情：通用统计面板（统计项 + 基本信息）。
+// 与内存页一致，内容放在滚动区里：窗口很矮时先压缩上方的曲线，仍放不下就滚动，不会把状态栏挤出窗口。
+export component CpuDetail inherits ScrollView {
+    min-height: 80px;
+    preferred-height: content.preferred-height;
+    content-width: self.visible-width;
+    content-height: content.preferred-height;
 
-    property <length> stat-col: 104px;
-    property <length> stat-row: 52px;
-    property <length> stats-w: root.stat-col * 3;
-    property <length> stats-h: root.stat-row * 2;
-    property <length> info-row: 22px;
-    property <int> info-rows: Math.max(1, Math.ceil(CpuData.info.length / 2));
-    property <length> info-h: root.info-row * root.info-rows;
-    // 键值区放在右侧至少需要的宽度：两列各 160px。
-    property <bool> stacked: root.width < root.stats-w + 24px + 320px;
-    property <length> info-x: root.stacked ? 0px : root.stats-w + 24px;
-    property <length> info-y: root.stacked ? root.stats-h + 8px : 0px;
-    property <length> info-col-w: (root.width - root.info-x) / 2;
-
-    property <length> total-h: root.stacked ? root.info-y + root.info-h : max(root.stats-h, root.info-h);
-
-    // 在父级垂直布局里固定高度，把多余空间留给曲线图。
-    vertical-stretch: 0;
-    min-height: root.total-h;
-    max-height: root.total-h;
-    preferred-height: root.total-h;
-
-    for value[i] in root.values: VerticalLayout {
-        x: Math.mod(i, 3) * root.stat-col;
-        y: Math.floor(i / 3) * root.stat-row;
-        width: root.stat-col;
-        height: root.stat-row;
+    content := VerticalLayout {
+        width: root.visible-width;
         alignment: start;
-        spacing: 2px;
-        Text {
-            text: root.labels[i];
-            font-size: 12px;
-            color: Theme.subtle-text;
-        }
-
-        Text {
-            text: value;
-            font-size: 20px;
-            font-weight: 600;
-            color: Palette.foreground;
-            overflow: elide;
-        }
-    }
-
-    for row[i] in CpuData.info: Rectangle {
-        // 先按列填充：左列从上到下，再到右列。
-        x: root.info-x + Math.floor(i / root.info-rows) * root.info-col-w;
-        y: root.info-y + Math.mod(i, root.info-rows) * root.info-row;
-        width: root.info-col-w - 12px;
-        height: root.info-row;
-        Text {
-            x: 0px;
-            width: 78px;
-            text: row.label;
-            font-size: 12px;
-            color: Theme.subtle-text;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-
-        Text {
-            x: 82px;
-            width: parent.width - 82px;
-            text: row.value;
-            font-size: 13px;
-            color: Palette.foreground;
-            vertical-alignment: center;
-            overflow: elide;
+        StatsPanel {
+            stats: CpuData.stats;
+            info: CpuData.info;
         }
     }
 }

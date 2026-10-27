@@ -9,7 +9,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use tml_core::{CpuInfo, CpuSample};
 
 use crate::format::History;
-use crate::{AppWindow, CoreGraph, CpuData, InfoRow};
+use crate::{AppWindow, CoreGraph, CpuData, StatItem};
 
 /// 单张小图在布局尚未给出尺寸前的默认绘制尺寸。
 const DEFAULT_CELL: (f64, f64) = (100.0, 50.0);
@@ -19,10 +19,11 @@ pub struct CpuState {
     /// 按逻辑处理器下标保存的历史；暂停/最小化造成的断口与其他曲线一样用断点表示。
     histories: Vec<History>,
     latest: CpuSample,
-    /// 截图模式下替换真实历史的演示曲线，便于目视核对曲线形态。
-    demo: Option<Vec<History>>,
+    /// 截图模式：逻辑处理器网格用演示曲线代替真实历史，便于目视核对曲线形态。
+    demo: bool,
     cores: Rc<VecModel<CoreGraph>>,
-    info: Rc<VecModel<InfoRow>>,
+    stats: Rc<VecModel<StatItem>>,
+    info: Rc<VecModel<StatItem>>,
 }
 
 impl CpuState {
@@ -30,6 +31,7 @@ impl CpuState {
     pub fn attach(&self, ui: &AppWindow) {
         let data = ui.global::<CpuData>();
         data.set_cores(ModelRc::from(self.cores.clone()));
+        data.set_stats(ModelRc::from(self.stats.clone()));
         data.set_info(ModelRc::from(self.info.clone()));
     }
 
@@ -67,22 +69,28 @@ impl CpuState {
         }
     }
 
-    /// 详情页的统计项，顺序与 `resources::summary_instances` 中 CPU 的标签一致。
-    pub fn stats(&self, usage: &str, processes: usize) -> Vec<String> {
+    /// 详情页的统计项（大号数值），交给通用 StatsPanel 显示。
+    pub fn stats(&self, usage: &str, processes: usize) -> Vec<(&'static str, String)> {
         let s = &self.latest;
         vec![
-            usage.to_string(),
-            s.current_mhz.map_or_else(|| "—".into(), ghz),
-            processes.to_string(),
-            s.threads.to_string(),
-            s.handles.to_string(),
-            uptime(s.uptime_secs),
+            ("利用率", usage.to_string()),
+            ("速度", s.current_mhz.map_or_else(|| "—".into(), ghz)),
+            ("进程", processes.to_string()),
+            ("线程", s.threads.to_string()),
+            ("句柄", s.handles.to_string()),
+            ("正常运行时间", uptime(s.uptime_secs)),
         ]
     }
 
     /// 每个逻辑处理器的小图：路径按小图的实际绘制尺寸 `cell` 生成，纵轴 0–100%，横轴为 60 秒窗口。
     fn core_graphs(&self, now: Instant, cell: (f64, f64)) -> Vec<CoreGraph> {
-        let histories = self.demo.as_ref().unwrap_or(&self.histories);
+        let demo;
+        let histories = if self.demo {
+            demo = demo_histories(self.latest.per_core.len(), now);
+            &demo
+        } else {
+            &self.histories
+        };
         histories
             .iter()
             .zip(&self.latest.per_core)
@@ -99,46 +107,48 @@ impl CpuState {
             .collect()
     }
 
-    /// 截图用：把每个核的历史换成形态各异的演示曲线（满载、斜坡、方波、半载、正弦）。
-    pub fn use_demo_history(&mut self, now: Instant) {
-        let n = self.histories.len().max(1);
-        let demo = (0..n)
-            .map(|core| {
-                let mut h = History::default();
-                for sec in 0..=60u64 {
-                    let t = now - std::time::Duration::from_secs(60 - sec);
-                    let x = sec as f64 / 60.0;
-                    let v = match core % 5 {
-                        0 => 100.0,
-                        1 => x * 100.0,
-                        2 => if (sec / 10) % 2 == 0 { 100.0 } else { 0.0 },
-                        3 => 50.0,
-                        _ => 50.0 + 50.0 * (x * 12.0 + core as f64).sin(),
-                    };
-                    h.push(t, Some(v));
-                }
-                h
-            })
-            .collect();
-        self.demo = Some(demo);
+    /// 截图用：逻辑处理器网格改用演示曲线。
+    pub fn use_demo_history(&mut self) {
+        self.demo = true;
     }
 
     /// 把最新的小图与基本信息写入界面。小图尺寸由网格布局经 `CpuData` 报告。
-    pub fn refresh(&self, ui: &AppWindow, now: Instant) {
+    pub fn refresh(&self, ui: &AppWindow, now: Instant, processes: usize, usage: &str) {
         let data = ui.global::<CpuData>();
         let cell = cell_size(f64::from(data.get_cell_width()), f64::from(data.get_cell_height()));
         sync(&self.cores, self.core_graphs(now, cell));
-        let info: Vec<InfoRow> = self
-            .latest
-            .info
-            .as_deref()
-            .map(info_rows)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(label, value)| InfoRow { label: SharedString::from(label), value: value.into() })
-            .collect();
-        sync(&self.info, info);
+        sync(&self.stats, items(self.stats(usage, processes)));
+        let info = self.latest.info.as_deref().map(info_rows).unwrap_or_default();
+        sync(&self.info, items(info));
     }
+}
+
+fn items(rows: Vec<(&'static str, String)>) -> Vec<StatItem> {
+    rows.into_iter().map(|(label, value)| StatItem { label: SharedString::from(label), value: value.into() }).collect()
+}
+
+/// 演示曲线（60 秒窗口、每秒一点，以 `now` 为终点）：核按序号循环取 恒 100%、0→100% 斜坡、方波、恒 50%、正弦。
+fn demo_histories(n: usize, now: Instant) -> Vec<History> {
+    (0..n.max(1))
+        .map(|core| {
+            let mut h = History::default();
+            for sec in 0..=60u64 {
+                let t = now - std::time::Duration::from_secs(60 - sec);
+                let x = sec as f64 / 60.0;
+                let v = match core % 5 {
+                    0 => 100.0,
+                    1 => x * 100.0,
+                    2 => {
+                        if (sec / 10) % 2 == 0 { 100.0 } else { 0.0 }
+                    }
+                    3 => 50.0,
+                    _ => 50.0 + 50.0 * (x * 12.0 + core as f64).sin(),
+                };
+                h.push(t, Some(v));
+            }
+            h
+        })
+        .collect()
 }
 
 /// 小图的绘制尺寸：布局尚未上报（≤1px）时用默认值。
@@ -248,10 +258,11 @@ mod tests {
         let mut cpu = CpuState::default();
         let now = Instant::now();
         cpu.record(now, CpuSample { threads: 4000, handles: 90_000, uptime_secs: 61, ..sample(&[1.0, 2.0]) }, true);
-        assert_eq!(cpu.stats("5%", 300), ["5%", "—", "300", "4000", "90000", "0:00:01:01"]);
+        let values = |cpu: &CpuState| cpu.stats("5%", 300).into_iter().map(|r| r.1).collect::<Vec<_>>();
+        assert_eq!(values(&cpu), ["5%", "—", "300", "4000", "90000", "0:00:01:01"]);
         assert_eq!(cpu.card_value("5%"), "5%");
         cpu.record(now, CpuSample { current_mhz: Some(5200.0), ..sample(&[1.0, 2.0]) }, true);
-        assert_eq!(cpu.stats("5%", 300)[1], "5.20 GHz");
+        assert_eq!(values(&cpu)[1], "5.20 GHz");
         assert_eq!(cpu.card_value("5%"), "5% 5.20 GHz");
     }
 

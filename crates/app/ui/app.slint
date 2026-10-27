@@ -1,11 +1,13 @@
 import { Button, CheckBox, ComboBox, LineEdit, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { ProcRow, Resource, ResourceKind, ResourceTint } from "types.slint";
-import { ProcessPage } from "process-page.slint";
+import { ColumnLayout, ProcRow, Resource, ResourceKind, ResourceTint } from "types.slint";
+import { ProcessPage, Columns } from "process-page.slint";
 import { PerformancePage } from "performance-page.slint";
+import { MemoryView } from "memory-detail.slint";
+import { StatItem } from "stats-panel.slint";
 
-export { ProcRow, Resource, ResourceKind, ResourceTint }
-export { CoreGraph, CpuData, InfoRow } from "cpu-detail.slint";
+export { ColumnLayout, MemoryView, ProcRow, Resource, ResourceKind, ResourceTint, StatItem, Columns }
+export { CoreGraph, CpuData } from "cpu-detail.slint";
 
 component Tab inherits Rectangle {
     in property <string> text;
@@ -117,8 +119,11 @@ component ConfirmDialog inherits Rectangle {
 
 export component AppWindow inherits Window {
     title: @tr("任务管理器 Lite");
-    preferred-width: 1040px;
-    preferred-height: 700px;
+    // 初始大小由 Rust 在显示前按设置写入。
+    in property <length> initial-width: 1040px;
+    in property <length> initial-height: 700px;
+    preferred-width: root.initial-width;
+    preferred-height: root.initial-height;
     min-width: 760px;
     min-height: 480px;
     default-font-family: "Microsoft YaHei UI";
@@ -135,6 +140,7 @@ export component AppWindow inherits Window {
     in-out property <int> interval-index: 1;
     in property <bool> elevated;
     in property <[Resource]> resources;
+    in property <MemoryView> memory-view;
     in property <int> process-count;
     in property <string> cpu-summary;
     in property <string> memory-summary;
@@ -370,6 +376,7 @@ export component AppWindow inherits Window {
                 perf-page := PerformancePage {
                     visible: root.page == 1;
                     resources: root.resources;
+                    memory: root.memory-view;
                     selected-resource: root.selected-resource;
                     selected-index: root.resource-index;
                     resource-selected(id) => {

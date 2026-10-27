@@ -10,6 +10,7 @@ use windows::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR, w};
 
+use crate::instance::WAIT_FOR_ARG;
 use crate::nt::RawProcess;
 use crate::snapshot::ProcessKey;
 use crate::system::filetime;
@@ -111,11 +112,13 @@ pub fn is_elevated() -> bool {
 }
 
 /// 以管理员身份重新启动本程序。用户在 UAC 中拒绝时返回 false。
+/// 新实例带 `--wait-for <本进程 PID>`：本进程此刻还没退出、仍占着单实例互斥量，新实例要等本进程退出后再取锁。
 pub fn relaunch_elevated() -> bool {
     let Ok(exe) = std::env::current_exe() else {
         return false;
     };
     let exe = HSTRING::from(exe.as_os_str());
-    let r = unsafe { ShellExecuteW(None, w!("runas"), &exe, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
+    let args = HSTRING::from(format!("{WAIT_FOR_ARG} {}", std::process::id()));
+    let r = unsafe { ShellExecuteW(None, w!("runas"), &exe, &args, PCWSTR::null(), SW_SHOWNORMAL) };
     r.0 as isize > 32
 }

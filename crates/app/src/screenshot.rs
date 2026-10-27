@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use slint::{ComponentHandle, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
+use slint::platform::{PointerEventButton, WindowEvent};
+use slint::{ComponentHandle, LogicalPosition, LogicalSize, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
 
-use crate::{AppWindow, CpuData};
+use crate::{AppWindow, Columns, CpuData};
 
 type Step = (&'static str, fn(&AppWindow));
 
@@ -27,16 +28,7 @@ const STEPS: &[Step] = &[
         ui.set_page(1);
         ui.invoke_resource_selected("cpu".into());
     }),
-    ("03b-性能CPU逻辑处理器-深色", |ui| {
-        // 演示曲线：核 0 恒 100%（贴顶边的横线）、核 1 从 0 升到 100%（左下到右上的斜线）、
-        // 核 2 方波、核 3 恒 50%，用来核对曲线是否按格子实际尺寸铺满。
-        crate::CONTROLLER.with(|c| {
-            if let Some(c) = c.borrow().as_ref() {
-                c.use_demo_cpu_history();
-            }
-        });
-        ui.global::<CpuData>().set_per_core(true);
-    }),
+    ("03b-性能CPU逻辑处理器-深色", use_demo_cores),
     ("04-性能内存-深色", |ui| ui.invoke_resource_selected("memory".into())),
     ("05-性能网络-深色", |ui| ui.invoke_resource_selected("network".into())),
     ("06-结束进程树确认-深色", |ui| {
@@ -56,7 +48,99 @@ const STEPS: &[Step] = &[
         ui.invoke_resource_selected("cpu".into());
     }),
     ("08b-性能CPU逻辑处理器-浅色", |ui| ui.global::<CpuData>().set_per_core(true)),
+    // 用真实的指针事件拖动表头：“内存”列左边缘向左 60 像素，“PID”列向左 30 像素。
+    ("09-列宽拖动-深色", |ui| {
+        ui.invoke_set_dark(true);
+        ui.set_page(0);
+        let cols = ui.global::<Columns>();
+        let right = ui.window().size().to_logical(ui.window().scale_factor()).width - 10.0;
+        let left_of = |widths: f32| right - widths;
+        // 列从右向左排列：磁盘、内存、CPU、PID。
+        let memory_left = left_of(cols.get_disk() + cols.get_memory());
+        drag(ui, memory_left, -60.0);
+        let pid_left = left_of(cols.get_disk() + cols.get_memory() + cols.get_cpu() + cols.get_pid());
+        drag(ui, pid_left, -30.0);
+    }),
+    // 窗口缩到接近最小宽度、四列都是最大宽度（例如最大化时拉宽后又缩小窗口）：
+    // 名称列至少保留 180px，数值列按比例缩小，表头与数据列对齐。
+    ("10-窄窗口超宽列宽-深色", |ui| {
+        ui.window().set_size(LogicalSize::new(780.0, 560.0));
+        let cols = ui.global::<Columns>();
+        cols.set_pid(480.0);
+        cols.set_cpu(480.0);
+        cols.set_memory(480.0);
+        cols.set_disk(480.0);
+    }),
+    // 同样的设定值回到宽窗口：保存值没有被改动，列宽恢复为设定的 480。
+    ("11-窗口放大后列宽恢复-深色", |ui| {
+        ui.window().set_size(LogicalSize::new(2000.0, 700.0));
+    }),
+    // 编号从 12 起，避开其他功能新增的步骤；每步显式设置主题与窗口尺寸，不依赖前一步的状态。
+    ("12-性能内存-浅色", |ui| {
+        resize(ui, 1040.0, 700.0);
+        ui.invoke_set_dark(false);
+        ui.set_page(1);
+        ui.invoke_resource_selected("memory".into());
+    }),
+    ("13-性能内存-深色-最小尺寸760x480", |ui| {
+        ui.invoke_set_dark(true);
+        resize(ui, 760.0, 480.0);
+    }),
+    ("14-性能内存-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
+    ("15-性能内存-深色-默认尺寸", |ui| resize(ui, 1040.0, 700.0)),
+    // CPU 页：整体曲线与逻辑处理器网格在最小尺寸、中等尺寸下的表现（逐核曲线用演示数据，便于核对形态）。
+    ("16-性能CPU整体-深色-最小尺寸760x480", |ui| {
+        ui.invoke_set_dark(true);
+        ui.set_page(1);
+        ui.invoke_resource_selected("cpu".into());
+        ui.global::<CpuData>().set_per_core(false);
+        resize(ui, 760.0, 480.0);
+    }),
+    ("17-性能CPU整体-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
+    ("18-性能CPU逻辑处理器-深色-最小尺寸760x480", |ui| {
+        use_demo_cores(ui);
+        resize(ui, 760.0, 480.0);
+    }),
+    ("19-性能CPU逻辑处理器-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
+    ("20-性能CPU逻辑处理器-浅色-最小尺寸760x480", |ui| {
+        ui.invoke_set_dark(false);
+        resize(ui, 760.0, 480.0);
+    }),
+    ("21-性能CPU整体-浅色-900x600", |ui| {
+        ui.global::<CpuData>().set_per_core(false);
+        resize(ui, 900.0, 600.0);
+    }),
 ];
+
+/// 切到逻辑处理器网格，并让各核显示演示曲线：核 0 恒 100%（贴顶边的横线）、核 1 从 0 升到 100%
+/// （左下到右上的斜线）、核 2 方波、核 3 恒 50%、核 4 正弦……用来核对曲线是否按格子实际尺寸铺满。
+fn use_demo_cores(ui: &AppWindow) {
+    crate::CONTROLLER.with(|c| {
+        if let Some(c) = c.borrow().as_ref() {
+            c.use_demo_cpu_history();
+        }
+    });
+    ui.global::<CpuData>().set_per_core(true);
+}
+
+/// 在表头（y = 56 + 17）的 `x` 处按下并水平拖动 `dx` 逻辑像素。
+fn drag(ui: &AppWindow, x: f32, dx: f32) {
+    let y = 56.0 + 17.0;
+    let w = ui.window();
+    let at = |x: f32| LogicalPosition::new(x, y);
+    // 抓在列边缘右侧 2 像素处，落在 8 像素宽的拖动区内。
+    let start = x + 2.0;
+    w.dispatch_event(WindowEvent::PointerMoved { position: at(start) });
+    w.dispatch_event(WindowEvent::PointerPressed { position: at(start), button: PointerEventButton::Left });
+    for i in 1..=6 {
+        w.dispatch_event(WindowEvent::PointerMoved { position: at(start + dx * i as f32 / 6.0) });
+    }
+    w.dispatch_event(WindowEvent::PointerReleased { position: at(start + dx), button: PointerEventButton::Left });
+}
+
+fn resize(ui: &AppWindow, width: f32, height: f32) {
+    ui.window().set_size(LogicalSize::new(width, height));
+}
 
 /// 先采样一段时间让曲线有内容，再逐步截图，最后退出。
 pub fn run(ui: &AppWindow, dir: PathBuf, warmup: Duration) {

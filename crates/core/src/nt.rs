@@ -71,13 +71,15 @@ struct SystemProcessInfo {
 /// 复用缓冲区的进程枚举器。
 pub struct ProcessQuery {
     buffer: Vec<u64>,
+    /// 最近一次枚举中 Memory Compression 进程的工作集（字节），没有该进程时为 0。
+    pub compressed_working_set: u64,
     /// 最近一次查询里全部进程的线程数与句柄数之和。
     pub totals: ProcessTotals,
 }
 
 impl Default for ProcessQuery {
     fn default() -> Self {
-        Self { buffer: vec![0; 256 * 1024 / 8], totals: ProcessTotals::default() }
+        Self { buffer: vec![0; 256 * 1024 / 8], compressed_working_set: 0, totals: ProcessTotals::default() }
     }
 }
 
@@ -101,13 +103,12 @@ impl ProcessQuery {
                 continue;
             }
             status.ok()?;
-            let (processes, totals) = self.parse();
-            self.totals = totals;
-            return Ok(processes);
+            return Ok(self.parse());
         }
     }
 
-    fn parse(&self) -> (Vec<RawProcess>, ProcessTotals) {
+    fn parse(&mut self) -> Vec<RawProcess> {
+        self.compressed_working_set = 0;
         let mut out = Vec::with_capacity(512);
         let mut totals = ProcessTotals::default();
         let base = self.buffer.as_ptr().cast::<u8>();
@@ -126,6 +127,9 @@ impl ProcessQuery {
                 };
                 String::from_utf16_lossy(units)
             };
+            if name == "Memory Compression" {
+                self.compressed_working_set = info.working_set_size as u64;
+            }
             out.push(RawProcess {
                 pid,
                 parent_pid: info.inherited_from_unique_process_id as u32,
@@ -141,6 +145,7 @@ impl ProcessQuery {
             }
             offset += info.next_entry_offset as usize;
         }
-        (out, totals)
+        self.totals = totals;
+        out
     }
 }

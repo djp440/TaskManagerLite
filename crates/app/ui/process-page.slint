@@ -1,13 +1,26 @@
 import { ListView, Palette } from "std-widgets.slint";
 import { Theme, Chevron } from "theme.slint";
-import { ProcRow } from "types.slint";
+import { ColumnLayout, ProcRow } from "types.slint";
 
-// 列宽：名称列伸缩，其余固定。
-global Columns {
-    out property <length> pid: 76px;
-    out property <length> cpu: 76px;
-    out property <length> memory: 108px;
-    out property <length> disk: 108px;
+// 列宽：名称列伸缩，其余由用户拖动调整（启动时由设置恢复，默认值与 settings.rs 保持一致）。
+export global Columns {
+    in-out property <length> pid: 76px;
+    in-out property <length> cpu: 76px;
+    in-out property <length> memory: 108px;
+    in-out property <length> disk: 108px;
+    out property <length> default-pid: 76px;
+    out property <length> default-cpu: 76px;
+    out property <length> default-memory: 108px;
+    out property <length> default-disk: 108px;
+    out property <length> min: 48px;
+    out property <length> max: 480px;
+    // 名称列至少保留的宽度；上面的 pid/cpu/... 是用户设定值，实际显示用 `eff`：
+    // 列宽总和超出可用宽度时按比例缩小（算法在 Rust 侧，见 settings.rs 的 `ColumnWidths::fit`），设定值不变。
+    out property <length> name-min: 180px;
+    // 列表可用于各列的宽度，由 ProcessPage 随窗口宽度更新。
+    in-out property <length> available;
+    pure callback fit(length, length, length, length, length, length) -> ColumnLayout;
+    out property <ColumnLayout> eff: self.fit(self.available, self.name-min, self.pid, self.cpu, self.memory, self.disk);
 }
 
 component HeaderCell inherits Rectangle {
@@ -15,7 +28,11 @@ component HeaderCell inherits Rectangle {
     in property <bool> active;
     in property <bool> descending;
     in property <TextHorizontalAlignment> align: right;
+    in property <bool> resizable: true;
     callback clicked;
+    // 拖动左边缘：参数为列宽的增量（向左拖为正）；双击恢复默认宽度。
+    callback resize(length);
+    callback reset();
 
     background: touch.has-hover ? Theme.hover : transparent;
     touch := TouchArea {
@@ -43,6 +60,31 @@ component HeaderCell inherits Rectangle {
             y: (parent.height - self.height) / 2;
             direction: root.descending ? 0 : 1;
             stroke: root.active ? Theme.subtle-text : transparent;
+        }
+    }
+
+    if root.resizable: Rectangle {
+        x: -3px;
+        width: 8px;
+        Rectangle {
+            x: 3px;
+            y: 8px;
+            width: 1px;
+            height: parent.height - 16px;
+            background: grip.has-hover || grip.pressed ? Palette.accent-background : Theme.divider;
+        }
+
+        grip := TouchArea {
+            mouse-cursor: col-resize;
+            moved => {
+                // 列的左边缘会随宽度变化而移动，所以每次用“指针相对按下点的偏移”修正。
+                if self.pressed {
+                    root.resize(self.pressed-x - self.mouse-x);
+                }
+            }
+            double-clicked => {
+                root.reset();
+            }
         }
     }
 }
@@ -155,25 +197,25 @@ component ProcRowView inherits Rectangle {
         }
 
         ValueCell {
-            width: Columns.pid;
+            width: Columns.eff.pid;
             text: root.data.pid;
             heat: 0;
         }
 
         ValueCell {
-            width: Columns.cpu;
+            width: Columns.eff.cpu;
             text: root.data.cpu;
             heat: root.data.cpu-heat;
         }
 
         ValueCell {
-            width: Columns.memory;
+            width: Columns.eff.memory;
             text: root.data.memory;
             heat: root.data.memory-heat;
         }
 
         ValueCell {
-            width: Columns.disk;
+            width: Columns.eff.disk;
             text: root.data.disk;
             heat: root.data.disk-heat;
         }
@@ -192,6 +234,59 @@ export component ProcessPage inherits Rectangle {
     callback end-process();
     callback end-tree();
 
+    // 表头右侧留白；其余宽度交给 Columns 分配。
+    property <length> header-padding: 10px;
+
+    function sync-available() {
+        Columns.available = root.width - root.header-padding;
+    }
+
+    changed width => {
+        root.sync-available();
+    }
+
+    init => {
+        root.sync-available();
+    }
+
+    function column-width(col: int) -> length {
+        col == 1 ? Columns.eff.pid : col == 2 ? Columns.eff.cpu : col == 3 ? Columns.eff.memory : Columns.eff.disk
+    }
+
+    function resize-column(col: int, delta: length) {
+        // 拖动前先把各列当前的有效宽度固化为设定值，避免总和受限时其他列跟着重新缩放。
+        let current = root.column-width(col);
+        let e = Columns.eff;
+        Columns.pid = e.pid;
+        Columns.cpu = e.cpu;
+        Columns.memory = e.memory;
+        Columns.disk = e.disk;
+        let others = Columns.pid + Columns.cpu + Columns.memory + Columns.disk - current;
+        let upper = max(Columns.min, min(Columns.max, Columns.available - Columns.name-min - others));
+        let w = max(Columns.min, min(upper, current + delta));
+        if col == 1 {
+            Columns.pid = w;
+        } else if col == 2 {
+            Columns.cpu = w;
+        } else if col == 3 {
+            Columns.memory = w;
+        } else {
+            Columns.disk = w;
+        }
+    }
+
+    function reset-column(col: int) {
+        if col == 1 {
+            Columns.pid = Columns.default-pid;
+        } else if col == 2 {
+            Columns.cpu = Columns.default-cpu;
+        } else if col == 3 {
+            Columns.memory = Columns.default-memory;
+        } else {
+            Columns.disk = Columns.default-disk;
+        }
+    }
+
     // 键盘移动选中行后，让它保持在可视范围内。
     public function ensure-visible(index: int) {
         if index * Theme.row-height + list.content-y < 0 {
@@ -208,6 +303,7 @@ export component ProcessPage inherits Rectangle {
                 padding-right: 10px;
                 HeaderCell {
                     horizontal-stretch: 1;
+                    resizable: false;
                     text: @tr("名称");
                     align: left;
                     active: root.sort-key == 0;
@@ -218,7 +314,13 @@ export component ProcessPage inherits Rectangle {
                 }
 
                 HeaderCell {
-                    width: Columns.pid;
+                    width: Columns.eff.pid;
+                    resize(d) => {
+                        root.resize-column(1, d);
+                    }
+                    reset => {
+                        root.reset-column(1);
+                    }
                     text: @tr("PID");
                     active: root.sort-key == 1;
                     descending: root.sort-descending;
@@ -228,7 +330,13 @@ export component ProcessPage inherits Rectangle {
                 }
 
                 HeaderCell {
-                    width: Columns.cpu;
+                    width: Columns.eff.cpu;
+                    resize(d) => {
+                        root.resize-column(2, d);
+                    }
+                    reset => {
+                        root.reset-column(2);
+                    }
                     text: @tr("CPU");
                     active: root.sort-key == 2;
                     descending: root.sort-descending;
@@ -238,7 +346,13 @@ export component ProcessPage inherits Rectangle {
                 }
 
                 HeaderCell {
-                    width: Columns.memory;
+                    width: Columns.eff.memory;
+                    resize(d) => {
+                        root.resize-column(3, d);
+                    }
+                    reset => {
+                        root.reset-column(3);
+                    }
                     text: @tr("内存");
                     active: root.sort-key == 3;
                     descending: root.sort-descending;
@@ -248,7 +362,13 @@ export component ProcessPage inherits Rectangle {
                 }
 
                 HeaderCell {
-                    width: Columns.disk;
+                    width: Columns.eff.disk;
+                    resize(d) => {
+                        root.resize-column(4, d);
+                    }
+                    reset => {
+                        root.reset-column(4);
+                    }
                     text: @tr("磁盘");
                     active: root.sort-key == 4;
                     descending: root.sort-descending;

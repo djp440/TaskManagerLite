@@ -6,17 +6,19 @@ use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use tml_core::{
-    EndError, ProcessKey, ProcessSnapshot, Sample, SortKey, SystemMetrics, ViewOptions, ViewRow, build_view,
-    end_process, tree_from,
+    EndError, MemoryHardware, MemoryStatus, ProcessKey, ProcessSnapshot, Sample, SortKey, SystemMetrics, ViewOptions,
+    ViewRow, build_view, end_process, tree_from,
 };
 
 mod cpu;
+mod memory;
 mod resources;
 
 use crate::format;
 use crate::logging::Log;
 use crate::sampling::{Command, SamplerHandle};
-use crate::{AppWindow, CpuData, ProcRow, Resource, ResourceKind};
+use crate::settings::{ColumnWidths, Settings, Store};
+use crate::{AppWindow, ColumnLayout, Columns, CpuData, ProcRow, Resource, ResourceKind, placement};
 use cpu::CpuState;
 use resources::{Edit, Instance, ResourceSet};
 
@@ -36,6 +38,10 @@ pub struct Controller {
     sampler: SamplerHandle,
     state: RefCell<State>,
     pub log: RefCell<Log>,
+    /// 启动时读到的设置；保存时在它的基础上更新，未识别的字段因此得以保留。
+    settings: RefCell<Settings>,
+    /// 开发模式（`--screenshot`、`--measure-startup`）下为 `None`，不读写用户设置。
+    store: Option<Store>,
 }
 
 #[derive(Default)]
@@ -49,6 +55,9 @@ struct State {
     /// CPU 详情：每个逻辑处理器的历史与基本信息。
     cpu: CpuState,
     system: SystemMetrics,
+    memory: MemoryStatus,
+    /// 内存硬件信息只读取一次，首个快照之后才有。
+    memory_hardware: Option<MemoryHardware>,
     /// 采样中断后，下一个点前需要先插入断点。
     gap: bool,
     paused: bool,
@@ -79,14 +88,29 @@ fn sort_index(k: SortKey) -> i32 {
 }
 
 impl Controller {
-    pub fn new(ui: &AppWindow, sampler: SamplerHandle, log: Log) -> Rc<Self> {
+    pub fn new(ui: &AppWindow, sampler: SamplerHandle, log: Log, settings: Settings, store: Option<Store>) -> Rc<Self> {
         let rows = Rc::new(VecModel::default());
         let set = ResourceSet::new(resources::summary_instances());
         let resources = Rc::new(VecModel::from(set.instances().iter().map(Self::resource_row).collect::<Vec<_>>()));
         ui.set_rows(ModelRc::from(rows.clone()));
         ui.set_resources(ModelRc::from(resources.clone()));
         ui.set_elevated(tml_core::is_elevated());
-        let state = State { visible: true, resources: set, ..Default::default() };
+        let mut state = State { visible: true, resources: set, ..Default::default() };
+        state.opts.sort_key = settings.sort_key;
+        state.opts.descending = settings.descending;
+        state.opts.tree = settings.tree;
+        ui.set_tree_mode(settings.tree);
+        ui.set_page(settings.page);
+        let cols = ui.global::<Columns>();
+        cols.set_pid(settings.columns.pid);
+        cols.set_cpu(settings.columns.cpu);
+        cols.set_memory(settings.columns.memory);
+        cols.set_disk(settings.columns.disk);
+        // 列宽总和超出可用宽度时的有效列宽（保存值不变，窗口放大后自然恢复）。
+        cols.on_fit(|available, name_min, pid, cpu, memory, disk| {
+            let w = ColumnWidths { pid, cpu, memory, disk }.fit(available, name_min);
+            ColumnLayout { pid: w.pid, cpu: w.cpu, memory: w.memory, disk: w.disk }
+        });
         let c = Rc::new(Self {
             ui: ui.as_weak(),
             rows,
@@ -94,10 +118,22 @@ impl Controller {
             sampler,
             state: RefCell::new(state),
             log: RefCell::new(log),
+            settings: RefCell::new(settings.clone()),
+            store,
         });
+        // 恢复上次选中的资源实例；实例暂时不存在时先用 CPU，实例出现后自动切回。
+        let restored = c.state.borrow_mut().resources.restore(&settings.resource);
         c.sync_selection(&c.state.borrow());
         c.state.borrow().cpu.attach(ui);
+        if !restored {
+            c.log.borrow_mut().line(format!("设置中的资源 {} 暂不存在，待其出现后恢复", settings.resource));
+        }
         c.bind(ui);
+        // 默认的 1 秒与采样线程的初始值一致，无需通知。
+        if settings.interval_index != 1 {
+            ui.set_interval_index(settings.interval_index);
+            c.set_interval(settings.interval_index);
+        }
         c
     }
 
@@ -127,7 +163,11 @@ impl Controller {
     /// 选中指定实例（界面点击，或启动时恢复上次选中的资源）。实例不存在时保持原选中项。
     pub fn select_resource(&self, id: &str) -> bool {
         let ok = self.state.borrow_mut().resources.select(id);
-        self.sync_selection(&self.state.borrow());
+        let s = self.state.borrow();
+        self.sync_selection(&s);
+        if s.first_data {
+            self.update_resources(&s, Instant::now());
+        }
         ok
     }
 
@@ -209,22 +249,64 @@ impl Controller {
         let c = Rc::downgrade(self);
         ui.on_interval_changed(move |i| {
             if let Some(c) = c.upgrade() {
-                let interval = match i {
-                    0 => Some(Duration::from_millis(500)),
-                    1 => Some(Duration::from_secs(1)),
-                    2 => Some(Duration::from_secs(2)),
-                    _ => None,
-                };
-                {
-                    let mut s = c.state.borrow_mut();
-                    if interval.is_none() || s.paused {
-                        s.gap = true;
-                    }
-                    s.paused = interval.is_none();
-                }
-                c.sampler.send(Command::Interval(interval));
+                c.set_interval(i);
             }
         });
+    }
+
+    fn set_interval(&self, index: i32) {
+        let interval = match index {
+            0 => Some(Duration::from_millis(500)),
+            1 => Some(Duration::from_secs(1)),
+            2 => Some(Duration::from_secs(2)),
+            _ => None,
+        };
+        {
+            let mut s = self.state.borrow_mut();
+            if interval.is_none() || s.paused {
+                s.gap = true;
+            }
+            s.paused = interval.is_none();
+        }
+        self.sampler.send(Command::Interval(interval));
+    }
+
+    /// 记录最近一次的普通（非最大化、非最小化）窗口矩形，由定时器周期调用。
+    pub fn track_window(&self) {
+        if let Some(ui) = self.ui.upgrade() {
+            placement::capture(&ui, &mut self.settings.borrow_mut());
+        }
+    }
+
+    /// 收集当前状态并写入设置文件（退出前、以管理员身份重启前调用）。
+    pub fn save_settings(&self) {
+        let (Some(store), Some(ui)) = (&self.store, self.ui.upgrade()) else { return };
+        let mut settings = self.settings.borrow_mut();
+        placement::capture(&ui, &mut settings);
+        {
+            let s = self.state.borrow();
+            settings.sort_key = s.opts.sort_key;
+            settings.descending = s.opts.descending;
+            settings.tree = s.opts.tree;
+            settings.resource = s.resources.selected_for_save().to_owned();
+        }
+        settings.interval_index = ui.get_interval_index();
+        settings.page = ui.get_page();
+        let cols = ui.global::<Columns>();
+        settings.columns = ColumnWidths {
+            pid: cols.get_pid(),
+            cpu: cols.get_cpu(),
+            memory: cols.get_memory(),
+            disk: cols.get_disk(),
+        }
+        .clamped();
+        let result = store.save(&settings);
+        drop(settings);
+        let mut log = self.log.borrow_mut();
+        match result {
+            Ok(()) => log.line(format!("设置已保存 {}", store.path().display())),
+            Err(e) => log.line(format!("设置保存失败 {e}")),
+        }
     }
 
     /// 由定时器轮询窗口是否最小化。
@@ -241,7 +323,7 @@ impl Controller {
 
     /// 截图模式：逻辑处理器网格改用演示曲线。
     pub fn use_demo_cpu_history(&self) {
-        self.state.borrow_mut().cpu.use_demo_history(Instant::now());
+        self.state.borrow_mut().cpu.use_demo_history();
     }
 
     pub fn has_first_data(&self) -> bool {
@@ -269,6 +351,10 @@ impl Controller {
             s.cpu.record(now, sample.cpu, with_history);
             s.snapshot = sample.snapshot;
             s.system = m;
+            s.memory = sample.memory;
+            if sample.memory_hardware.is_some() {
+                s.memory_hardware = sample.memory_hardware;
+            }
             s.first_data = true;
             self.update_resources(&s, now);
         }
@@ -289,6 +375,9 @@ impl Controller {
         let cpu = format::percent(m.cpu_usage);
         let gib = |b: u64| b as f64 / 1024.0 / 1024.0 / 1024.0;
         let mem = format!("{:.1}/{:.1} GB", gib(m.memory_used), gib(m.memory_total));
+        // 内存详情只在选中内存卡片时整形；切换选中项时 select_resource 会立即刷新。
+        let mem_text = (s.resources.selected() == resources::MEMORY)
+            .then(|| memory::describe(&s.memory, s.memory_hardware.as_ref()));
         let rows: Vec<Resource> = s
             .resources
             .instances()
@@ -297,18 +386,13 @@ impl Controller {
                 let history = s.resources.history(&inst.id);
                 // (纵轴顶端取值, 卡片摘要, 纵轴标注, 统计项取值)
                 let (scale, value, scale_label, stats) = match inst.kind {
-                    ResourceKind::Cpu => {
-                        (100.0, s.cpu.card_value(&cpu), "100%".to_string(), s.cpu.stats(&cpu, s.snapshot.processes.len()))
-                    }
+                    // CPU、内存详情页的统计项在各自的数据里（CpuData / MemoryView），卡片只需要摘要。
+                    ResourceKind::Cpu => (100.0, s.cpu.card_value(&cpu), "100%".to_string(), vec![]),
                     ResourceKind::Memory => (
                         m.memory_total.max(1) as f64,
                         format!("{mem} ({mem_pct:.0}%)"),
                         format::gigabytes(m.memory_total),
-                        vec![
-                            format::gigabytes(m.memory_used),
-                            format::gigabytes(m.memory_total - m.memory_used),
-                            format::gigabytes(m.memory_total),
-                        ],
+                        vec![],
                     ),
                     ResourceKind::Disk => (
                         100.0,
@@ -328,8 +412,12 @@ impl Controller {
                 };
                 let (line, area) = history.paths(now, scale, detail);
                 let (mini_line, mini_area) = history.paths(now, scale, Self::MINI);
+                let detail = match (&mem_text, inst.kind) {
+                    (Some(t), ResourceKind::Memory) => t.header.clone(),
+                    _ => String::new(),
+                };
                 Resource {
-                    detail: if inst.kind == ResourceKind::Cpu { s.cpu.model_name() } else { String::new() }.into(),
+                    detail: if inst.kind == ResourceKind::Cpu { s.cpu.model_name() } else { detail }.into(),
                     value: value.into(),
                     line: line.into(),
                     area: area.into(),
@@ -342,7 +430,10 @@ impl Controller {
             })
             .collect();
         self.apply_resources(s, rows);
-        s.cpu.refresh(&ui, now);
+        s.cpu.refresh(&ui, now, s.snapshot.processes.len(), &cpu);
+        if let Some(t) = mem_text {
+            ui.set_memory_view(memory::view(t));
+        }
         ui.set_process_count(s.snapshot.processes.len() as i32);
         ui.set_cpu_summary(cpu.into());
         ui.set_memory_summary(format!("{mem_pct:.0}%").into());
@@ -507,6 +598,8 @@ impl Controller {
     }
 
     fn elevate(&self) {
+        // 新进程会立刻读取设置，先保存。
+        self.save_settings();
         if tml_core::relaunch_elevated() {
             let _ = slint::quit_event_loop();
         } else if let Some(ui) = self.ui.upgrade() {

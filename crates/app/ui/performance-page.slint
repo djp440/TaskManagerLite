@@ -1,7 +1,8 @@
 import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Resource, ResourceKind, ResourceTint } from "types.slint";
-import { CpuBottom, CpuCoreGrid, CpuData, CpuModeSwitch } from "cpu-detail.slint";
+import { MemoryDetail, MemoryView } from "memory-detail.slint";
+import { CpuCoreGrid, CpuData, CpuDetail, CpuModeSwitch } from "cpu-detail.slint";
 
 // 资源曲线：路径由 Rust 按图表的实际尺寸（逻辑像素）生成。
 component Graph inherits Rectangle {
@@ -99,6 +100,8 @@ export component PerformancePage inherits Rectangle {
     in property <string> selected-resource;
     in property <int> selected-index;
     callback resource-selected(string);
+    // 内存详情页的数据（kind == memory 时使用）。
+    in property <MemoryView> memory;
     out property <length> graph-width: detail-graph.width;
     out property <length> graph-height: detail-graph.height;
     callback graph-resized();
@@ -197,7 +200,7 @@ export component PerformancePage inherits Rectangle {
 
                 Rectangle {
                     vertical-stretch: 1;
-                    min-height: 160px;
+                    min-height: 80px;
                     border-width: root.core-grid ? 0px : 1px;
                     border-color: root.tint.with-alpha(0.55);
                     detail-graph := Graph {
@@ -228,18 +231,18 @@ export component PerformancePage inherits Rectangle {
 
                 // 详情区目前对所有类型通用；需要按类型定制时（CPU、内存等），
                 // 在这里按 root.data.kind 分支，并让通用统计项排除这些类型。
-                if root.data.kind == ResourceKind.cpu: CpuBottom {
-                    labels: root.data.stat-labels;
-                    values: root.data.stats;
+                if root.data.kind == ResourceKind.memory: MemoryDetail {
+                    view: root.memory;
+                    tint: root.tint;
                 }
 
-                HorizontalLayout {
-                    // CPU 页没有通用统计项，这里是空布局，不能抢走曲线图的空间。
-                    vertical-stretch: 0;
+                if root.data.kind == ResourceKind.cpu: CpuDetail { }
+
+                if root.data.kind != ResourceKind.memory && root.data.kind != ResourceKind.cpu: HorizontalLayout {
                     padding-top: 8px;
                     spacing: 40px;
                     alignment: start;
-                    for value[i] in root.data.kind == ResourceKind.cpu ? [] : root.data.stats: VerticalLayout {
+                    for value[i] in root.data.stats: VerticalLayout {
                         spacing: 2px;
                         Text {
                             text: root.data.stat-labels[i];
