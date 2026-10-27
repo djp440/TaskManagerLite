@@ -1,0 +1,314 @@
+//! 性能页资源卡片的实例列表：卡片元数据、按实例 id 保存的曲线历史、选中项保持与回退。
+//!
+//! 这里只有纯逻辑，不依赖界面对象，可直接单测。磁盘、网卡、GPU 等设备增减时，
+//! 只需让 `ResourceSet::update` 收到新的实例列表即可。
+
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
+use crate::format::History;
+use crate::{ResourceKind, ResourceTint};
+
+/// 汇总卡片的实例 id。设置里持久化“性能页选中的资源”时保存的就是实例 id。
+pub const CPU: &str = "cpu";
+pub const MEMORY: &str = "memory";
+pub const DISK: &str = "disk";
+pub const NETWORK: &str = "network";
+
+/// 一张资源卡片的稳定描述。`id` 在设备存续期间不变（不能用列表下标）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Instance {
+    pub id: String,
+    pub kind: ResourceKind,
+    pub tint: ResourceTint,
+    pub title: String,
+    /// 曲线图上方的说明文字。
+    pub caption: String,
+    /// 详情页底部各统计项的标签，顺序与取值一致。
+    pub stat_labels: Vec<String>,
+}
+
+impl Instance {
+    fn new(id: &str, kind: ResourceKind, tint: ResourceTint, title: &str, caption: &str, labels: &[&str]) -> Self {
+        Self {
+            id: id.into(),
+            kind,
+            tint,
+            title: title.into(),
+            caption: caption.into(),
+            stat_labels: labels.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
+/// 当前的资源实例：CPU、内存、磁盘、网络各一张汇总卡片。
+/// 后续按物理磁盘、网卡、GPU 拆分时，在这里按设备枚举结果生成。
+pub fn summary_instances() -> Vec<Instance> {
+    vec![
+        Instance::new(CPU, ResourceKind::Cpu, ResourceTint::Cpu, "CPU", "% 利用率", &["利用率", "逻辑处理器", "进程数"]),
+        Instance::new(MEMORY, ResourceKind::Memory, ResourceTint::Memory, "内存", "内存使用量", &[
+            "使用中", "可用", "总量",
+        ]),
+        Instance::new(DISK, ResourceKind::Disk, ResourceTint::Disk, "磁盘", "% 活动时间", &[
+            "活动时间",
+            "读取速度",
+            "写入速度",
+        ]),
+        Instance::new(NETWORK, ResourceKind::Network, ResourceTint::Network, "网络", "吞吐量（接收 + 发送）", &[
+            "接收", "发送",
+        ]),
+    ]
+}
+
+/// 把界面模型从旧 id 序列变成新 id 序列所需的行编辑，按顺序依次执行。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edit {
+    /// 删除第 i 行。
+    Remove(usize),
+    /// 在第 i 行位置插入一行新数据。
+    Insert(usize),
+}
+
+/// 计算最少的行删除、插入，使模型保持已有行的顺序和滚动状态。
+/// 位置变化的 id 视为先删后插；调用方随后会用最新数据覆盖每一行。
+pub fn diff_ids(old: &[String], new: &[String]) -> Vec<Edit> {
+    let mut cur: Vec<&String> = old.iter().collect();
+    let mut edits = Vec::new();
+    for (i, id) in new.iter().enumerate() {
+        if cur.get(i) == Some(&id) {
+            continue;
+        }
+        match cur[i.min(cur.len())..].iter().position(|c| *c == id) {
+            Some(offset) => {
+                for _ in 0..offset {
+                    cur.remove(i);
+                    edits.push(Edit::Remove(i));
+                }
+            }
+            None => {
+                cur.insert(i.min(cur.len()), id);
+                edits.push(Edit::Insert(i));
+            }
+        }
+    }
+    while cur.len() > new.len() {
+        cur.pop();
+        edits.push(Edit::Remove(new.len()));
+    }
+    edits
+}
+
+/// 资源实例列表与按实例 id 保存的状态。
+#[derive(Default)]
+pub struct ResourceSet {
+    instances: Vec<Instance>,
+    histories: HashMap<String, History>,
+    selected: String,
+}
+
+impl ResourceSet {
+    pub fn new(instances: Vec<Instance>) -> Self {
+        let mut set = Self { selected: CPU.into(), ..Default::default() };
+        set.update(instances);
+        set
+    }
+
+    pub fn instances(&self) -> &[Instance] {
+        &self.instances
+    }
+
+    pub fn ids(&self) -> Vec<String> {
+        self.instances.iter().map(|i| i.id.clone()).collect()
+    }
+
+    /// 用最新的实例列表更新：新增实例的历史从空开始，消失实例的历史被清理；
+    /// 选中的实例消失时回退到 CPU。
+    pub fn update(&mut self, instances: Vec<Instance>) {
+        let alive: HashSet<&str> = instances.iter().map(|i| i.id.as_str()).collect();
+        self.histories.retain(|id, _| alive.contains(id.as_str()));
+        for i in &instances {
+            self.histories.entry(i.id.clone()).or_default();
+        }
+        if !alive.contains(self.selected.as_str()) {
+            self.selected = CPU.into();
+        }
+        self.instances = instances;
+    }
+
+    pub fn selected(&self) -> &str {
+        &self.selected
+    }
+
+    /// 选中项在当前列表中的下标；列表里没有时为 0。
+    pub fn selected_index(&self) -> usize {
+        self.instances.iter().position(|i| i.id == self.selected).unwrap_or(0)
+    }
+
+    /// 选中指定实例。实例不存在时保持原选中项并返回 false。
+    pub fn select(&mut self, id: &str) -> bool {
+        let exists = self.instances.iter().any(|i| i.id == id);
+        if exists {
+            self.selected = id.into();
+        }
+        exists
+    }
+
+    /// 当前实例的曲线历史。`id` 必须来自 `instances()`。
+    pub fn history(&self, id: &str) -> &History {
+        &self.histories[id]
+    }
+
+    pub fn push(&mut self, id: &str, at: Instant, value: Option<f64>) {
+        if let Some(h) = self.histories.get_mut(id) {
+            h.push(at, value);
+        }
+    }
+
+    /// 采样中断：所有曲线在此断开。
+    pub fn push_gap(&mut self, at: Instant) {
+        for h in self.histories.values_mut() {
+            h.push(at, None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inst(id: &str) -> Instance {
+        Instance::new(id, ResourceKind::Disk, ResourceTint::Disk, id, "", &[])
+    }
+
+    fn insts(ids: &[&str]) -> Vec<Instance> {
+        ids.iter().map(|id| inst(id)).collect()
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 模拟界面模型：把编辑应用到 old 上，插入的行用新 id 占位。
+    fn apply(old: &[&str], new: &[&str]) -> Vec<String> {
+        let mut rows = ids(old);
+        for e in diff_ids(&ids(old), &ids(new)) {
+            match e {
+                Edit::Remove(i) => {
+                    rows.remove(i);
+                }
+                Edit::Insert(i) => rows.insert(i, new[i].to_string()),
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn diff_unchanged_is_empty() {
+        assert!(diff_ids(&ids(&["cpu", "memory"]), &ids(&["cpu", "memory"])).is_empty());
+    }
+
+    #[test]
+    fn diff_append_and_insert() {
+        assert_eq!(diff_ids(&ids(&["cpu"]), &ids(&["cpu", "disk0"])), vec![Edit::Insert(1)]);
+        assert_eq!(diff_ids(&ids(&["cpu", "net"]), &ids(&["cpu", "disk0", "net"])), vec![Edit::Insert(1)]);
+    }
+
+    #[test]
+    fn diff_remove_keeps_other_rows() {
+        assert_eq!(diff_ids(&ids(&["cpu", "disk0", "net"]), &ids(&["cpu", "net"])), vec![Edit::Remove(1)]);
+        assert_eq!(diff_ids(&ids(&["cpu", "disk0"]), &ids(&["cpu"])), vec![Edit::Remove(1)]);
+    }
+
+    #[test]
+    fn diff_result_matches_target() {
+        let cases: &[(&[&str], &[&str])] = &[
+            (&[], &["a", "b"]),
+            (&["a", "b"], &[]),
+            (&["a", "b", "c"], &["c", "a"]),
+            (&["a", "b", "c"], &["c", "b", "a"]),
+            (&["a", "b"], &["x", "a", "y", "b", "z"]),
+            (&["a", "b", "c", "d"], &["b", "d"]),
+        ];
+        for (old, new) in cases {
+            assert_eq!(apply(old, new), ids(new), "{old:?} -> {new:?}");
+        }
+    }
+
+    #[test]
+    fn summary_has_four_stable_ids() {
+        let set = ResourceSet::new(summary_instances());
+        assert_eq!(set.ids(), ids(&["cpu", "memory", "disk", "network"]));
+        assert_eq!(set.selected(), "cpu");
+        assert_eq!(set.selected_index(), 0);
+    }
+
+    #[test]
+    fn selection_follows_id_not_index() {
+        let mut set = ResourceSet::new(insts(&["cpu", "memory", "disk0", "net0"]));
+        assert!(set.select("net0"));
+        assert_eq!(set.selected_index(), 3);
+        // 前面新增一块磁盘，选中项仍是 net0，下标随之变化。
+        set.update(insts(&["cpu", "memory", "disk0", "disk1", "net0"]));
+        assert_eq!(set.selected(), "net0");
+        assert_eq!(set.selected_index(), 4);
+        // 前面的磁盘消失，选中项仍保持。
+        set.update(insts(&["cpu", "memory", "disk1", "net0"]));
+        assert_eq!(set.selected(), "net0");
+        assert_eq!(set.selected_index(), 3);
+    }
+
+    #[test]
+    fn selection_falls_back_to_cpu_when_instance_disappears() {
+        let mut set = ResourceSet::new(insts(&["cpu", "memory", "disk0", "disk1"]));
+        assert!(set.select("disk1"));
+        set.update(insts(&["cpu", "memory", "disk0"]));
+        assert_eq!(set.selected(), "cpu");
+        assert_eq!(set.selected_index(), 0);
+        // 之后设备回来，不会自动重新选中。
+        set.update(insts(&["cpu", "memory", "disk0", "disk1"]));
+        assert_eq!(set.selected(), "cpu");
+    }
+
+    #[test]
+    fn select_unknown_keeps_current() {
+        let mut set = ResourceSet::new(summary_instances());
+        assert!(set.select("memory"));
+        assert!(!set.select("disk9"));
+        assert_eq!(set.selected(), "memory");
+    }
+
+    #[test]
+    fn history_is_per_instance_new_starts_empty_removed_is_cleaned() {
+        let now = Instant::now();
+        let mut set = ResourceSet::new(insts(&["cpu", "disk0"]));
+        set.push("cpu", now, Some(10.0));
+        set.push("disk0", now, Some(50.0));
+        assert_eq!(set.history("disk0").max(), 50.0);
+
+        // 新增实例从空开始，已有实例的历史不受影响。
+        set.update(insts(&["cpu", "disk0", "disk1"]));
+        assert_eq!(set.history("disk1").max(), 0.0);
+        assert_eq!(set.history("disk0").max(), 50.0);
+        assert_eq!(set.history("cpu").max(), 10.0);
+
+        // 移除时清理，之后同 id 再出现也是空历史。
+        set.push("disk1", now, Some(70.0));
+        set.update(insts(&["cpu", "disk0"]));
+        assert_eq!(set.histories.len(), 2);
+        assert!(!set.histories.contains_key("disk1"));
+        set.update(insts(&["cpu", "disk0", "disk1"]));
+        assert_eq!(set.history("disk1").max(), 0.0);
+    }
+
+    #[test]
+    fn gap_applies_to_all_histories() {
+        let now = Instant::now();
+        let mut set = ResourceSet::new(insts(&["cpu", "disk0"]));
+        set.push("cpu", now, Some(1.0));
+        set.push_gap(now);
+        set.push("cpu", now, Some(2.0));
+        // 断点把曲线分成两段：折线里有两个 M。
+        let (line, _) = set.history("cpu").paths(now, 100.0, (100.0, 50.0));
+        assert_eq!(line.matches('M').count(), 2);
+    }
+}

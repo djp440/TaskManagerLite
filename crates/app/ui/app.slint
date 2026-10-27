@@ -1,10 +1,10 @@
 import { Button, CheckBox, ComboBox, LineEdit, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { ProcRow, Resource } from "types.slint";
+import { ProcRow, Resource, ResourceKind, ResourceTint } from "types.slint";
 import { ProcessPage } from "process-page.slint";
 import { PerformancePage } from "performance-page.slint";
 
-export { ProcRow, Resource }
+export { ProcRow, Resource, ResourceKind, ResourceTint }
 
 component Tab inherits Rectangle {
     in property <string> text;
@@ -133,7 +133,7 @@ export component AppWindow inherits Window {
     in-out property <int> page: 0;
     in-out property <int> interval-index: 1;
     in property <bool> elevated;
-    in property <[Resource]> resources: [{}, {}, {}, {}];
+    in property <[Resource]> resources;
     in property <int> process-count;
     in property <string> cpu-summary;
     in property <string> memory-summary;
@@ -158,7 +158,10 @@ export component AppWindow inherits Window {
     callback confirm-accepted();
     callback elevate();
     callback graph-resized();
-    in-out property <int> resource-index: 0;
+    // 性能页选中的资源：实例 id 与它在 resources 中的下标，均由 Rust 维护。
+    in property <string> selected-resource: "cpu";
+    in property <int> resource-index: 0;
+    callback resource-selected(string);
     out property <length> graph-width: perf-page.graph-width;
     out property <length> graph-height: perf-page.graph-height;
 
@@ -366,7 +369,11 @@ export component AppWindow inherits Window {
                 perf-page := PerformancePage {
                     visible: root.page == 1;
                     resources: root.resources;
-                    current <=> root.resource-index;
+                    selected-resource: root.selected-resource;
+                    selected-index: root.resource-index;
+                    resource-selected(id) => {
+                        root.resource-selected(id);
+                    }
                     graph-resized => {
                         root.graph-resized();
                     }

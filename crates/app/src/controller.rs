@@ -10,15 +10,13 @@ use tml_core::{
     end_process, tree_from,
 };
 
-use crate::format::{self, History};
+mod resources;
+
+use crate::format;
 use crate::logging::Log;
 use crate::sampling::{Command, SamplerHandle};
-use crate::{AppWindow, ProcRow, Resource};
-
-const CPU: usize = 0;
-const MEMORY: usize = 1;
-const DISK: usize = 2;
-const NETWORK: usize = 3;
+use crate::{AppWindow, ProcRow, Resource, ResourceKind};
+use resources::{Edit, Instance, ResourceSet};
 
 const STATUS_ENDED: i32 = 1;
 const STATUS_DENIED: i32 = 2;
@@ -44,7 +42,8 @@ struct State {
     view: Vec<ViewRow>,
     opts: ViewOptions,
     selected: Option<ProcessKey>,
-    history: [History; 4],
+    /// 性能页的资源实例、曲线历史与选中项。
+    resources: ResourceSet,
     system: SystemMetrics,
     /// 采样中断后，下一个点前需要先插入断点。
     gap: bool,
@@ -78,11 +77,12 @@ fn sort_index(k: SortKey) -> i32 {
 impl Controller {
     pub fn new(ui: &AppWindow, sampler: SamplerHandle, log: Log) -> Rc<Self> {
         let rows = Rc::new(VecModel::default());
-        let resources = Rc::new(VecModel::from(vec![Resource::default(); 4]));
+        let set = ResourceSet::new(resources::summary_instances());
+        let resources = Rc::new(VecModel::from(set.instances().iter().map(Self::resource_row).collect::<Vec<_>>()));
         ui.set_rows(ModelRc::from(rows.clone()));
         ui.set_resources(ModelRc::from(resources.clone()));
         ui.set_elevated(tml_core::is_elevated());
-        let state = State { visible: true, ..Default::default() };
+        let state = State { visible: true, resources: set, ..Default::default() };
         let c = Rc::new(Self {
             ui: ui.as_weak(),
             rows,
@@ -91,8 +91,39 @@ impl Controller {
             state: RefCell::new(state),
             log: RefCell::new(log),
         });
+        c.sync_selection(&c.state.borrow());
         c.bind(ui);
         c
+    }
+
+    /// 只含元数据、数值为空的资源卡片，在首个采样到来前占位。
+    fn resource_row(i: &Instance) -> Resource {
+        Resource {
+            id: i.id.as_str().into(),
+            kind: i.kind,
+            tint: i.tint,
+            title: i.title.as_str().into(),
+            caption: i.caption.as_str().into(),
+            stat_labels: ModelRc::new(VecModel::from(
+                i.stat_labels.iter().map(|l| SharedString::from(l.as_str())).collect::<Vec<_>>(),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// 选中项（实例 id 与下标）同步到界面。
+    fn sync_selection(&self, s: &State) {
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_selected_resource(s.resources.selected().into());
+            ui.set_resource_index(s.resources.selected_index() as i32);
+        }
+    }
+
+    /// 选中指定实例（界面点击，或启动时恢复上次选中的资源）。实例不存在时保持原选中项。
+    pub fn select_resource(&self, id: &str) -> bool {
+        let ok = self.state.borrow_mut().resources.select(id);
+        self.sync_selection(&self.state.borrow());
+        ok
     }
 
     fn bind(self: &Rc<Self>, ui: &AppWindow) {
@@ -110,6 +141,12 @@ impl Controller {
         ui.on_confirm_accepted(with(Controller::confirm));
         ui.on_elevate(with(Controller::elevate));
         ui.on_graph_resized(with(Controller::redraw_graphs));
+        let c = Rc::downgrade(self);
+        ui.on_resource_selected(move |id| {
+            if let Some(c) = c.upgrade() {
+                c.select_resource(&id);
+            }
+        });
 
         let c = Rc::downgrade(self);
         ui.on_select(move |i| {
@@ -205,17 +242,16 @@ impl Controller {
         {
             let mut s = self.state.borrow_mut();
             let m = sample.system;
+            s.resources.update(resources::summary_instances());
             if std::mem::take(&mut s.gap) {
-                for h in &mut s.history {
-                    h.push(now, None);
-                }
+                s.resources.push_gap(now);
             }
             // 首次采样没有基线，CPU、磁盘、网络都是 0，不画进曲线。
             if s.first_data {
-                s.history[CPU].push(now, Some(m.cpu_usage as f64));
-                s.history[MEMORY].push(now, Some(m.memory_used as f64));
-                s.history[DISK].push(now, Some(m.disk_active as f64));
-                s.history[NETWORK].push(now, Some(m.net_recv + m.net_send));
+                s.resources.push(resources::CPU, now, Some(m.cpu_usage as f64));
+                s.resources.push(resources::MEMORY, now, Some(m.memory_used as f64));
+                s.resources.push(resources::DISK, now, Some(m.disk_active as f64));
+                s.resources.push(resources::NETWORK, now, Some(m.net_recv + m.net_send));
             }
             s.snapshot = sample.snapshot;
             s.system = m;
@@ -237,65 +273,86 @@ impl Controller {
         };
         let logical = std::thread::available_parallelism().map_or(0, |n| n.get());
         let mem_pct = if m.memory_total > 0 { m.memory_used as f64 / m.memory_total as f64 * 100.0 } else { 0.0 };
-        let net_scale = format::nice_scale(s.history[NETWORK].max(), 100.0 * 1024.0);
-        let make = |i: usize, scale: f64, value: String, detail_text: String, scale_label: String, stats: Vec<String>| {
-            let (line, area) = s.history[i].paths(now, scale, detail);
-            let (mini_line, mini_area) = s.history[i].paths(now, scale, Self::MINI);
-            Resource {
-                value: value.into(),
-                detail: detail_text.into(),
-                line: line.into(),
-                area: area.into(),
-                mini_line: mini_line.into(),
-                mini_area: mini_area.into(),
-                scale: scale_label.into(),
-                stats: ModelRc::new(VecModel::from(stats.into_iter().map(SharedString::from).collect::<Vec<_>>())),
-            }
-        };
         let cpu = format::percent(m.cpu_usage);
         let gib = |b: u64| b as f64 / 1024.0 / 1024.0 / 1024.0;
         let mem = format!("{:.1}/{:.1} GB", gib(m.memory_used), gib(m.memory_total));
-        let resources = [
-            make(CPU, 100.0, cpu.clone(), String::new(), "100%".into(), vec![
-                cpu.clone(),
-                logical.to_string(),
-                s.snapshot.processes.len().to_string(),
-            ]),
-            make(
-                MEMORY,
-                m.memory_total.max(1) as f64,
-                format!("{mem} ({mem_pct:.0}%)"),
-                String::new(),
-                format::gigabytes(m.memory_total),
-                vec![
-                    format::gigabytes(m.memory_used),
-                    format::gigabytes(m.memory_total - m.memory_used),
-                    format::gigabytes(m.memory_total),
-                ],
-            ),
-            make(
-                DISK,
-                100.0,
-                format::percent(m.disk_active),
-                String::new(),
-                "100%".into(),
-                vec![format::percent(m.disk_active), format::rate(m.disk_read), format::rate(m.disk_write)],
-            ),
-            make(
-                NETWORK,
-                net_scale,
-                format!("↓ {}  ↑ {}", format::rate(m.net_recv), format::rate(m.net_send)),
-                String::new(),
-                format::rate(net_scale),
-                vec![format::rate(m.net_recv), format::rate(m.net_send)],
-            ),
-        ];
-        for (i, r) in resources.into_iter().enumerate() {
-            self.resources.set_row_data(i, r);
-        }
+        let rows: Vec<Resource> = s
+            .resources
+            .instances()
+            .iter()
+            .map(|inst| {
+                let history = s.resources.history(&inst.id);
+                // (纵轴顶端取值, 卡片摘要, 纵轴标注, 统计项取值)
+                let (scale, value, scale_label, stats) = match inst.kind {
+                    ResourceKind::Cpu => (100.0, cpu.clone(), "100%".to_string(), vec![
+                        cpu.clone(),
+                        logical.to_string(),
+                        s.snapshot.processes.len().to_string(),
+                    ]),
+                    ResourceKind::Memory => (
+                        m.memory_total.max(1) as f64,
+                        format!("{mem} ({mem_pct:.0}%)"),
+                        format::gigabytes(m.memory_total),
+                        vec![
+                            format::gigabytes(m.memory_used),
+                            format::gigabytes(m.memory_total - m.memory_used),
+                            format::gigabytes(m.memory_total),
+                        ],
+                    ),
+                    ResourceKind::Disk => (
+                        100.0,
+                        format::percent(m.disk_active),
+                        "100%".to_string(),
+                        vec![format::percent(m.disk_active), format::rate(m.disk_read), format::rate(m.disk_write)],
+                    ),
+                    ResourceKind::Network => {
+                        let scale = format::nice_scale(history.max(), 100.0 * 1024.0);
+                        (
+                            scale,
+                            format!("↓ {}  ↑ {}", format::rate(m.net_recv), format::rate(m.net_send)),
+                            format::rate(scale),
+                            vec![format::rate(m.net_recv), format::rate(m.net_send)],
+                        )
+                    }
+                };
+                let (line, area) = history.paths(now, scale, detail);
+                let (mini_line, mini_area) = history.paths(now, scale, Self::MINI);
+                Resource {
+                    value: value.into(),
+                    line: line.into(),
+                    area: area.into(),
+                    mini_line: mini_line.into(),
+                    mini_area: mini_area.into(),
+                    scale: scale_label.into(),
+                    stats: ModelRc::new(VecModel::from(stats.into_iter().map(SharedString::from).collect::<Vec<_>>())),
+                    ..Self::resource_row(inst)
+                }
+            })
+            .collect();
+        self.apply_resources(s, rows);
         ui.set_process_count(s.snapshot.processes.len() as i32);
         ui.set_cpu_summary(cpu.into());
         ui.set_memory_summary(format!("{mem_pct:.0}%").into());
+    }
+
+    /// 把最新的卡片写入界面模型：先按实例 id 增删行，再逐行更新数据，最后同步选中项。
+    fn apply_resources(&self, s: &State, rows: Vec<Resource>) {
+        let old: Vec<String> = (0..self.resources.row_count())
+            .filter_map(|i| self.resources.row_data(i))
+            .map(|r| r.id.to_string())
+            .collect();
+        for edit in resources::diff_ids(&old, &s.resources.ids()) {
+            match edit {
+                Edit::Remove(i) => {
+                    self.resources.remove(i);
+                }
+                Edit::Insert(i) => self.resources.insert(i, Resource::default()),
+            }
+        }
+        for (i, r) in rows.into_iter().enumerate() {
+            self.resources.set_row_data(i, r);
+        }
+        self.sync_selection(s);
     }
 
     fn redraw_graphs(&self) {
