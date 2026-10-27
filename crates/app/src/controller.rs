@@ -1,13 +1,14 @@
 //! 界面线程上的状态与交互逻辑。
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use tml_core::{
-    EndError, ProcessKey, ProcessSnapshot, Sample, SortKey, SystemMetrics, ViewOptions, ViewRow, build_view,
-    end_process, tree_from,
+    EndError, Group, GroupHeader, ProcessKey, ProcessSnapshot, Sample, SortKey, SystemMetrics, ViewMode,
+    ViewOptions, ViewRow, build_group_view, build_view, end_process, tree_from,
 };
 
 mod resources;
@@ -44,6 +45,8 @@ pub struct Controller {
 #[derive(Default)]
 struct State {
     snapshot: ProcessSnapshot,
+    /// 应用进程的 PID；采样线程只在分组视图下枚举窗口，其余时候为 `None`。
+    app_pids: Option<HashSet<u32>>,
     view: Vec<ViewRow>,
     opts: ViewOptions,
     selected: Option<ProcessKey>,
@@ -69,6 +72,30 @@ fn sort_key(i: i32) -> SortKey {
     }
 }
 
+fn view_mode(i: i32) -> ViewMode {
+    match i {
+        1 => ViewMode::Tree,
+        2 => ViewMode::Group,
+        _ => ViewMode::Flat,
+    }
+}
+
+fn view_mode_index(m: ViewMode) -> i32 {
+    match m {
+        ViewMode::Flat => 0,
+        ViewMode::Tree => 1,
+        ViewMode::Group => 2,
+    }
+}
+
+/// 分组标题行上显示的文字。
+fn group_title(h: GroupHeader) -> String {
+    match h.group {
+        Group::Apps => format!("应用 ({})", h.count),
+        Group::Background => format!("后台进程 ({})", h.count),
+    }
+}
+
 fn sort_index(k: SortKey) -> i32 {
     match k {
         SortKey::Name => 0,
@@ -90,8 +117,8 @@ impl Controller {
         let mut state = State { visible: true, resources: set, ..Default::default() };
         state.opts.sort_key = settings.sort_key;
         state.opts.descending = settings.descending;
-        state.opts.tree = settings.tree;
-        ui.set_tree_mode(settings.tree);
+        state.opts.mode = settings.view;
+        ui.set_view_mode(view_mode_index(settings.view));
         ui.set_page(settings.page);
         let cols = ui.global::<Columns>();
         cols.set_pid(settings.columns.pid);
@@ -184,7 +211,10 @@ impl Controller {
         ui.on_select(move |i| {
             if let Some(c) = c.upgrade() {
                 let mut s = c.state.borrow_mut();
-                s.selected = s.view.get(i as usize).map(|r| s.snapshot.processes[r.index].key);
+                // 分组标题行不可选中，忽略。
+                if let Some(pi) = s.view.get(i as usize).and_then(ViewRow::process) {
+                    s.selected = Some(s.snapshot.processes[pi].key);
+                }
             }
         });
         let c = Rc::downgrade(self);
@@ -209,10 +239,12 @@ impl Controller {
             if let Some(c) = c.upgrade() {
                 {
                     let mut s = c.state.borrow_mut();
-                    if let Some(key) = s.view.get(i as usize).map(|r| s.snapshot.processes[r.index].key)
-                        && !s.opts.collapsed.remove(&key)
-                    {
-                        s.opts.collapsed.insert(key);
+                    if let Some(key) = s.view.get(i as usize).and_then(ViewRow::process).map(|pi| s.snapshot.processes[pi].key) {
+                        // 树形默认展开，记录折叠项；分组默认折叠，记录展开项。
+                        let set = if s.opts.mode == ViewMode::Group { &mut s.opts.expanded } else { &mut s.opts.collapsed };
+                        if !set.remove(&key) {
+                            set.insert(key);
+                        }
                     }
                 }
                 c.refresh_rows();
@@ -226,10 +258,9 @@ impl Controller {
             }
         });
         let c = Rc::downgrade(self);
-        ui.on_tree_changed(move |tree| {
+        ui.on_view_changed(move |mode| {
             if let Some(c) = c.upgrade() {
-                c.state.borrow_mut().opts.tree = tree;
-                c.refresh_rows();
+                c.set_view_mode(view_mode(mode));
             }
         });
         let c = Rc::downgrade(self);
@@ -238,6 +269,23 @@ impl Controller {
                 c.set_interval(i);
             }
         });
+    }
+
+    /// 切换视图模式。分组视图需要采样线程枚举窗口：切到分组时通知它并等下一个快照带着应用进程回来再刷新列表。
+    fn set_view_mode(&self, mode: ViewMode) {
+        let was_group = {
+            let mut s = self.state.borrow_mut();
+            let was = s.opts.mode == ViewMode::Group;
+            s.opts.mode = mode;
+            if mode != ViewMode::Group {
+                s.app_pids = None;
+            }
+            was
+        };
+        if (mode == ViewMode::Group) != was_group {
+            self.sampler.send(Command::Apps(mode == ViewMode::Group));
+        }
+        self.refresh_rows();
     }
 
     fn set_interval(&self, index: i32) {
@@ -273,7 +321,7 @@ impl Controller {
             let s = self.state.borrow();
             settings.sort_key = s.opts.sort_key;
             settings.descending = s.opts.descending;
-            settings.tree = s.opts.tree;
+            settings.view = s.opts.mode;
             settings.resource = s.resources.selected_for_save().to_owned();
         }
         settings.interval_index = ui.get_interval_index();
@@ -328,6 +376,7 @@ impl Controller {
                 s.resources.push(resources::NETWORK, now, Some(m.net_recv + m.net_send));
             }
             s.snapshot = sample.snapshot;
+            s.app_pids = sample.app_pids;
             s.system = m;
             s.first_data = true;
             self.update_resources(&s, now);
@@ -440,7 +489,12 @@ impl Controller {
     fn refresh_rows(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
         let mut s = self.state.borrow_mut();
-        s.view = build_view(&s.snapshot, &s.opts);
+        s.view = match (&s.app_pids, s.opts.mode) {
+            (Some(apps), ViewMode::Group) => build_group_view(&s.snapshot, apps, &s.opts),
+            // 刚切到分组、带窗口信息的快照还没到：保持现有列表，快照一到就会刷新。
+            (None, ViewMode::Group) => return,
+            _ => build_view(&s.snapshot, &s.opts),
+        };
         let procs = &s.snapshot.processes;
         let mut selected_index = -1;
         let rows: Vec<ProcRow> = s
@@ -448,6 +502,9 @@ impl Controller {
             .iter()
             .enumerate()
             .map(|(i, r)| {
+                if let Some(h) = r.header {
+                    return ProcRow { name: group_title(h).into(), header: true, ..Default::default() };
+                }
                 let p = &procs[r.index];
                 if Some(p.key) == s.selected {
                     selected_index = i as i32;
@@ -465,6 +522,7 @@ impl Controller {
                     has_children: r.has_children,
                     expanded: r.expanded,
                     critical: p.critical,
+                    header: false,
                 }
             })
             .collect();

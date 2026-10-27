@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use slint::platform::{PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, LogicalSize, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
+use slint::platform::{Key, PointerEventButton, WindowEvent};
+use slint::{ComponentHandle, LogicalPosition, LogicalSize, Model, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
 
 use crate::{AppWindow, Columns};
 
@@ -15,14 +15,14 @@ type Step = (&'static str, fn(&AppWindow));
 const STEPS: &[Step] = &[
     ("01-进程列表-深色", |_| {}),
     ("02-树形与搜索-深色", |ui| {
-        ui.set_tree_mode(true);
-        ui.invoke_tree_changed(true);
+        ui.set_view_mode(1);
+        ui.invoke_view_changed(1);
         ui.set_filter("svchost".into());
         ui.invoke_filter_edited("svchost".into());
     }),
     ("03-性能CPU-深色", |ui| {
-        ui.set_tree_mode(false);
-        ui.invoke_tree_changed(false);
+        ui.set_view_mode(0);
+        ui.invoke_view_changed(0);
         ui.set_filter("".into());
         ui.invoke_filter_edited("".into());
         ui.set_page(1);
@@ -72,7 +72,56 @@ const STEPS: &[Step] = &[
     ("11-窗口放大后列宽恢复-深色", |ui| {
         ui.window().set_size(LogicalSize::new(2000.0, 700.0));
     }),
+    // 分组视图：应用 / 后台进程两组，各有标题行与数量。
+    ("12-分组视图-深色", |ui| {
+        ui.window().set_size(LogicalSize::new(1040.0, 700.0));
+        let cols = ui.global::<Columns>();
+        cols.set_pid(cols.get_default_pid());
+        cols.set_cpu(cols.get_default_cpu());
+        cols.set_memory(cols.get_default_memory());
+        cols.set_disk(cols.get_default_disk());
+        ui.set_page(0);
+        ui.set_view_mode(2);
+        ui.invoke_view_changed(2);
+    }),
+    ("13-分组视图-浅色", |ui| ui.invoke_set_dark(false)),
+    ("14-分组与搜索-深色", |ui| {
+        ui.invoke_set_dark(true);
+        ui.set_filter("conhost".into());
+        ui.invoke_filter_edited("conhost".into());
+    }),
+    // 键盘：从最后一个应用按 ↓，越过“后台进程”标题行，选中后台组的第一行。
+    ("15-分组键盘下移跳过标题-深色", |ui| {
+        ui.set_filter("".into());
+        ui.invoke_filter_edited("".into());
+        // 按 PID 升序：CPU 排序下行会随采样跳动，选中项可能被挤出可视范围。
+        ui.invoke_sort_by(1);
+        let at = group_boundary(ui) - 1;
+        ui.set_selected(at as i32);
+        ui.invoke_select(at as i32);
+        press(ui, Key::DownArrow);
+    }),
+    // 键盘：选中第一个应用按 ↑，停在原处而不是落到“应用”标题行。
+    ("16-分组键盘上移不选标题-深色", |ui| {
+        ui.set_selected(1);
+        ui.invoke_select(1);
+        press(ui, Key::UpArrow);
+    }),
 ];
+
+/// 第二个标题行（“后台进程”）在列表中的下标。
+fn group_boundary(ui: &AppWindow) -> usize {
+    let rows = ui.get_rows();
+    (1..rows.row_count()).find(|&i| rows.row_data(i).is_some_and(|r| r.header)).unwrap_or(1)
+}
+
+/// 向窗口发送一次按键。
+fn press(ui: &AppWindow, key: Key) {
+    let w = ui.window();
+    let text: slint::SharedString = key.into();
+    w.dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+    w.dispatch_event(WindowEvent::KeyReleased { text });
+}
 
 /// 在表头（y = 56 + 17）的 `x` 处按下并水平拖动 `dx` 逻辑像素。
 fn drag(ui: &AppWindow, x: f32, dx: f32) {

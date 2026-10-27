@@ -11,6 +11,8 @@ pub enum Command {
     /// `None` 表示用户暂停。
     Interval(Option<Duration>),
     Visible(bool),
+    /// 是否每次采样都枚举窗口、找出应用进程（分组视图需要）。
+    Apps(bool),
 }
 
 #[derive(Clone)]
@@ -24,13 +26,15 @@ impl SamplerHandle {
     }
 }
 
+/// `track_apps`：一开始就枚举应用窗口（设置里的视图模式是分组时，第一个快照就要带上）。
 /// `deliver` 在采样线程上调用，负责把快照投递到界面线程。
-pub fn spawn(deliver: impl Fn(Sample) + Send + 'static) -> SamplerHandle {
+pub fn spawn(track_apps: bool, deliver: impl Fn(Sample) + Send + 'static) -> SamplerHandle {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("sampler".into())
         .spawn(move || {
             let mut sampler = Sampler::default();
+            sampler.track_apps(track_apps);
             let mut interval = Some(Duration::from_secs(1));
             let mut visible = true;
             // 暂停时收到 Wake 也补采一次，让结束进程的结果能反映到列表上。
@@ -57,6 +61,11 @@ pub fn spawn(deliver: impl Fn(Sample) + Send + 'static) -> SamplerHandle {
                     Command::Wake => forced = true,
                     Command::Interval(d) => interval = d,
                     Command::Visible(v) => visible = v,
+                    Command::Apps(on) => {
+                        sampler.track_apps(on);
+                        // 暂停时也补采一次，让刚切换的视图有数据。
+                        forced = on;
+                    }
                 }
             }
         })

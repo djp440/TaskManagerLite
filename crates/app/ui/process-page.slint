@@ -220,6 +220,28 @@ component ProcRowView inherits Rectangle {
             heat: root.data.disk-heat;
         }
     }
+
+    // 分组标题行：盖住整行，吃掉鼠标事件（不可选中、没有右键菜单）。
+    if root.data.header: Rectangle {
+        background: Theme.surface;
+        TouchArea { }
+
+        Rectangle {
+            background: Theme.dark ? #ffffff0a : #00000008;
+        }
+
+        Text {
+            x: 10px;
+            width: parent.width - 20px;
+            height: parent.height;
+            text: root.data.name;
+            vertical-alignment: center;
+            overflow: elide;
+            font-size: 12px;
+            font-weight: 600;
+            color: Theme.subtle-text;
+        }
+    }
 }
 
 export component ProcessPage inherits Rectangle {

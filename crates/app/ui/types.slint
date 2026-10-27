@@ -11,6 +11,8 @@ export struct ProcRow {
     has-children: bool,
     expanded: bool,
     critical: bool,
+    // 分组视图的标题行（名称里是“应用 (5)”这样的标题文字），不可选中。
+    header: bool,
 }
 
 // 进程列表各数值列的有效宽度。

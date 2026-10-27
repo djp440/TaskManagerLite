@@ -1,4 +1,4 @@
-import { Button, CheckBox, ComboBox, LineEdit, Palette } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { ColumnLayout, ProcRow, Resource, ResourceKind, ResourceTint } from "types.slint";
 import { ProcessPage, Columns } from "process-page.slint";
@@ -40,6 +40,44 @@ component Tab inherits Rectangle {
         border-radius: 1.5px;
         background: Palette.accent-background;
         animate width { duration: 150ms; easing: ease-out; }
+    }
+}
+
+// 分段选择：一组互斥的选项并排显示，当前项高亮。
+component SegmentedControl inherits Rectangle {
+    in property <[string]> model;
+    in-out property <int> current-index;
+    callback selected(int);
+
+    height: 30px;
+    width: row.preferred-width;
+    border-radius: 7px;
+    background: Theme.hover;
+    border-width: 1px;
+    border-color: Theme.divider;
+
+    row := HorizontalLayout {
+        padding: 2px;
+        spacing: 2px;
+        for label[i] in root.model: Rectangle {
+            width: caption.preferred-width + 24px;
+            border-radius: 5px;
+            background: i == root.current-index ? Theme.selected : touch.has-hover ? Theme.hover : transparent;
+            touch := TouchArea {
+                clicked => {
+                    root.current-index = i;
+                    root.selected(i);
+                }
+            }
+
+            caption := Text {
+                text: label;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-weight: i == root.current-index ? 600 : 400;
+                color: i == root.current-index ? Palette.foreground : Theme.subtle-text;
+            }
+        }
     }
 }
 
@@ -131,7 +169,8 @@ export component AppWindow inherits Window {
     in-out property <int> selected: -1;
     in property <int> sort-key: 2;
     in property <bool> sort-descending: true;
-    in-out property <bool> tree-mode;
+    // 视图模式：0 平铺，1 树形，2 分组。
+    in-out property <int> view-mode: 0;
     in-out property <string> filter;
     in-out property <int> page: 0;
     in-out property <int> interval-index: 1;
@@ -154,7 +193,7 @@ export component AppWindow inherits Window {
     callback sort-by(int);
     callback toggle(int);
     callback filter-edited(string);
-    callback tree-changed(bool);
+    callback view-changed(int);
     callback interval-changed(int);
     callback end-process();
     callback end-tree();
@@ -177,7 +216,11 @@ export component AppWindow inherits Window {
         if root.rows.length == 0 {
             return;
         }
-        root.selected = max(0, min(root.rows.length - 1, root.selected + delta));
+        // 分组标题行不可选：落在标题行上就沿移动方向再走一格（标题行之间总隔着进程行，不会连续出现）。
+        let base = max(0, min(root.rows.length - 1, root.selected + delta));
+        root.selected = !root.rows[base].header ? base
+            : delta < 0 ? (base > 0 ? base - 1 : base + 1)
+            : (base + 1 < root.rows.length ? base + 1 : base - 1);
         root.select(root.selected);
         process-page.ensure-visible(root.selected);
     }
@@ -292,11 +335,15 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    if root.page == 0: CheckBox {
-                        text: @tr("树形");
-                        checked <=> root.tree-mode;
-                        toggled => {
-                            root.tree-changed(self.checked);
+                    if root.page == 0: VerticalLayout {
+                        alignment: center;
+                        SegmentedControl {
+                            model: [@tr("平铺"), @tr("树形"), @tr("分组")];
+                            current-index <=> root.view-mode;
+                            selected(i) => {
+                                root.view-changed(i);
+                                keys.focus();
+                            }
                         }
                     }
 
