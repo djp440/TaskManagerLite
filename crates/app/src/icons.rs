@@ -80,6 +80,11 @@ impl<V> IconCache<V> {
     pub fn resolved(&mut self, key: ProcessKey, path: Option<PathBuf>) -> Option<PathBuf> {
         // 解析期间进程已退出。
         let source = self.procs.get_mut(&key)?;
+        // 已有结果：显示缩放变化后 reset() 会把存活进程重新当作新进程，新旧两次 Resolve 都会回来，
+        // 只接受第一个，否则同一进程会把路径的引用计数加两次，进程退出后条目永远释放不掉。
+        if !matches!(source, Source::Resolving) {
+            return None;
+        }
         let Some(path) = path else {
             *source = Source::NoPath;
             return None;
@@ -318,6 +323,33 @@ mod tests {
         // 路径已无人使用，迟到的图标被丢弃。
         c.loaded(p(r"C:\a.exe").as_deref(), Some(1));
         assert_eq!(c.cached_paths(), 0);
+    }
+
+    #[test]
+    fn duplicate_resolve_after_reset_does_not_double_count_refs() {
+        // DPI 变化：reset 后进程被重新跟踪，旧的和新的 Resolve 结果都会到达。
+        let mut c = IconCache::<u32>::default();
+        c.track([key(1)]);
+        c.reset();
+        assert_eq!(c.track([key(1)]), vec![key(1)]);
+        assert_eq!(c.resolved(key(1), p(r"C:\a.exe")), p(r"C:\a.exe"), "第一个结果触发提取");
+        assert_eq!(c.resolved(key(1), p(r"C:\a.exe")), None, "第二个结果被忽略");
+        c.loaded(p(r"C:\a.exe").as_deref(), Some(7));
+        assert_eq!(c.icon(key(1)), Some(&7));
+        // 进程退出后条目必须能释放（引用计数没有被多加）。
+        c.track([]);
+        assert_eq!(c.cached_paths(), 0);
+    }
+
+    #[test]
+    fn duplicate_resolve_without_path_is_ignored_too() {
+        let mut c = IconCache::<u32>::default();
+        c.track([key(1)]);
+        assert_eq!(c.resolved(key(1), None), None);
+        // 第二个结果带路径也不能改变已确定的来源。
+        assert_eq!(c.resolved(key(1), p(r"C:\a.exe")), None);
+        assert_eq!(c.cached_paths(), 0);
+        assert!(c.depends_on(key(1), None));
     }
 
     #[test]

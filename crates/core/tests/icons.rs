@@ -70,8 +70,8 @@ fn extracts_non_empty_icons_at_requested_sizes() {
 }
 
 #[test]
-fn own_test_binary_has_an_icon_or_falls_back_to_the_shell_one() {
-    // 测试可执行文件没有图标资源：取到的是外壳的通用图标，也应非空。
+fn own_test_binary_has_an_icon_or_falls_back_to_the_default_one() {
+    // 测试可执行文件没有图标资源：取到的是默认的通用图标，也应非空。
     let me = std::env::current_exe().unwrap();
     let icon = file_icon(&me, 32).expect("应取到图标");
     assert!(icon.has_visible_pixels());
