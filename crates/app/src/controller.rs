@@ -529,15 +529,21 @@ impl Controller {
                 if Some(p.key) == s.selected {
                     selected_index = i as i32;
                 }
+                // 分组视图的应用行显示“自身 + 全部后代”的合计，其余行显示各自的值。
+                let (cpu, memory, disk) = r
+                    .totals
+                    .map_or((p.cpu_usage, p.private_working_set, p.disk_rate), |t| {
+                        (t.cpu_usage, t.private_working_set, t.disk_rate)
+                    });
                 ProcRow {
                     name: p.name.as_str().into(),
                     pid: p.key.pid as i32,
-                    cpu: format::percent(p.cpu_usage).into(),
-                    memory: format::megabytes(p.private_working_set).into(),
-                    disk: format::disk_rate(p.disk_rate).into(),
-                    cpu_heat: (p.cpu_usage / 40.0).min(1.0),
-                    memory_heat: (p.private_working_set as f32 / (1024.0 * 1024.0 * 1024.0)).min(1.0),
-                    disk_heat: (p.disk_rate / (20.0 * 1024.0 * 1024.0)).min(1.0) as f32,
+                    cpu: format::percent(cpu).into(),
+                    memory: format::megabytes(memory).into(),
+                    disk: format::disk_rate(disk).into(),
+                    cpu_heat: (cpu / 40.0).min(1.0),
+                    memory_heat: (memory as f32 / (1024.0 * 1024.0 * 1024.0)).min(1.0),
+                    disk_heat: (disk / (20.0 * 1024.0 * 1024.0)).min(1.0) as f32,
                     depth: r.depth as i32,
                     has_children: r.has_children,
                     expanded: r.expanded,

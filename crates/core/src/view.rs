@@ -69,6 +69,16 @@ pub struct GroupHeader {
     pub count: usize,
 }
 
+/// 应用行显示的合计：该进程加上它在进程树中的全部后代（与原生任务管理器一致）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Totals {
+    /// 占整机的百分比，合计后不超过 100。
+    pub cpu_usage: f32,
+    pub private_working_set: u64,
+    /// 字节/秒。
+    pub disk_rate: f64,
+}
+
 /// 标题行的 `index`：它不对应任何进程，误当下标用会立即越界而不是悄悄指向别的进程。
 pub const HEADER_INDEX: usize = usize::MAX;
 
@@ -81,6 +91,8 @@ pub struct ViewRow {
     pub expanded: bool,
     /// 分组模式的标题行。
     pub header: Option<GroupHeader>,
+    /// 分组模式下应用行的合计（自身加全部后代）；其余行为 `None`，显示各自的值。
+    pub totals: Option<Totals>,
 }
 
 impl ViewRow {
@@ -146,7 +158,7 @@ pub fn build_view(snapshot: &ProcessSnapshot, opts: &ViewOptions) -> Vec<ViewRow
         idx.sort_by(order);
         return idx
             .into_iter()
-            .map(|index| ViewRow { index, depth: 0, has_children: false, expanded: false, header: None })
+            .map(|index| ViewRow { index, depth: 0, has_children: false, expanded: false, header: None, totals: None })
             .collect();
     }
 
@@ -183,7 +195,7 @@ pub fn build_view(snapshot: &ProcessSnapshot, opts: &ViewOptions) -> Vec<ViewRow
     while let Some((i, depth)) = stack.pop() {
         let kids: Vec<usize> = children[i].iter().copied().filter(|&c| shown(c)).collect();
         let expanded = visible.is_some() || !opts.collapsed.contains(&procs[i].key);
-        out.push(ViewRow { index: i, depth, has_children: !kids.is_empty(), expanded, header: None });
+        out.push(ViewRow { index: i, depth, has_children: !kids.is_empty(), expanded, header: None, totals: None });
         if expanded {
             stack.extend(kids.into_iter().rev().map(|c| (c, depth + 1)));
         }
@@ -230,6 +242,7 @@ fn group_of(procs: &[Process], parents: &[Option<usize>], apps: &HashSet<u32>) -
 /// - 应用组：每个应用进程是一个根，其后代按进程树收在下面，默认折叠（`opts.expanded` 里的才展开）。
 ///   应用启动的另一个应用（也有窗口）自成一个根。
 /// - 后台进程组：平铺，不嵌套。
+/// - 应用行带合计（`ViewRow::totals`），应用之间按合计排序；子进程行仍是各自的值，按各自的值在兄弟间排序。
 /// - 搜索与排序在组内生效；应用组搜索时与树形一致：保留命中项及其祖先并强制展开。
 pub fn build_group_view(snapshot: &ProcessSnapshot, apps: &HashSet<u32>, opts: &ViewOptions) -> Vec<ViewRow> {
     let procs = &snapshot.processes;
@@ -264,8 +277,26 @@ pub fn build_group_view(snapshot: &ProcessSnapshot, apps: &HashSet<u32>, opts: &
             }
         }
     }
+    // 应用行显示并按“自身 + 全部后代”的合计排序；合计包含被搜索过滤掉的后代（过滤前计算）。
+    let mut totals: Vec<Option<Process>> = vec![None; procs.len()];
+    for &r in &roots {
+        let mut sum = procs[r].clone();
+        let mut stack = children[r].clone();
+        while let Some(c) = stack.pop() {
+            sum.cpu_usage += procs[c].cpu_usage;
+            sum.private_working_set += procs[c].private_working_set;
+            sum.disk_rate += procs[c].disk_rate;
+            stack.extend(&children[c]);
+        }
+        sum.cpu_usage = sum.cpu_usage.min(100.0);
+        totals[r] = Some(sum);
+    }
     roots.retain(|&i| keep[i]);
-    roots.sort_by(order);
+    roots.sort_by(|a, b| {
+        let (ta, tb) = (totals[*a].as_ref().unwrap_or(&procs[*a]), totals[*b].as_ref().unwrap_or(&procs[*b]));
+        let o = compare(ta, tb, opts.sort_key);
+        if opts.descending { o.reverse() } else { o }
+    });
     for list in children.iter_mut() {
         list.retain(|&c| keep[c]);
         list.sort_by(order);
@@ -279,12 +310,18 @@ pub fn build_group_view(snapshot: &ProcessSnapshot, apps: &HashSet<u32>, opts: &
             has_children: false,
             expanded: false,
             header: Some(GroupHeader { group: Group::Apps, count: roots.len() }),
+            totals: None,
         });
     }
     let mut stack: Vec<(usize, u32)> = roots.into_iter().rev().map(|i| (i, 0)).collect();
     while let Some((i, depth)) = stack.pop() {
         let expanded = searching || opts.expanded.contains(&procs[i].key);
-        out.push(ViewRow { index: i, depth, has_children: !children[i].is_empty(), expanded, header: None });
+        let totals = totals[i].as_ref().map(|t| Totals {
+            cpu_usage: t.cpu_usage,
+            private_working_set: t.private_working_set,
+            disk_rate: t.disk_rate,
+        });
+        out.push(ViewRow { index: i, depth, has_children: !children[i].is_empty(), expanded, header: None, totals });
         if expanded {
             stack.extend(children[i].iter().rev().map(|&c| (c, depth + 1)));
         }
@@ -301,6 +338,7 @@ pub fn build_group_view(snapshot: &ProcessSnapshot, apps: &HashSet<u32>, opts: &
             has_children: false,
             expanded: false,
             header: Some(GroupHeader { group: Group::Background, count: background.len() }),
+            totals: None,
         });
         out.extend(background.into_iter().map(|index| ViewRow {
             index,
@@ -308,6 +346,7 @@ pub fn build_group_view(snapshot: &ProcessSnapshot, apps: &HashSet<u32>, opts: &
             has_children: false,
             expanded: false,
             header: None,
+            totals: None,
         }));
     }
     out
@@ -502,6 +541,57 @@ mod tests {
     }
 
     #[test]
+    fn group_app_rows_show_totals_of_descendants() {
+        let mut s = snap(vec![
+            p(1, 0, 1, "app", 2.0),
+            p(2, 1, 2, "kid", 3.0),
+            p(3, 2, 3, "grandkid", 4.0),
+            p(4, 0, 1, "bg", 9.0),
+        ]);
+        for (i, mem, disk) in [(0, 100, 1.0), (1, 200, 2.0), (2, 400, 4.0), (3, 1000, 8.0)] {
+            s.processes[i].private_working_set = mem;
+            s.processes[i].disk_rate = disk;
+        }
+        let rows = build_group_view(&s, &apps(&[1]), &group_opts(&s));
+        // 应用行：自身 + 全部后代；子进程行与后台行没有合计。
+        assert_eq!(
+            rows[1].totals,
+            Some(Totals { cpu_usage: 9.0, private_working_set: 700, disk_rate: 7.0 })
+        );
+        assert!(rows[2].totals.is_none() && rows[3].totals.is_none());
+        assert!(rows.last().unwrap().totals.is_none());
+        // 折叠时合计不变（后代虽然不显示，仍计入）。
+        let collapsed = ViewOptions { mode: ViewMode::Group, ..Default::default() };
+        let rows = build_group_view(&s, &apps(&[1]), &collapsed);
+        assert_eq!(rows[1].totals.unwrap().private_working_set, 700);
+        // 搜索过滤掉的后代也计入合计。
+        let filtered = ViewOptions { filter: "grandkid".into(), ..group_opts(&s) };
+        let rows = build_group_view(&s, &apps(&[1]), &filtered);
+        assert_eq!(rows[1].totals.unwrap().private_working_set, 700);
+        // CPU 合计不超过 100%。
+        s.processes[0].cpu_usage = 80.0;
+        s.processes[1].cpu_usage = 60.0;
+        assert_eq!(build_group_view(&s, &apps(&[1]), &group_opts(&s))[1].totals.unwrap().cpu_usage, 100.0);
+    }
+
+    #[test]
+    fn group_apps_sort_by_totals_children_by_own_values() {
+        // a 自身 CPU 最小，但后代很忙，合计最高：应用之间按合计排序。
+        let s = snap(vec![
+            p(1, 0, 1, "a", 1.0),
+            p(2, 1, 2, "a-busy", 20.0),
+            p(3, 1, 2, "a-idle", 2.0),
+            p(4, 0, 1, "b", 10.0),
+        ]);
+        let opts = ViewOptions { mode: ViewMode::Group, expanded: group_opts(&s).expanded, ..Default::default() };
+        // 默认 CPU 降序：a 合计 23 > b 10；子进程在兄弟间按各自的值。
+        assert_eq!(
+            show(&s, &build_group_view(&s, &apps(&[1, 4]), &opts)),
+            ["H:Apps(2)", "a@0", "a-busy@1", "a-idle@1", "b@0"]
+        );
+    }
+
+    #[test]
     fn group_sorts_within_each_group() {
         let s = snap(vec![
             p(1, 0, 1, "a-app", 1.0),
@@ -511,7 +601,7 @@ mod tests {
             p(5, 0, 1, "bg-low", 2.0),
             p(6, 0, 1, "bg-high", 8.0),
         ]);
-        let opts = ViewOptions { expanded: group_opts(&s).expanded, mode: ViewMode::Group, ..Default::default() }; // CPU 降序
+        let opts = ViewOptions { expanded: group_opts(&s).expanded, mode: ViewMode::Group, ..Default::default() }; // CPU 降序（应用按合计）
         let rows = build_group_view(&s, &apps(&[1, 2]), &opts);
         assert_eq!(
             show(&s, &rows),

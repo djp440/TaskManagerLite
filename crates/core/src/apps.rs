@@ -1,7 +1,8 @@
 //! 判定“应用”：有可见顶层窗口的进程，即出现在任务栏 / Alt+Tab 的程序。
 //!
 //! 每次调用用 `EnumWindows` 遍历全部顶层窗口（约 1 ms，放在采样线程），窗口同时满足下列条件时，
-//! 其所属进程记为应用：可见、没有所有者窗口、不是工具窗口、有标题、没有被 DWM 隐藏。
+//! 其所属进程记为应用：可见、没有所有者窗口（带 `WS_EX_APPWINDOW` 的除外：它会被强制显示在任务栏上）、
+//! 不是工具窗口、有标题、没有被 DWM 隐藏。
 //! UWP 应用的顶层窗口属于 `ApplicationFrameHost.exe`，真实进程要从它的
 //! `Windows.UI.Core.CoreWindow` 子窗口取得。
 
@@ -11,7 +12,7 @@ use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GWL_EXSTYLE, GW_OWNER, GetClassNameW, GetWindow, GetWindowLongPtrW,
-    GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible, WS_EX_TOOLWINDOW,
+    GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 use windows::core::BOOL;
 
@@ -24,6 +25,8 @@ struct WindowFacts {
     visible: bool,
     has_owner: bool,
     tool_window: bool,
+    /// `WS_EX_APPWINDOW`：强制显示在任务栏上，即使有所有者窗口或是工具窗口。
+    app_window: bool,
     has_title: bool,
     /// `DWMWA_CLOAKED` 非 0：在其他虚拟桌面上，或是被挂起的 UWP 窗口。
     cloaked: bool,
@@ -31,7 +34,7 @@ struct WindowFacts {
 
 /// 窗口是否算作“应用窗口”。
 fn is_app_window(f: WindowFacts) -> bool {
-    f.visible && !f.has_owner && !f.tool_window && f.has_title && !f.cloaked
+    f.visible && (f.app_window || (!f.has_owner && !f.tool_window)) && f.has_title && !f.cloaked
 }
 
 fn class_name(hwnd: HWND) -> String {
@@ -59,11 +62,20 @@ fn facts(hwnd: HWND) -> WindowFacts {
         return WindowFacts::default();
     }
     let has_owner = unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|h| !h.is_invalid());
-    let tool_window = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOOLWINDOW.0 != 0;
-    if has_owner || tool_window {
+    let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+    let tool_window = ex_style & WS_EX_TOOLWINDOW.0 != 0;
+    let app_window = ex_style & WS_EX_APPWINDOW.0 != 0;
+    if (has_owner || tool_window) && !app_window {
         return WindowFacts { visible, has_owner, tool_window, ..Default::default() };
     }
-    WindowFacts { visible, has_owner, tool_window, has_title: unsafe { GetWindowTextLengthW(hwnd) } > 0, cloaked: cloaked(hwnd) }
+    WindowFacts {
+        visible,
+        has_owner,
+        tool_window,
+        app_window,
+        has_title: unsafe { GetWindowTextLengthW(hwnd) } > 0,
+        cloaked: cloaked(hwnd),
+    }
 }
 
 /// UWP 框架窗口里承载应用内容的 `CoreWindow` 所属进程。
@@ -117,7 +129,7 @@ mod tests {
     use super::*;
 
     fn shown() -> WindowFacts {
-        WindowFacts { visible: true, has_owner: false, tool_window: false, has_title: true, cloaked: false }
+        WindowFacts { visible: true, has_owner: false, tool_window: false, app_window: false, has_title: true, cloaked: false }
     }
 
     #[test]
@@ -132,5 +144,17 @@ mod tests {
         assert!(!is_app_window(WindowFacts { tool_window: true, ..shown() }));
         assert!(!is_app_window(WindowFacts { has_title: false, ..shown() }));
         assert!(!is_app_window(WindowFacts { cloaked: true, ..shown() }));
+    }
+
+    #[test]
+    fn appwindow_style_forces_taskbar_presence() {
+        // 有所有者、但带 WS_EX_APPWINDOW 的窗口会出现在任务栏：算应用；其他条件照常适用。
+        let owned = WindowFacts { has_owner: true, ..shown() };
+        assert!(!is_app_window(owned));
+        assert!(is_app_window(WindowFacts { app_window: true, ..owned }));
+        assert!(is_app_window(WindowFacts { app_window: true, tool_window: true, ..owned }));
+        assert!(!is_app_window(WindowFacts { app_window: true, visible: false, ..owned }));
+        assert!(!is_app_window(WindowFacts { app_window: true, has_title: false, ..owned }));
+        assert!(!is_app_window(WindowFacts { app_window: true, cloaked: true, ..owned }));
     }
 }

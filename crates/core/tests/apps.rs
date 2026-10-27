@@ -9,7 +9,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use tml_core::{
-    EndError, Group, Sampler, ViewMode, ViewOptions, app_pids, build_group_view, end_process, tree_from,
+    EndError, Group, ProcessKey, Sampler, ViewMode, ViewOptions, app_pids, build_group_view, end_process, tree_from,
 };
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -65,13 +65,43 @@ fn end_tree(sampler: &mut Sampler, pid: u32) {
     }
 }
 
-fn spawn_background() -> Child {
+/// 测试自己启动的子进程：离开作用域（包括断言失败 panic）时一定结束它及其后代，不留下记事本等残留。
+/// `Child` 仍持有句柄，PID 在 `wait` 之前不会被复用，所以按 PID 找到的一定是它。
+struct Owned(Child);
+
+impl Owned {
+    fn id(&self) -> u32 {
+        self.0.id()
+    }
+}
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        end_tree(&mut Sampler::default(), self.0.id());
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// 测试自己启动的 UWP 进程（按 `ProcessKey` 结束，不会误伤复用 PID 的进程）：离开作用域时关闭窗口并结束。
+struct OwnedKey(ProcessKey);
+
+impl Drop for OwnedKey {
+    fn drop(&mut self) {
+        close_windows_of(self.0.pid);
+        let _ = end_process(self.0);
+    }
+}
+
+fn spawn_background() -> Owned {
     // 无窗口的控制台程序：隐藏控制台，也没有其他窗口。
-    Command::new("cmd")
-        .args(["/c", "ping -n 30 127.0.0.1 >nul"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .expect("启动 cmd")
+    Owned(
+        Command::new("cmd")
+            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .expect("启动 cmd"),
+    )
 }
 
 #[test]
@@ -80,8 +110,9 @@ fn notepad_is_app_and_windowless_child_is_background() {
     let mut sampler = Sampler::default();
     sampler.track_apps(true);
 
-    let mut notepad = Command::new("notepad.exe").spawn().expect("启动记事本");
-    let mut bg = spawn_background();
+    // 两个守卫保证断言失败时也会结束记事本和 ping。
+    let notepad = Owned(Command::new("notepad.exe").spawn().expect("启动记事本"));
+    let bg = spawn_background();
     let (np, bgp) = (notepad.id(), bg.id());
 
     // 记事本窗口出现后：判定为应用。
@@ -115,11 +146,10 @@ fn notepad_is_app_and_windowless_child_is_background() {
         "关闭窗口后记事本 {np} 不应再是应用"
     );
 
-    let _ = notepad.kill();
-    let _ = notepad.wait();
-    end_tree(&mut sampler, bgp);
-    let _ = bg.wait();
+    // 守卫在函数结束时结束记事本与 ping；此处先确认窗口关闭后的记事本确实可以被结束。
+    drop(notepad);
     assert_eq!(end_process(snap.processes.iter().find(|p| p.key.pid == np).unwrap().key), Err(EndError::Gone));
+    drop(bg);
 }
 
 /// 计算器（UWP）：窗口属于 ApplicationFrameHost，要通过 CoreWindow 找到真实进程。
@@ -148,13 +178,14 @@ fn uwp_calculator_is_app_through_core_window() {
         return;
     };
 
+    // 守卫保证无论断言是否失败，都会关闭并结束自己启动的计算器。
+    let _guard = OwnedKey(key);
     let appeared = wait_until(Duration::from_secs(15), || app_pids().contains(&key.pid));
-    // 无论成败都先清理自己启动的计算器。
+    assert!(appeared, "计算器 {} 应通过 CoreWindow 被判定为应用", key.pid);
+    eprintln!("计算器 pid={} 通过 CoreWindow 判定为应用", key.pid);
     close_windows_of(key.pid);
     let ended = end_process(key);
     eprintln!("结束自己启动的计算器 pid={}：{ended:?}", key.pid);
-    assert!(appeared, "计算器 {} 应通过 CoreWindow 被判定为应用", key.pid);
-    eprintln!("计算器 pid={} 通过 CoreWindow 判定为应用", key.pid);
     assert!(wait_until(Duration::from_secs(10), || !app_pids().contains(&key.pid)));
 }
 
@@ -171,4 +202,26 @@ fn enumeration_cost() {
     let per_call = t.elapsed().as_secs_f64() * 1000.0 / N as f64;
     eprintln!("app_pids 平均每次 {per_call:.3} ms（{count} 个应用进程，{N} 次）");
     assert!(per_call < 20.0, "枚举过慢：{per_call:.2} ms");
+}
+
+/// 守卫在测试 panic（断言失败）时也要结束自己启动的进程及其后代。不需要桌面，随普通测试运行。
+#[test]
+fn guard_cleans_up_when_the_test_panics() {
+    let mut sampler = Sampler::default();
+    let mut seen = Vec::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let bg = spawn_background();
+        std::thread::sleep(Duration::from_millis(800));
+        let snap = sampler.sample().snapshot;
+        let root = snap.processes.iter().find(|p| p.key.pid == bg.id()).expect("找到 cmd").key;
+        seen = tree_from(&snap, root);
+        assert!(seen.len() >= 2, "应包含 cmd 与 ping：{seen:?}");
+        panic!("模拟断言失败");
+    }));
+    assert!(result.is_err());
+    std::thread::sleep(Duration::from_millis(300));
+    let after = sampler.sample().snapshot;
+    for k in &seen {
+        assert!(!after.processes.iter().any(|p| p.key == *k), "panic 后进程 {} 仍在运行", k.pid);
+    }
 }

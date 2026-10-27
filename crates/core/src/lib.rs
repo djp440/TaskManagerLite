@@ -18,7 +18,7 @@ pub use sampler::{Sample, Sampler};
 pub use snapshot::{Process, ProcessKey, ProcessSnapshot};
 pub use system::SystemMetrics;
 pub use view::{
-    Group, GroupHeader, SortKey, ViewMode, ViewOptions, ViewRow, build_group_view, build_view, tree_from,
+    Group, GroupHeader, SortKey, Totals, ViewMode, ViewOptions, ViewRow, build_group_view, build_view, tree_from,
 };
 
 /// 本地时间，格式 `yyyy-MM-dd HH-mm-ss`，用作日志文件名。
