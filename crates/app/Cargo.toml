@@ -1,0 +1,22 @@
+[package]
+name = "tml-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "TaskManagerLite"
+path = "src/main.rs"
+
+[features]
+default = ["renderer-femtovg"]
+renderer-femtovg = ["slint/renderer-femtovg"]
+renderer-software = ["slint/renderer-software"]
+
+[dependencies]
+tml-core = { path = "../core" }
+slint = { version = "1.18", default-features = false, features = ["std", "backend-winit", "compat-1-2"] }
+
+[build-dependencies]
+slint-build = "1.18"
+embed-manifest = "1.5"
