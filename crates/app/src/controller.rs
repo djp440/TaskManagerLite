@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use tml_core::{
-    EndError, ProcessKey, ProcessSnapshot, Sample, SortKey, SystemMetrics, ViewOptions, ViewRow, build_view,
-    end_process, tree_from,
+    EndError, MemoryHardware, MemoryStatus, ProcessKey, ProcessSnapshot, Sample, SortKey, SystemMetrics, ViewOptions,
+    ViewRow, build_view, end_process, tree_from,
 };
 
+mod memory;
 mod process_menu;
 mod resources;
 
@@ -57,6 +58,9 @@ struct State {
     /// 性能页的资源实例、曲线历史与选中项。
     resources: ResourceSet,
     system: SystemMetrics,
+    memory: MemoryStatus,
+    /// 内存硬件信息只读取一次，首个快照之后才有。
+    memory_hardware: Option<MemoryHardware>,
     /// 采样中断后，下一个点前需要先插入断点。
     gap: bool,
     paused: bool,
@@ -174,7 +178,11 @@ impl Controller {
     /// 选中指定实例（界面点击，或启动时恢复上次选中的资源）。实例不存在时保持原选中项。
     pub fn select_resource(&self, id: &str) -> bool {
         let ok = self.state.borrow_mut().resources.select(id);
-        self.sync_selection(&self.state.borrow());
+        let s = self.state.borrow();
+        self.sync_selection(&s);
+        if s.first_data {
+            self.update_resources(&s, Instant::now());
+        }
         ok
     }
 
@@ -349,6 +357,10 @@ impl Controller {
             }
             s.snapshot = sample.snapshot;
             s.system = m;
+            s.memory = sample.memory;
+            if sample.memory_hardware.is_some() {
+                s.memory_hardware = sample.memory_hardware;
+            }
             s.first_data = true;
             self.update_resources(&s, now);
         }
@@ -432,6 +444,9 @@ impl Controller {
         let cpu = format::percent(m.cpu_usage);
         let gib = |b: u64| b as f64 / 1024.0 / 1024.0 / 1024.0;
         let mem = format!("{:.1}/{:.1} GB", gib(m.memory_used), gib(m.memory_total));
+        // 内存详情只在选中内存卡片时整形；切换选中项时 select_resource 会立即刷新。
+        let mem_text = (s.resources.selected() == resources::MEMORY)
+            .then(|| memory::describe(&s.memory, s.memory_hardware.as_ref()));
         let rows: Vec<Resource> = s
             .resources
             .instances()
@@ -445,15 +460,12 @@ impl Controller {
                         logical.to_string(),
                         s.snapshot.processes.len().to_string(),
                     ]),
+                    // 内存页的统计项在 MemoryView 里，卡片只需要摘要。
                     ResourceKind::Memory => (
                         m.memory_total.max(1) as f64,
                         format!("{mem} ({mem_pct:.0}%)"),
                         format::gigabytes(m.memory_total),
-                        vec![
-                            format::gigabytes(m.memory_used),
-                            format::gigabytes(m.memory_total - m.memory_used),
-                            format::gigabytes(m.memory_total),
-                        ],
+                        vec![],
                     ),
                     ResourceKind::Disk => (
                         100.0,
@@ -473,7 +485,12 @@ impl Controller {
                 };
                 let (line, area) = history.paths(now, scale, detail);
                 let (mini_line, mini_area) = history.paths(now, scale, Self::MINI);
+                let detail = match (&mem_text, inst.kind) {
+                    (Some(t), ResourceKind::Memory) => t.header.clone(),
+                    _ => String::new(),
+                };
                 Resource {
+                    detail: detail.into(),
                     value: value.into(),
                     line: line.into(),
                     area: area.into(),
@@ -486,6 +503,9 @@ impl Controller {
             })
             .collect();
         self.apply_resources(s, rows);
+        if let Some(t) = mem_text {
+            ui.set_memory_view(memory::view(t));
+        }
         ui.set_process_count(s.snapshot.processes.len() as i32);
         ui.set_cpu_summary(cpu.into());
         ui.set_memory_summary(format!("{mem_pct:.0}%").into());

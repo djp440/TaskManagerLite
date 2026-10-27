@@ -1,0 +1,106 @@
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { StatItem, StatsPanel } from "stats-panel.slint";
+
+// 内存详情页底部所需的数据，由 Rust 整形（controller/memory.rs）。
+export struct MemoryView {
+    // 大号数值统计项：使用中、可用、已提交、已缓存、已压缩、分页缓冲池、非分页缓冲池。
+    stats: [StatItem],
+    // 基本信息键值：总容量、速度、已使用的插槽、外形规格、为硬件保留的内存。
+    info: [StatItem],
+    // 内存组合条图例：使用中、已修改、备用、空闲。
+    composition: [StatItem],
+    // 组合条前三段占物理总量的比例，余下为空闲。
+    in-use: float,
+    modified: float,
+    standby: float,
+}
+
+// 内存组合条：使用中（实心）、已修改（中等）、备用（浅色），其余为空闲。
+component CompositionBar inherits Rectangle {
+    in property <MemoryView> view;
+    in property <color> tint;
+
+    height: 18px;
+    border-width: 1px;
+    border-color: root.tint.with-alpha(0.55);
+    clip: true;
+    Rectangle {
+        x: 0;
+        width: parent.width * root.view.in-use;
+        background: root.tint.with-alpha(0.85);
+    }
+
+    Rectangle {
+        x: parent.width * root.view.in-use;
+        width: parent.width * root.view.modified;
+        background: root.tint.with-alpha(0.5);
+    }
+
+    Rectangle {
+        x: parent.width * (root.view.in-use + root.view.modified);
+        width: parent.width * root.view.standby;
+        background: root.tint.with-alpha(0.22);
+    }
+}
+
+// 内存详情：组合条 + 通用统计面板（统计项 + 基本信息）。
+// 内容放在滚动区里：窗口很矮时先压缩上方的曲线，仍放不下就滚动，不会把状态栏挤出窗口。
+export component MemoryDetail inherits ScrollView {
+    in property <MemoryView> view;
+    in property <color> tint;
+
+    min-height: 80px;
+    preferred-height: content.preferred-height;
+    content-width: self.visible-width;
+    content-height: content.preferred-height;
+
+    content := VerticalLayout {
+        width: root.visible-width;
+        spacing: 6px;
+        alignment: start;
+        Text {
+            text: @tr("内存组合");
+            font-size: 12px;
+            color: Theme.subtle-text;
+        }
+
+        CompositionBar {
+            view: root.view;
+            tint: root.tint;
+        }
+
+        // 图例：窄时会被省略，不换行也不撑宽。
+        HorizontalLayout {
+            spacing: 14px;
+            alignment: start;
+            for item[i] in root.view.composition: HorizontalLayout {
+                spacing: 5px;
+                Rectangle {
+                    width: 9px;
+                    y: (parent.height - self.height) / 2;
+                    height: 9px;
+                    background: i == 0 ? root.tint.with-alpha(0.85) : i == 1 ? root.tint.with-alpha(0.5) : i == 2 ? root.tint.with-alpha(0.22) : transparent;
+                    border-width: 1px;
+                    border-color: root.tint.with-alpha(0.55);
+                }
+
+                Text {
+                    text: item.label + " " + item.value;
+                    font-size: 12px;
+                    color: Theme.subtle-text;
+                    overflow: elide;
+                }
+            }
+        }
+
+        Rectangle {
+            height: 8px;
+        }
+
+        StatsPanel {
+            stats: root.view.stats;
+            info: root.view.info;
+        }
+    }
+}
