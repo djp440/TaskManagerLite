@@ -2,6 +2,8 @@
 //!
 //! 文本格式化是纯函数，可单测；界面模型的写入集中在 `CpuState::refresh`。
 
+mod grid;
+
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -9,7 +11,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use tml_core::{CpuInfo, CpuSample};
 
 use crate::format::History;
-use crate::{AppWindow, CoreGraph, CpuData, StatItem};
+use crate::{AppWindow, CoreGraph, CpuData, GridLayout, StatItem};
 
 /// 单张小图在布局尚未给出尺寸前的默认绘制尺寸。
 const DEFAULT_CELL: (f64, f64) = (100.0, 50.0);
@@ -21,6 +23,8 @@ pub struct CpuState {
     latest: CpuSample,
     /// 截图模式：逻辑处理器网格用演示曲线代替真实历史，便于目视核对曲线形态。
     demo: bool,
+    /// 截图模式下假装有这么多个逻辑处理器（0 表示用真实数量），用来核对核数很多时的网格。
+    demo_cores: usize,
     cores: Rc<VecModel<CoreGraph>>,
     stats: Rc<VecModel<StatItem>>,
     info: Rc<VecModel<StatItem>>,
@@ -33,6 +37,18 @@ impl CpuState {
         data.set_cores(ModelRc::from(self.cores.clone()));
         data.set_stats(ModelRc::from(self.stats.clone()));
         data.set_info(ModelRc::from(self.info.clone()));
+        data.on_grid_layout(|count, w, h| {
+            let p = grid::grid_plan(count.max(0) as usize, w, h);
+            GridLayout {
+                cols: p.cols as i32,
+                rows: p.rows as i32,
+                gap: grid::GAP,
+                cell_w: p.cell_w,
+                cell_h: p.cell_h,
+                content_h: p.content_h,
+                scroll: p.scroll,
+            }
+        });
     }
 
     /// 记录一次采样。`with_history`：首次采样没有基线（占用为 0），不写入曲线。
@@ -86,16 +102,17 @@ impl CpuState {
     fn core_graphs(&self, now: Instant, cell: (f64, f64)) -> Vec<CoreGraph> {
         let demo;
         let histories = if self.demo {
-            demo = demo_histories(self.latest.per_core.len(), now);
+            let n = if self.demo_cores > 0 { self.demo_cores } else { self.latest.per_core.len() };
+            demo = demo_histories(n, now);
             &demo
         } else {
             &self.histories
         };
         histories
             .iter()
-            .zip(&self.latest.per_core)
             .enumerate()
-            .map(|(i, (h, &u))| {
+            .map(|(i, h)| {
+                let u = self.latest.per_core.get(i).copied().unwrap_or(50.0);
                 let (line, area) = h.paths(now, 100.0, cell);
                 CoreGraph {
                     label: i.to_string().into(),
@@ -108,18 +125,40 @@ impl CpuState {
     }
 
     /// 截图用：逻辑处理器网格改用演示曲线。
-    pub fn use_demo_history(&mut self) {
+    pub fn use_demo_history(&mut self, cores: usize) {
         self.demo = true;
+        self.demo_cores = cores;
     }
 
-    /// 把最新的小图与基本信息写入界面。小图尺寸由网格布局经 `CpuData` 报告。
-    pub fn refresh(&self, ui: &AppWindow, now: Instant, processes: usize, usage: &str) {
+    /// 把最新的统计项、基本信息与小图写入界面，只整形当前看得见的部分（见 `Scope::of`）。
+    /// 小图尺寸由网格布局经 `CpuData` 报告。切换选中项由 `select_resource` 触发刷新，
+    /// 切到“逻辑处理器”视图时网格创建，其 init 会上报尺寸并触发刷新，所以都不必等下一次采样。
+    pub fn refresh(&self, ui: &AppWindow, now: Instant, processes: usize, usage: &str, selected: bool) {
         let data = ui.global::<CpuData>();
-        let cell = cell_size(f64::from(data.get_cell_width()), f64::from(data.get_cell_height()));
-        sync(&self.cores, self.core_graphs(now, cell));
-        sync(&self.stats, items(self.stats(usage, processes)));
-        let info = self.latest.info.as_deref().map(info_rows).unwrap_or_default();
-        sync(&self.info, items(info));
+        let scope = Scope::of(selected, data.get_per_core());
+        if scope.stats {
+            sync(&self.stats, items(self.stats(usage, processes)));
+            let info = self.latest.info.as_deref().map(info_rows).unwrap_or_default();
+            sync(&self.info, items(info));
+        }
+        if scope.cores {
+            let cell = cell_size(f64::from(data.get_cell_width()), f64::from(data.get_cell_height()));
+            sync(&self.cores, self.core_graphs(now, cell));
+        }
+    }
+}
+
+/// 每次刷新需要整形哪些部分：没选中 CPU 时都不算；选中后统计与信息总要算，
+/// 每个核的 line/area 字符串开销最大，只在“逻辑处理器”视图下才算。
+#[derive(Debug, PartialEq, Eq)]
+struct Scope {
+    stats: bool,
+    cores: bool,
+}
+
+impl Scope {
+    fn of(selected: bool, per_core_view: bool) -> Self {
+        Scope { stats: selected, cores: selected && per_core_view }
     }
 }
 
@@ -307,6 +346,15 @@ mod tests {
             // 填充区域闭合到格子底边。
             assert!(coords(&graphs[0].area).iter().any(|p| (p.1 - cell.1).abs() < 0.2));
         }
+    }
+
+    #[test]
+    fn refresh_only_shapes_what_is_visible() {
+        // 没选中 CPU：什么都不算；选中但在整体视图：只算统计与信息；选中且在逻辑处理器视图：连小图一起算。
+        assert_eq!(Scope::of(false, false), Scope { stats: false, cores: false });
+        assert_eq!(Scope::of(false, true), Scope { stats: false, cores: false });
+        assert_eq!(Scope::of(true, false), Scope { stats: true, cores: false });
+        assert_eq!(Scope::of(true, true), Scope { stats: true, cores: true });
     }
 
     #[test]

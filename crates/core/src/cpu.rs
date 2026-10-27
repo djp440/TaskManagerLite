@@ -8,12 +8,13 @@ use windows::Win32::System::Performance::{
     PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PdhAddEnglishCounterW, PdhCloseQuery,
     PdhCollectQueryData, PdhGetFormattedCounterValue, PdhOpenQueryW,
 };
+use windows::Win32::System::Power::{CallNtPowerInformation, PROCESSOR_POWER_INFORMATION, ProcessorInformation};
 use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW};
 use windows::Win32::System::SystemInformation::{
     GetLogicalProcessorInformationEx, GetTickCount64, RelationAll, RelationCache, RelationProcessorCore,
     RelationProcessorPackage, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
 };
-use windows::Win32::System::Threading::{IsProcessorFeaturePresent, PF_VIRT_FIRMWARE_ENABLED};
+use windows::Win32::System::Threading::{GetActiveProcessorCount, IsProcessorFeaturePresent, PF_VIRT_FIRMWARE_ENABLED};
 use windows::core::{PCWSTR, w};
 
 const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
@@ -51,11 +52,11 @@ pub struct CpuSample {
     pub info: Option<Arc<CpuInfo>>,
 }
 
-/// 读取 CPU 静态信息：注册表（型号、基准频率）、`GetLogicalProcessorInformationEx`（拓扑与缓存）。
+/// 读取 CPU 静态信息：注册表（型号）、`CallNtPowerInformation`（基准频率）、`GetLogicalProcessorInformationEx`（拓扑与缓存）。
 pub fn read_cpu_info() -> CpuInfo {
     let mut info = CpuInfo {
         name: registry_string("ProcessorNameString").map(|s| s.trim().to_string()).unwrap_or_default(),
-        base_mhz: registry_dword("~MHz").unwrap_or(0),
+        base_mhz: pick_base_mhz(power_max_mhz(), registry_dword("~MHz")),
         virtualization: unsafe { IsProcessorFeaturePresent(PF_VIRT_FIRMWARE_ENABLED) }.as_bool(),
         ..Default::default()
     };
@@ -69,6 +70,23 @@ pub fn read_cpu_info() -> CpuInfo {
         info.l3_bytes = t.l3;
     }
     info
+}
+
+/// 基准频率：优先用电源接口的 MaxMhz（与原生任务管理器、WMI 一致，如 3900），取不到再退回注册表 `~MHz`（如 3893）。
+fn pick_base_mhz(power: Option<u32>, registry: Option<u32>) -> u32 {
+    power.filter(|&m| m > 0).or(registry).unwrap_or(0)
+}
+
+/// `CallNtPowerInformation(ProcessorInformation)` 返回每个逻辑处理器的 MaxMhz，取最大值。
+fn power_max_mhz() -> Option<u32> {
+    let count = unsafe { GetActiveProcessorCount(0xFFFF) }.max(1) as usize;
+    let mut buf = vec![PROCESSOR_POWER_INFORMATION::default(); count];
+    let bytes = (count * size_of::<PROCESSOR_POWER_INFORMATION>()) as u32;
+    let status = unsafe { CallNtPowerInformation(ProcessorInformation, None, 0, Some(buf.as_mut_ptr().cast()), bytes) };
+    if status.0 < 0 {
+        return None;
+    }
+    buf.iter().map(|p| p.MaxMhz).max().filter(|&m| m > 0)
 }
 
 fn registry_string(name: &str) -> Option<String> {
@@ -356,10 +374,20 @@ mod tests {
     }
 
     #[test]
+    fn base_mhz_prefers_power_interface_then_registry() {
+        assert_eq!(pick_base_mhz(Some(3900), Some(3893)), 3900);
+        assert_eq!(pick_base_mhz(None, Some(3893)), 3893);
+        assert_eq!(pick_base_mhz(Some(0), Some(3893)), 3893);
+        assert_eq!(pick_base_mhz(None, None), 0);
+    }
+
+    #[test]
     fn static_info_is_populated() {
         let i = read_cpu_info();
         assert!(!i.name.is_empty());
         assert!(i.base_mhz > 0);
+        // 基准频率来自电源接口（整百兆，如 3900），不是注册表里的 3893 之类。
+        assert_eq!(i.base_mhz, pick_base_mhz(power_max_mhz(), registry_dword("~MHz")));
         assert!(i.sockets >= 1 && i.cores >= 1 && i.logical >= i.cores);
         assert!(i.l2_bytes > 0 && i.l3_bytes > 0);
     }

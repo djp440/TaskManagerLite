@@ -10,6 +10,18 @@ export struct CoreGraph {
     area: string,
 }
 
+// 逻辑处理器网格的布局结果，由 Rust 的纯函数 `grid_plan` 算出（可单测）。
+// scroll 为 true 时，小图不再被压到最小高度以下，网格改为在自己的区域内滚动。
+export struct GridLayout {
+    cols: int,
+    rows: int,
+    gap: length,
+    cell-w: length,
+    cell-h: length,
+    content-h: length,
+    scroll: bool,
+}
+
 // CPU 详情的数据与视图状态。放在全局对象里，不占用 AppWindow / PerformancePage 的属性。
 export global CpuData {
     // 为 true 时显示每个逻辑处理器一张小图，否则显示整体曲线。
@@ -22,6 +34,8 @@ export global CpuData {
     in-out property <length> cell-width;
     in-out property <length> cell-height;
     callback cell-resized();
+    // 按小图数量与网格区尺寸计算列数、行数和小图尺寸，由 Rust 实现。
+    pure callback grid-layout(int, length, length) -> GridLayout;
 }
 
 component Segment inherits Rectangle {
@@ -117,7 +131,8 @@ component CoreCell inherits Rectangle {
         color: Theme.subtle-text;
     }
 
-    Text {
+    // 小格（窄于 96px 或矮于 28px）放不下数值，只保留核号。
+    if root.width >= 96px && root.height >= 28px: Text {
         x: parent.width - self.width - 6px;
         y: 3px;
         text: root.data.value;
@@ -126,24 +141,18 @@ component CoreCell inherits Rectangle {
     }
 }
 
-// 每个逻辑处理器一张小图。列数随数量与可用空间自适应：
-// 让小图接近 1.6:1 的宽高比，同时不窄于 64px。
+// 每个逻辑处理器一张小图。列数、行数与小图尺寸由 Rust 的 `grid_plan` 计算：
+// 让小图接近 1.6:1 的宽高比，不窄于 64px、不矮于 24px；核数多到放不下时在网格区内滚动，而不是把小图压扁。
 export component CpuCoreGrid inherits Rectangle {
-    property <length> gap: 6px;
-    property <int> count: CpuData.cores.length;
-    property <int> max-cols: Math.max(1, Math.floor((root.width + root.gap) / (64px + root.gap)));
-    property <int> ideal-cols: Math.round(Math.sqrt(root.count * root.width / (Math.max(root.height, 1px) * 1.6)));
-    property <int> cols: Math.max(1, Math.min(Math.max(root.count, 1), Math.min(root.max-cols, root.ideal-cols)));
-    property <int> rows: Math.max(1, Math.ceil(root.count / root.cols));
-    property <length> cell-w: (root.width - root.gap * (root.cols - 1)) / root.cols;
-    property <length> cell-h: (root.height - root.gap * (root.rows - 1)) / root.rows;
+    property <GridLayout> plan: CpuData.grid-layout(CpuData.cores.length, root.width, root.height);
 
     // 小图内部（去掉 1px 边框）的绘制尺寸。
-    out property <length> inner-w: max(root.cell-w - 2px, 1px);
-    out property <length> inner-h: max(root.cell-h - 2px, 1px);
+    out property <length> inner-w: max(root.plan.cell-w - 2px, 1px);
+    out property <length> inner-h: max(root.plan.cell-h - 2px, 1px);
 
     // changed 只在属性值“变化”时触发：网格创建时若布局已经给出最终尺寸，就不会有变化，
     // 所以创建时（init）也要主动上报一次，否则 Rust 会一直用默认尺寸生成曲线。
+    // 同时，切到“逻辑处理器”视图时网格才被创建，这一次上报也让 Rust 立即刷新小图数据。
     init => {
         CpuData.cell-width = self.inner-w;
         CpuData.cell-height = self.inner-h;
@@ -159,12 +168,18 @@ export component CpuCoreGrid inherits Rectangle {
     }
 
     background: Theme.surface-raised;
-    for core[i] in CpuData.cores: CoreCell {
-        x: Math.mod(i, root.cols) * (root.cell-w + root.gap);
-        y: Math.floor(i / root.cols) * (root.cell-h + root.gap);
-        width: root.cell-w;
-        height: root.cell-h;
-        data: core;
+    ScrollView {
+        width: parent.width;
+        height: parent.height;
+        content-width: self.visible-width;
+        content-height: root.plan.scroll ? root.plan.content-h : self.height;
+        for core[i] in CpuData.cores: CoreCell {
+            x: Math.mod(i, Math.max(root.plan.cols, 1)) * (root.plan.cell-w + root.plan.gap);
+            y: Math.floor(i / Math.max(root.plan.cols, 1)) * (root.plan.cell-h + root.plan.gap);
+            width: root.plan.cell-w;
+            height: root.plan.cell-h;
+            data: core;
+        }
     }
 }
 
@@ -172,6 +187,8 @@ export component CpuCoreGrid inherits Rectangle {
 // 与内存页一致，内容放在滚动区里：窗口很矮时先压缩上方的曲线，仍放不下就滚动，不会把状态栏挤出窗口。
 export component CpuDetail inherits ScrollView {
     min-height: 80px;
+    // 多余的高度全部给上方的曲线/网格，统计区只取自己需要的高度。
+    vertical-stretch: 0;
     preferred-height: content.preferred-height;
     content-width: self.visible-width;
     content-height: content.preferred-height;

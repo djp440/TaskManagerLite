@@ -28,7 +28,7 @@ const STEPS: &[Step] = &[
         ui.set_page(1);
         ui.invoke_resource_selected("cpu".into());
     }),
-    ("03b-性能CPU逻辑处理器-深色", use_demo_cores),
+    ("03b-性能CPU逻辑处理器-深色", |ui| use_demo_cores(ui, 0)),
     ("04-性能内存-深色", |ui| ui.invoke_resource_selected("memory".into())),
     ("05-性能网络-深色", |ui| ui.invoke_resource_selected("network".into())),
     ("06-结束进程树确认-深色", |ui| {
@@ -98,7 +98,7 @@ const STEPS: &[Step] = &[
     }),
     ("17-性能CPU整体-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
     ("18-性能CPU逻辑处理器-深色-最小尺寸760x480", |ui| {
-        use_demo_cores(ui);
+        use_demo_cores(ui, 0);
         resize(ui, 760.0, 480.0);
     }),
     ("19-性能CPU逻辑处理器-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
@@ -110,14 +110,22 @@ const STEPS: &[Step] = &[
         ui.global::<CpuData>().set_per_core(false);
         resize(ui, 900.0, 600.0);
     }),
+    // 核数很多（假装 64 个逻辑处理器）：小窗口里小图保持最小高度、网格区滚动；大窗口里放得下就不滚动。
+    ("22-性能CPU64核-深色-最小尺寸760x480", |ui| {
+        ui.invoke_set_dark(true);
+        use_demo_cores(ui, 64);
+        resize(ui, 760.0, 480.0);
+    }),
+    ("23-性能CPU64核-深色-1040x700", |ui| resize(ui, 1040.0, 700.0)),
 ];
 
 /// 切到逻辑处理器网格，并让各核显示演示曲线：核 0 恒 100%（贴顶边的横线）、核 1 从 0 升到 100%
 /// （左下到右上的斜线）、核 2 方波、核 3 恒 50%、核 4 正弦……用来核对曲线是否按格子实际尺寸铺满。
-fn use_demo_cores(ui: &AppWindow) {
+/// `cores` 为 0 时用真实的逻辑处理器数量，否则假装有这么多个。
+fn use_demo_cores(ui: &AppWindow, cores: usize) {
     crate::CONTROLLER.with(|c| {
         if let Some(c) = c.borrow().as_ref() {
-            c.use_demo_cpu_history();
+            c.use_demo_cpu_history(cores);
         }
     });
     ui.global::<CpuData>().set_per_core(true);

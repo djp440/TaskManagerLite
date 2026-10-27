@@ -322,8 +322,8 @@ impl Controller {
     }
 
     /// 截图模式：逻辑处理器网格改用演示曲线。
-    pub fn use_demo_cpu_history(&self) {
-        self.state.borrow_mut().cpu.use_demo_history();
+    pub fn use_demo_cpu_history(&self, cores: usize) {
+        self.state.borrow_mut().cpu.use_demo_history(cores);
     }
 
     pub fn has_first_data(&self) -> bool {
@@ -430,7 +430,7 @@ impl Controller {
             })
             .collect();
         self.apply_resources(s, rows);
-        s.cpu.refresh(&ui, now, s.snapshot.processes.len(), &cpu);
+        s.cpu.refresh(&ui, now, s.snapshot.processes.len(), &cpu, s.resources.selected() == resources::CPU);
         if let Some(t) = mem_text {
             ui.set_memory_view(memory::view(t));
         }

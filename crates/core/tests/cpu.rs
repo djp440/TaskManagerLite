@@ -33,37 +33,39 @@ fn sample_carries_cpu_detail() {
 }
 
 /// 用 PowerShell 的 `Get-CimInstance Win32_Processor` 取参照值，各字段用 `|` 分隔，多插槽时求和。
-fn wmi_reference() -> (String, u32, u32, u64, u64) {
+fn wmi_reference() -> (String, u32, u32, u64, u64, u32) {
     let script = "Get-CimInstance Win32_Processor | ForEach-Object { \
-        \"$($_.Name.Trim())|$($_.NumberOfCores)|$($_.NumberOfLogicalProcessors)|$($_.L2CacheSize)|$($_.L3CacheSize)\" }";
+        \"$($_.Name.Trim())|$($_.NumberOfCores)|$($_.NumberOfLogicalProcessors)|$($_.L2CacheSize)|$($_.L3CacheSize)|$($_.MaxClockSpeed)\" }";
     let out = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()
         .expect("无法运行 powershell");
     let text = String::from_utf8_lossy(&out.stdout);
-    let (mut name, mut cores, mut logical, mut l2, mut l3) = (String::new(), 0, 0, 0, 0);
+    let (mut name, mut cores, mut logical, mut l2, mut l3, mut mhz) = (String::new(), 0, 0, 0, 0, 0);
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let f: Vec<&str> = line.trim().split('|').collect();
-        assert_eq!(f.len(), 5, "无法解析 WMI 输出：{line}");
+        assert_eq!(f.len(), 6, "无法解析 WMI 输出：{line}");
         name = f[0].to_string();
         cores += f[1].parse::<u32>().unwrap();
         logical += f[2].parse::<u32>().unwrap();
         l2 += f[3].parse::<u64>().unwrap();
         l3 += f[4].parse::<u64>().unwrap();
+        mhz = mhz.max(f[5].parse::<u32>().unwrap());
     }
-    (name, cores, logical, l2, l3)
+    (name, cores, logical, l2, l3, mhz)
 }
 
 #[test]
 fn topology_and_model_match_wmi() {
     let info = read_cpu_info();
-    let (name, cores, logical, l2_kb, l3_kb) = wmi_reference();
-    eprintln!("{info:#?}\nWMI: {name} {cores}核 {logical}线程 L2 {l2_kb} KB L3 {l3_kb} KB");
+    let (name, cores, logical, l2_kb, l3_kb, mhz) = wmi_reference();
+    eprintln!("{info:#?}\nWMI: {name} {cores}核 {logical}线程 L2 {l2_kb} KB L3 {l3_kb} KB {mhz} MHz");
     assert_eq!(info.name, name, "型号名称");
     assert_eq!(info.cores, cores, "内核数");
     assert_eq!(info.logical, logical, "逻辑处理器数");
     assert_eq!(info.l2_bytes / 1024, l2_kb, "L2 缓存总量");
     assert_eq!(info.l3_bytes / 1024, l3_kb, "L3 缓存总量");
+    assert_eq!(info.base_mhz, mhz, "基准频率（WMI MaxClockSpeed）");
     assert!(info.l1_bytes > 0 && info.sockets >= 1);
 }
 
