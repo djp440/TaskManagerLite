@@ -13,7 +13,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::UI::Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_SMALLICON, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW};
-use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO, PrivateExtractIconsW};
+use windows::Win32::UI::WindowsAndMessaging::{
+    DestroyIcon, GetIconInfo, HICON, ICONINFO, IDI_APPLICATION, IMAGE_ICON, LR_SHARED, LoadImageW, PrivateExtractIconsW,
+};
 use windows::core::PCWSTR;
 
 /// 一个图标的像素，RGBA 字节序，非预乘，自上而下。
@@ -219,22 +221,49 @@ fn fit_to(icon: IconBitmap, px: u32) -> IconBitmap {
     IconBitmap { width: px, height: px, rgba: out }
 }
 
-/// 可执行文件的图标，边长恰为 `px` 像素。文件不存在或取不到时返回 `None`。
-pub fn file_icon(path: &Path, px: u32) -> Option<IconBitmap> {
-    let icon = extract_sized(path, px).or_else(|| shell_icon(path, px, false))?;
+/// 不依赖外壳的系统共享图标（`IDI_APPLICATION`），按 `px` 取最接近的尺寸。
+/// 外壳取不到图标时（例如精简环境、CI 的无桌面会话）作为最后的兜底。
+/// 共享图标由系统持有，不能 `DestroyIcon`，所以不包进 `OwnedIcon`。
+pub(crate) fn system_app_icon(px: u32) -> Option<IconBitmap> {
+    let handle = unsafe { LoadImageW(None, IDI_APPLICATION, IMAGE_ICON, px as i32, px as i32, LR_SHARED) }.ok()?;
+    let icon = hicon_to_rgba(HICON(handle.0))?;
     icon.has_visible_pixels().then(|| fit_to(icon, px))
 }
 
+/// 取到且非全透明的图标缩放到 `px`，否则为 `None`。
+fn usable(icon: Option<IconBitmap>, px: u32) -> Option<IconBitmap> {
+    icon.filter(IconBitmap::has_visible_pixels).map(|i| fit_to(i, px))
+}
+
+/// 可执行文件的图标，边长恰为 `px` 像素。文件不存在时返回 `None`；
+/// 文件存在但取不到图标（没有图标资源且外壳也失败）时回退到 [`default_icon`]。
+pub fn file_icon(path: &Path, px: u32) -> Option<IconBitmap> {
+    if !path.exists() {
+        return None;
+    }
+    usable(extract_sized(path, px).or_else(|| shell_icon(path, px, false)), px).or_else(|| default_icon(px))
+}
+
 /// 通用的可执行文件图标，用于拿不到路径（System、受保护进程）的进程。
+/// 先按扩展名向外壳要通用 exe 图标，外壳不可用时退到系统应用程序图标。
 pub fn default_icon(px: u32) -> Option<IconBitmap> {
     // 文件不必存在：只按扩展名取通用图标。
-    let icon = shell_icon(Path::new("x.exe"), px, true)?;
-    icon.has_visible_pixels().then(|| fit_to(icon, px))
+    usable(shell_icon(Path::new("x.exe"), px, true), px).or_else(|| system_app_icon(px))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_app_icon_works_without_the_shell() {
+        // CI 的无桌面会话里外壳取不到通用图标，走的就是这条兜底路径。
+        for px in [16, 32] {
+            let icon = system_app_icon(px).expect("系统应用程序图标");
+            assert_eq!((icon.width, icon.height), (px, px));
+            assert!(icon.has_visible_pixels());
+        }
+    }
 
     #[test]
     fn fit_keeps_exact_size_and_resizes_others() {
