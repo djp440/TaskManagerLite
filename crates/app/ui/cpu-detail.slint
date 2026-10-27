@@ -145,6 +145,13 @@ export component CpuCoreGrid inherits Rectangle {
     out property <length> inner-w: max(root.cell-w - 2px, 1px);
     out property <length> inner-h: max(root.cell-h - 2px, 1px);
 
+    // changed 只在属性值“变化”时触发：网格创建时若布局已经给出最终尺寸，就不会有变化，
+    // 所以创建时（init）也要主动上报一次，否则 Rust 会一直用默认尺寸生成曲线。
+    init => {
+        CpuData.cell-width = self.inner-w;
+        CpuData.cell-height = self.inner-h;
+        CpuData.cell-resized();
+    }
     changed inner-w => {
         CpuData.cell-width = self.inner-w;
         CpuData.cell-resized();

@@ -239,6 +239,11 @@ impl Controller {
         self.sampler.send(Command::Visible(visible));
     }
 
+    /// 截图模式：逻辑处理器网格改用演示曲线。
+    pub fn use_demo_cpu_history(&self) {
+        self.state.borrow_mut().cpu.use_demo_history(Instant::now());
+    }
+
     pub fn has_first_data(&self) -> bool {
         self.state.borrow().first_data
     }

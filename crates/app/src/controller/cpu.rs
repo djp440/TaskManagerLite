@@ -19,6 +19,8 @@ pub struct CpuState {
     /// 按逻辑处理器下标保存的历史；暂停/最小化造成的断口与其他曲线一样用断点表示。
     histories: Vec<History>,
     latest: CpuSample,
+    /// 截图模式下替换真实历史的演示曲线，便于目视核对曲线形态。
+    demo: Option<Vec<History>>,
     cores: Rc<VecModel<CoreGraph>>,
     info: Rc<VecModel<InfoRow>>,
 }
@@ -78,15 +80,10 @@ impl CpuState {
         ]
     }
 
-    /// 把最新的小图与基本信息写入界面。小图尺寸由网格布局经 `CpuData` 报告。
-    pub fn refresh(&self, ui: &AppWindow, now: Instant) {
-        let data = ui.global::<CpuData>();
-        let cell = match (f64::from(data.get_cell_width()), f64::from(data.get_cell_height())) {
-            (w, h) if w > 1.0 && h > 1.0 => (w, h),
-            _ => DEFAULT_CELL,
-        };
-        let cores: Vec<CoreGraph> = self
-            .histories
+    /// 每个逻辑处理器的小图：路径按小图的实际绘制尺寸 `cell` 生成，纵轴 0–100%，横轴为 60 秒窗口。
+    fn core_graphs(&self, now: Instant, cell: (f64, f64)) -> Vec<CoreGraph> {
+        let histories = self.demo.as_ref().unwrap_or(&self.histories);
+        histories
             .iter()
             .zip(&self.latest.per_core)
             .enumerate()
@@ -99,8 +96,38 @@ impl CpuState {
                     area: area.into(),
                 }
             })
+            .collect()
+    }
+
+    /// 截图用：把每个核的历史换成形态各异的演示曲线（满载、斜坡、方波、半载、正弦）。
+    pub fn use_demo_history(&mut self, now: Instant) {
+        let n = self.histories.len().max(1);
+        let demo = (0..n)
+            .map(|core| {
+                let mut h = History::default();
+                for sec in 0..=60u64 {
+                    let t = now - std::time::Duration::from_secs(60 - sec);
+                    let x = sec as f64 / 60.0;
+                    let v = match core % 5 {
+                        0 => 100.0,
+                        1 => x * 100.0,
+                        2 => if (sec / 10) % 2 == 0 { 100.0 } else { 0.0 },
+                        3 => 50.0,
+                        _ => 50.0 + 50.0 * (x * 12.0 + core as f64).sin(),
+                    };
+                    h.push(t, Some(v));
+                }
+                h
+            })
             .collect();
-        sync(&self.cores, cores);
+        self.demo = Some(demo);
+    }
+
+    /// 把最新的小图与基本信息写入界面。小图尺寸由网格布局经 `CpuData` 报告。
+    pub fn refresh(&self, ui: &AppWindow, now: Instant) {
+        let data = ui.global::<CpuData>();
+        let cell = cell_size(f64::from(data.get_cell_width()), f64::from(data.get_cell_height()));
+        sync(&self.cores, self.core_graphs(now, cell));
         let info: Vec<InfoRow> = self
             .latest
             .info
@@ -112,6 +139,11 @@ impl CpuState {
             .collect();
         sync(&self.info, info);
     }
+}
+
+/// 小图的绘制尺寸：布局尚未上报（≤1px）时用默认值。
+fn cell_size(w: f64, h: f64) -> (f64, f64) {
+    if w > 1.0 && h > 1.0 { (w, h) } else { DEFAULT_CELL }
 }
 
 /// 把新数据原地写入模型，避免整体替换造成界面重建。
@@ -233,6 +265,44 @@ mod tests {
         cpu.record(t0 + Duration::from_secs(1), sample(&[10.0, 90.0, 40.0]), true);
         let maxes: Vec<f64> = cpu.histories.iter().map(|h| h.max()).collect();
         assert_eq!(maxes, [10.0, 90.0, 40.0]);
+    }
+
+    /// 取路径里所有坐标对 (x, y)。
+    fn coords(path: &str) -> Vec<(f64, f64)> {
+        let nums: Vec<f64> = path.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+        nums.chunks(2).map(|c| (c[0], c[1])).collect()
+    }
+
+    #[test]
+    fn core_graph_paths_cover_the_whole_cell() {
+        // 60 秒窗口内从 0% 线性升到 100%：曲线必须横跨整个格子宽度，纵向从底边到顶边。
+        let mut cpu = CpuState::default();
+        let now = Instant::now();
+        cpu.record(now - Duration::from_secs(60), sample(&[0.0, 100.0]), true);
+        for sec in 1..=60u64 {
+            let v = sec as f32 / 60.0 * 100.0;
+            cpu.record(now - Duration::from_secs(60 - sec), sample(&[v, 100.0]), true);
+        }
+        for cell in [(176.0, 96.0), (64.0, 40.0), (300.0, 180.0)] {
+            let graphs = cpu.core_graphs(now, cell);
+            assert_eq!(graphs.len(), 2);
+            let ramp = coords(&graphs[0].line);
+            let (min_x, max_x) = ramp.iter().fold((f64::MAX, f64::MIN), |a, p| (a.0.min(p.0), a.1.max(p.0)));
+            let (min_y, max_y) = ramp.iter().fold((f64::MAX, f64::MIN), |a, p| (a.1.min(p.1), a.1.max(p.1)));
+            assert!(min_x.abs() < 0.2 && (max_x - cell.0).abs() < 0.2, "横向应铺满 {cell:?}：{min_x}..{max_x}");
+            assert!((max_y - cell.1).abs() < 0.2 && min_y.abs() < 0.2, "纵向应覆盖 0–100% {cell:?}：{min_y}..{max_y}");
+            // 恒为 100% 的核：整条线贴着格子顶边。
+            assert!(coords(&graphs[1].line).iter().all(|p| p.1.abs() < 0.2));
+            // 填充区域闭合到格子底边。
+            assert!(coords(&graphs[0].area).iter().any(|p| (p.1 - cell.1).abs() < 0.2));
+        }
+    }
+
+    #[test]
+    fn cell_size_falls_back_until_layout_reports() {
+        assert_eq!(cell_size(0.0, 0.0), DEFAULT_CELL);
+        assert_eq!(cell_size(176.0, 1.0), DEFAULT_CELL);
+        assert_eq!(cell_size(176.0, 96.0), (176.0, 96.0));
     }
 
     #[test]

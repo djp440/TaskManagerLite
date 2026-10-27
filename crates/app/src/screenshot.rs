@@ -27,7 +27,16 @@ const STEPS: &[Step] = &[
         ui.set_page(1);
         ui.invoke_resource_selected("cpu".into());
     }),
-    ("03b-性能CPU逻辑处理器-深色", |ui| ui.global::<CpuData>().set_per_core(true)),
+    ("03b-性能CPU逻辑处理器-深色", |ui| {
+        // 演示曲线：核 0 恒 100%（贴顶边的横线）、核 1 从 0 升到 100%（左下到右上的斜线）、
+        // 核 2 方波、核 3 恒 50%，用来核对曲线是否按格子实际尺寸铺满。
+        crate::CONTROLLER.with(|c| {
+            if let Some(c) = c.borrow().as_ref() {
+                c.use_demo_cpu_history();
+            }
+        });
+        ui.global::<CpuData>().set_per_core(true);
+    }),
     ("04-性能内存-深色", |ui| ui.invoke_resource_selected("memory".into())),
     ("05-性能网络-深色", |ui| ui.invoke_resource_selected("network".into())),
     ("06-结束进程树确认-深色", |ui| {
