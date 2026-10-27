@@ -110,7 +110,7 @@ try {
     $s = Get-Content $settingsFile -Raw | ConvertFrom-Json
     Check ($s.window.x -eq 120 -and $s.window.y -eq 90 -and [math]::Abs($s.window.width - 800) -lt 1.5 -and [math]::Abs($s.window.height - 560) -lt 1.5) "写回的窗口位置与逻辑大小一致（$($s.window.width)x$($s.window.height)）"
     Check ($s.interval_index -eq 2) '采样间隔 = 2'
-    Check ($s.tree -eq $true) '树形 = true'
+    Check ($s.view -eq 'tree' -and $null -eq $s.tree) '旧版 tree: true 迁移为 view = tree，且不再写出 tree'
     Check ($s.sort.key -eq 'memory' -and $s.sort.descending -eq $false) '排序 = 内存升序'
     Check ($s.page -eq 1) '页面 = 性能'
     Check ($s.resource -eq 'network') '首个快照之后性能页选中的资源仍是 network（退出时从选中项读取）'
