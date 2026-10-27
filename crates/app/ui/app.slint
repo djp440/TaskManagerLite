@@ -1,10 +1,10 @@
 import { Button, CheckBox, ComboBox, LineEdit, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { ProcRow, Resource, ResourceKind, ResourceTint } from "types.slint";
+import { ColumnLayout, ProcRow, Resource, ResourceKind, ResourceTint } from "types.slint";
 import { ProcessPage, Columns } from "process-page.slint";
 import { PerformancePage } from "performance-page.slint";
 
-export { ProcRow, Resource, ResourceKind, ResourceTint, Columns }
+export { ColumnLayout, ProcRow, Resource, ResourceKind, ResourceTint, Columns }
 
 component Tab inherits Rectangle {
     in property <string> text;

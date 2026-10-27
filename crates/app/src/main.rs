@@ -141,6 +141,7 @@ fn main() -> Result<(), slint::PlatformError> {
     visibility.start(TimerMode::Repeated, Duration::from_millis(300), move || {
         if let Some(ui) = weak.upgrade() {
             controller.set_visible(!ui.window().is_minimized());
+            controller.track_window();
         }
     });
 

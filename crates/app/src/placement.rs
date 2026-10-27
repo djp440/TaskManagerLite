@@ -46,7 +46,9 @@ pub fn apply(ui: &AppWindow, settings: &Settings) {
     }
 }
 
-/// 把当前窗口状态写进 `settings`。最小化时位置无意义，保持原值；最大化时保留最近一次的普通矩形。
+/// 把当前窗口状态写进 `settings`。由定时器周期调用并在退出时再调用一次，因此：
+/// 普通状态下 `settings.window` 总是最近一次的普通矩形；最小化时位置无意义，保持原值；
+/// 最大化时只更新 `maximized`，保留最大化之前记下的普通矩形（从未记录过才退而取当前矩形）。
 pub fn capture(ui: &AppWindow, settings: &mut Settings) {
     let window = ui.window();
     if window.is_minimized() {

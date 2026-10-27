@@ -104,6 +104,9 @@ pub struct ResourceSet {
     instances: Vec<Instance>,
     histories: HashMap<String, History>,
     selected: String,
+    /// 想选中但当前不存在的实例 id（启动时恢复的设置，或选中项暂时消失）。
+    /// 实例出现时自动选中；用户明确选中别的实例后清除。退出时优先保存它，而不是回退用的 CPU。
+    pending: Option<String>,
 }
 
 impl ResourceSet {
@@ -122,7 +125,7 @@ impl ResourceSet {
     }
 
     /// 用最新的实例列表更新：新增实例的历史从空开始，消失实例的历史被清理；
-    /// 选中的实例消失时回退到 CPU。
+    /// 选中的实例消失时回退到 CPU，并记为待恢复；待恢复的实例出现时重新选中。
     pub fn update(&mut self, instances: Vec<Instance>) {
         let alive: HashSet<&str> = instances.iter().map(|i| i.id.as_str()).collect();
         self.histories.retain(|id, _| alive.contains(id.as_str()));
@@ -130,13 +133,30 @@ impl ResourceSet {
             self.histories.entry(i.id.clone()).or_default();
         }
         if !alive.contains(self.selected.as_str()) {
-            self.selected = CPU.into();
+            self.pending = Some(std::mem::replace(&mut self.selected, CPU.into()));
+        }
+        if let Some(p) = self.pending.take_if(|p| alive.contains(p.as_str())) {
+            self.selected = p;
         }
         self.instances = instances;
     }
 
     pub fn selected(&self) -> &str {
         &self.selected
+    }
+
+    /// 要写进设置的选中项：待恢复的实例还没出现时保存它，避免临时的回退把偏好丢掉。
+    pub fn selected_for_save(&self) -> &str {
+        self.pending.as_deref().unwrap_or(&self.selected)
+    }
+
+    /// 启动时恢复设置里的选中项。实例已存在则选中；否则记为待恢复并返回 false。
+    pub fn restore(&mut self, id: &str) -> bool {
+        if self.select(id) {
+            return true;
+        }
+        self.pending = Some(id.into());
+        false
     }
 
     /// 选中项在当前列表中的下标；列表里没有时为 0。
@@ -149,6 +169,7 @@ impl ResourceSet {
         let exists = self.instances.iter().any(|i| i.id == id);
         if exists {
             self.selected = id.into();
+            self.pending = None;
         }
         exists
     }
@@ -264,9 +285,46 @@ mod tests {
         set.update(insts(&["cpu", "memory", "disk0"]));
         assert_eq!(set.selected(), "cpu");
         assert_eq!(set.selected_index(), 0);
-        // 之后设备回来，不会自动重新选中。
+        // 设备回来后恢复选中（消失只是暂时的回退）。
         set.update(insts(&["cpu", "memory", "disk0", "disk1"]));
+        assert_eq!(set.selected(), "disk1");
+    }
+
+    #[test]
+    fn restore_of_absent_instance_is_pending_and_saved_until_it_appears() {
+        let mut set = ResourceSet::new(insts(&["cpu", "memory"]));
+        assert!(!set.restore("gpu0"));
         assert_eq!(set.selected(), "cpu");
+        // 仍未出现：保存的是待恢复的 id，而不是回退的 cpu。
+        set.update(insts(&["cpu", "memory", "disk0"]));
+        assert_eq!(set.selected(), "cpu");
+        assert_eq!(set.selected_for_save(), "gpu0");
+        // 出现后自动选中，待恢复清除。
+        set.update(insts(&["cpu", "memory", "disk0", "gpu0"]));
+        assert_eq!(set.selected(), "gpu0");
+        assert_eq!(set.selected_for_save(), "gpu0");
+        // 再次消失又回来，同样恢复。
+        set.update(insts(&["cpu", "memory"]));
+        assert_eq!(set.selected_for_save(), "gpu0");
+        set.update(insts(&["cpu", "memory", "gpu0"]));
+        assert_eq!(set.selected(), "gpu0");
+    }
+
+    #[test]
+    fn explicit_selection_clears_pending() {
+        let mut set = ResourceSet::new(insts(&["cpu", "memory"]));
+        assert!(!set.restore("gpu0"));
+        assert!(set.select("memory"));
+        assert_eq!(set.selected_for_save(), "memory");
+        set.update(insts(&["cpu", "memory", "gpu0"]));
+        assert_eq!(set.selected(), "memory");
+    }
+
+    #[test]
+    fn restore_existing_selects_immediately() {
+        let mut set = ResourceSet::new(summary_instances());
+        assert!(set.restore("network"));
+        assert_eq!(set.selected_for_save(), "network");
     }
 
     #[test]

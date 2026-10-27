@@ -16,7 +16,7 @@ use crate::format;
 use crate::logging::Log;
 use crate::sampling::{Command, SamplerHandle};
 use crate::settings::{ColumnWidths, Settings, Store};
-use crate::{AppWindow, Columns, ProcRow, Resource, ResourceKind, placement};
+use crate::{AppWindow, ColumnLayout, Columns, ProcRow, Resource, ResourceKind, placement};
 use resources::{Edit, Instance, ResourceSet};
 
 const STATUS_ENDED: i32 = 1;
@@ -98,6 +98,11 @@ impl Controller {
         cols.set_cpu(settings.columns.cpu);
         cols.set_memory(settings.columns.memory);
         cols.set_disk(settings.columns.disk);
+        // 列宽总和超出可用宽度时的有效列宽（保存值不变，窗口放大后自然恢复）。
+        cols.on_fit(|available, name_min, pid, cpu, memory, disk| {
+            let w = ColumnWidths { pid, cpu, memory, disk }.fit(available, name_min);
+            ColumnLayout { pid: w.pid, cpu: w.cpu, memory: w.memory, disk: w.disk }
+        });
         let c = Rc::new(Self {
             ui: ui.as_weak(),
             rows,
@@ -108,9 +113,11 @@ impl Controller {
             settings: RefCell::new(settings.clone()),
             store,
         });
-        // 恢复上次选中的资源实例；实例不存在时保持默认的 CPU。
-        if !c.select_resource(&settings.resource) {
-            c.log.borrow_mut().line(format!("设置中的资源 {} 不存在，使用 {}", settings.resource, resources::CPU));
+        // 恢复上次选中的资源实例；实例暂时不存在时先用 CPU，实例出现后自动切回。
+        let restored = c.state.borrow_mut().resources.restore(&settings.resource);
+        c.sync_selection(&c.state.borrow());
+        if !restored {
+            c.log.borrow_mut().line(format!("设置中的资源 {} 暂不存在，待其出现后恢复", settings.resource));
         }
         c.bind(ui);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
@@ -250,6 +257,13 @@ impl Controller {
         self.sampler.send(Command::Interval(interval));
     }
 
+    /// 记录最近一次的普通（非最大化、非最小化）窗口矩形，由定时器周期调用。
+    pub fn track_window(&self) {
+        if let Some(ui) = self.ui.upgrade() {
+            placement::capture(&ui, &mut self.settings.borrow_mut());
+        }
+    }
+
     /// 收集当前状态并写入设置文件（退出前、以管理员身份重启前调用）。
     pub fn save_settings(&self) {
         let (Some(store), Some(ui)) = (&self.store, self.ui.upgrade()) else { return };
@@ -260,7 +274,7 @@ impl Controller {
             settings.sort_key = s.opts.sort_key;
             settings.descending = s.opts.descending;
             settings.tree = s.opts.tree;
-            settings.resource = s.resources.selected().to_owned();
+            settings.resource = s.resources.selected_for_save().to_owned();
         }
         settings.interval_index = ui.get_interval_index();
         settings.page = ui.get_page();

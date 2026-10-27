@@ -15,6 +15,8 @@ public static class Win {
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
 }
 '@
@@ -33,7 +35,8 @@ function Check($ok, $msg) {
 # 启动 exe，等主窗口出现；返回 @{Process; Handle}。
 function Start-App($settingsDir, $extraArgs = @()) {
     $env:TML_SETTINGS_DIR = $settingsDir
-    $p = Start-Process -FilePath $exePath -ArgumentList $extraArgs -PassThru
+    # --allow-multiple：不受单实例限制，用户自己开着的任务管理器不会干扰测试。
+    $p = Start-Process -FilePath $exePath -ArgumentList (@("--allow-multiple") + $extraArgs) -PassThru
     $h = [IntPtr]::Zero
     for ($i = 0; $i -lt 150 -and $h -eq [IntPtr]::Zero; $i++) {
         Start-Sleep -Milliseconds 100
@@ -44,6 +47,15 @@ function Start-App($settingsDir, $extraArgs = @()) {
     if ($h -eq [IntPtr]::Zero) { $p.Kill(); throw '等不到主窗口' }
     # 再等一会儿让窗口完成首次布局与位置设置。
     Start-Sleep -Milliseconds 800
+    # 句柄可能先指向尚未定型的窗口：重新取一次，并等到它有合理的大小。
+    for ($i = 0; $i -lt 50; $i++) {
+        $p.Refresh()
+        if ($p.HasExited) { throw "进程提前退出，退出码 $($p.ExitCode)" }
+        $h = $p.MainWindowHandle
+        $r = New-Object Win+RECT
+        if ($h -ne [IntPtr]::Zero -and [Win]::GetWindowRect($h, [ref]$r) -and ($r.Right - $r.Left) -gt 200) { break }
+        Start-Sleep -Milliseconds 100
+    }
     @{ Process = $p; Handle = $h }
 }
 
@@ -104,7 +116,7 @@ try {
     Check ($s.resource -eq 'network') '首个快照之后性能页选中的资源仍是 network（退出时从选中项读取）'
     Check ($s.columns.pid -eq 90 -and $s.columns.cpu -eq 64 -and $s.columns.memory -eq 140 -and $s.columns.disk -eq 200) '列宽一致'
     Check ($s.future_field.keep.Count -eq 3) '未知字段被保留'
-    Check (-not (Test-Path "$settingsFile.tmp")) '没有残留临时文件'
+    Check (@(Get-ChildItem $dir -Filter *.tmp).Count -eq 0) "没有残留临时文件"
 
     '== 2. 窗口被移动后退出，新位置被保存 =='
     $app = Start-App $dir
@@ -139,6 +151,62 @@ try {
     Check ($w.X -gt -10000 -and $w.Y -gt -10000) "窗口位置回到可见区域，实际 ($($w.X), $($w.Y))"
     Check (Near-Size $app $w 820 580) "客户区大小对应逻辑尺寸 820x580，实际 $($w.W)x$($w.H)"
     Close-App $app
+
+    '== 5b. 保存时是最大化：恢复为最大化，且保存的仍是普通矩形 =='
+    $dir = New-Dir 'maximized'
+    $settingsFile = Join-Path $dir 'settings.json'
+    '{ "window": { "x": 150, "y": 100, "width": 800, "height": 560, "maximized": true } }' | Set-Content -Encoding utf8 $settingsFile
+    $app = Start-App $dir
+    Check ([Win]::IsZoomed($app.Handle)) '设置为最大化时启动即最大化'
+    Close-App $app
+    $win = (Get-Content $settingsFile -Raw | ConvertFrom-Json).window
+    Check ($win.maximized -eq $true) '最大化状态被保存'
+    Check ($win.x -eq 150 -and $win.y -eq 100 -and [math]::Abs($win.width - 800) -lt 1.5 -and [math]::Abs($win.height - 560) -lt 1.5) "保存的仍是普通矩形 (150,100) 800x560，实际 ($($win.x),$($win.y)) $($win.width)x$($win.height)"
+
+    '== 5c. 运行中最大化再退出：保存最大化之前的普通矩形 =='
+    $dir = New-Dir 'maximize-runtime'
+    $settingsFile = Join-Path $dir 'settings.json'
+    '{ "window": { "x": 200, "y": 120, "width": 800, "height": 560 } }' | Set-Content -Encoding utf8 $settingsFile
+    $app = Start-App $dir
+    [void][Win]::ShowWindow($app.Handle, 3) # SW_MAXIMIZE
+    Start-Sleep -Milliseconds 800
+    Check ([Win]::IsZoomed($app.Handle)) '窗口已最大化'
+    Close-App $app
+    $win = (Get-Content $settingsFile -Raw | ConvertFrom-Json).window
+    Check ($win.maximized -eq $true) '最大化状态被保存'
+    Check ($win.x -eq 200 -and $win.y -eq 120 -and [math]::Abs($win.width - 800) -lt 1.5 -and [math]::Abs($win.height - 560) -lt 1.5) "保存的是最大化之前的矩形，实际 ($($win.x),$($win.y)) $($win.width)x$($win.height)"
+
+    '== 5d. 首次运行（无设置）就最大化再退出：不能把整屏矩形当作普通矩形 =='
+    $dir = New-Dir 'first-maximize'
+    $settingsFile = Join-Path $dir 'settings.json'
+    $app = Start-App $dir
+    [void][Win]::ShowWindow($app.Handle, 3)
+    Start-Sleep -Milliseconds 800
+    Close-App $app
+    $win = (Get-Content $settingsFile -Raw | ConvertFrom-Json).window
+    Check ($win.maximized -eq $true) '最大化状态被保存'
+    Check ([math]::Abs($win.width - 1040) -lt 1.5 -and [math]::Abs($win.height - 700) -lt 1.5) "保存的是默认窗口大小 1040x700，实际 $($win.width)x$($win.height)"
+
+    '== 5e. 保存的资源 id 暂不存在：保留它而不是回退的 cpu =='
+    $dir = New-Dir 'pending'
+    $settingsFile = Join-Path $dir 'settings.json'
+    '{ "page": 1, "resource": "gpu:0" }' | Set-Content -Encoding utf8 $settingsFile
+    $app = Start-App $dir
+    Start-Sleep -Milliseconds 1500
+    Close-App $app
+    $log = Get-ChildItem $logDir -Filter *.log | Sort-Object LastWriteTime | Select-Object -Last 1 | Get-Content -Raw
+    Check ($log -match '暂不存在') '日志记录了待恢复的资源'
+    Check ((Get-Content $settingsFile -Raw | ConvertFrom-Json).resource -eq 'gpu:0') '退出时仍保存 gpu:0'
+
+    '== 5f. 异常巨大的设置文件：视为损坏，正常启动 =='
+    $dir = New-Dir 'huge'
+    $settingsFile = Join-Path $dir 'settings.json'
+    '{ "tree": true, "pad": "' + ('x' * (2 * 1024 * 1024)) + '" }' | Set-Content -Encoding utf8 $settingsFile
+    $app = Start-App $dir
+    Check (-not $app.Process.HasExited) '超大文件不影响启动'
+    Close-App $app
+    Check ((Get-Item $settingsFile).Length -lt 4096) '退出后已写回正常大小的设置'
+    Check (@(Get-ChildItem $dir -Filter *.tmp).Count -eq 0) '没有残留临时文件'
 
     '== 6. 开发模式（--measure-startup）不读写设置文件 =='
     $dir = New-Dir 'dev'

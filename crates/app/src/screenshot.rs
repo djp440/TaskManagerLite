@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use slint::platform::{PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
+use slint::{ComponentHandle, LogicalPosition, LogicalSize, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
 
 use crate::{AppWindow, Columns};
 
@@ -57,6 +57,20 @@ const STEPS: &[Step] = &[
         drag(ui, memory_left, -60.0);
         let pid_left = left_of(cols.get_disk() + cols.get_memory() + cols.get_cpu() + cols.get_pid());
         drag(ui, pid_left, -30.0);
+    }),
+    // 窗口缩到接近最小宽度、四列都是最大宽度（例如最大化时拉宽后又缩小窗口）：
+    // 名称列至少保留 180px，数值列按比例缩小，表头与数据列对齐。
+    ("10-窄窗口超宽列宽-深色", |ui| {
+        ui.window().set_size(LogicalSize::new(780.0, 560.0));
+        let cols = ui.global::<Columns>();
+        cols.set_pid(480.0);
+        cols.set_cpu(480.0);
+        cols.set_memory(480.0);
+        cols.set_disk(480.0);
+    }),
+    // 同样的设定值回到宽窗口：保存值没有被改动，列宽恢复为设定的 480。
+    ("11-窗口放大后列宽恢复-深色", |ui| {
+        ui.window().set_size(LogicalSize::new(2000.0, 700.0));
     }),
 ];
 

@@ -1,6 +1,6 @@
 import { ListView, Palette } from "std-widgets.slint";
 import { Theme, Chevron } from "theme.slint";
-import { ProcRow } from "types.slint";
+import { ColumnLayout, ProcRow } from "types.slint";
 
 // 列宽：名称列伸缩，其余由用户拖动调整（启动时由设置恢复，默认值与 settings.rs 保持一致）。
 export global Columns {
@@ -14,6 +14,13 @@ export global Columns {
     out property <length> default-disk: 108px;
     out property <length> min: 48px;
     out property <length> max: 480px;
+    // 名称列至少保留的宽度；上面的 pid/cpu/... 是用户设定值，实际显示用 `eff`：
+    // 列宽总和超出可用宽度时按比例缩小（算法在 Rust 侧，见 settings.rs 的 `ColumnWidths::fit`），设定值不变。
+    out property <length> name-min: 180px;
+    // 列表可用于各列的宽度，由 ProcessPage 随窗口宽度更新。
+    in-out property <length> available;
+    pure callback fit(length, length, length, length, length, length) -> ColumnLayout;
+    out property <ColumnLayout> eff: self.fit(self.available, self.name-min, self.pid, self.cpu, self.memory, self.disk);
 }
 
 component HeaderCell inherits Rectangle {
@@ -190,25 +197,25 @@ component ProcRowView inherits Rectangle {
         }
 
         ValueCell {
-            width: Columns.pid;
+            width: Columns.eff.pid;
             text: root.data.pid;
             heat: 0;
         }
 
         ValueCell {
-            width: Columns.cpu;
+            width: Columns.eff.cpu;
             text: root.data.cpu;
             heat: root.data.cpu-heat;
         }
 
         ValueCell {
-            width: Columns.memory;
+            width: Columns.eff.memory;
             text: root.data.memory;
             heat: root.data.memory-heat;
         }
 
         ValueCell {
-            width: Columns.disk;
+            width: Columns.eff.disk;
             text: root.data.disk;
             heat: root.data.disk-heat;
         }
@@ -227,17 +234,36 @@ export component ProcessPage inherits Rectangle {
     callback end-process();
     callback end-tree();
 
-    // 名称列至少保留的宽度，拖动其他列时不能挤占。
-    property <length> name-min: 180px;
+    // 表头右侧留白；其余宽度交给 Columns 分配。
+    property <length> header-padding: 10px;
+
+    function sync-available() {
+        Columns.available = root.width - root.header-padding;
+    }
+
+    changed width => {
+        root.sync-available();
+    }
+
+    init => {
+        root.sync-available();
+    }
 
     function column-width(col: int) -> length {
-        col == 1 ? Columns.pid : col == 2 ? Columns.cpu : col == 3 ? Columns.memory : Columns.disk
+        col == 1 ? Columns.eff.pid : col == 2 ? Columns.eff.cpu : col == 3 ? Columns.eff.memory : Columns.eff.disk
     }
 
     function resize-column(col: int, delta: length) {
-        let others = Columns.pid + Columns.cpu + Columns.memory + Columns.disk - root.column-width(col);
-        let upper = max(Columns.min, min(Columns.max, root.width - 10px - root.name-min - others));
-        let w = max(Columns.min, min(upper, root.column-width(col) + delta));
+        // 拖动前先把各列当前的有效宽度固化为设定值，避免总和受限时其他列跟着重新缩放。
+        let current = root.column-width(col);
+        let e = Columns.eff;
+        Columns.pid = e.pid;
+        Columns.cpu = e.cpu;
+        Columns.memory = e.memory;
+        Columns.disk = e.disk;
+        let others = Columns.pid + Columns.cpu + Columns.memory + Columns.disk - current;
+        let upper = max(Columns.min, min(Columns.max, Columns.available - Columns.name-min - others));
+        let w = max(Columns.min, min(upper, current + delta));
         if col == 1 {
             Columns.pid = w;
         } else if col == 2 {
@@ -288,7 +314,7 @@ export component ProcessPage inherits Rectangle {
                 }
 
                 HeaderCell {
-                    width: Columns.pid;
+                    width: Columns.eff.pid;
                     resize(d) => {
                         root.resize-column(1, d);
                     }
@@ -304,7 +330,7 @@ export component ProcessPage inherits Rectangle {
                 }
 
                 HeaderCell {
-                    width: Columns.cpu;
+                    width: Columns.eff.cpu;
                     resize(d) => {
                         root.resize-column(2, d);
                     }
@@ -320,7 +346,7 @@ export component ProcessPage inherits Rectangle {
                 }
 
                 HeaderCell {
-                    width: Columns.memory;
+                    width: Columns.eff.memory;
                     resize(d) => {
                         root.resize-column(3, d);
                     }
@@ -336,7 +362,7 @@ export component ProcessPage inherits Rectangle {
                 }
 
                 HeaderCell {
-                    width: Columns.disk;
+                    width: Columns.eff.disk;
                     resize(d) => {
                         root.resize-column(4, d);
                     }

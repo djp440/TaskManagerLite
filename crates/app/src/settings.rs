@@ -13,6 +13,7 @@ use serde_json::{Map, Number, Value};
 use tml_core::SortKey;
 
 const FILE_NAME: &str = "settings.json";
+const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
 /// 窗口外框位置（物理像素）与客户区大小（逻辑像素，换到不同缩放的显示器上也保持相同的视觉大小）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -39,6 +40,22 @@ impl ColumnWidths {
     pub fn clamped(self) -> Self {
         let c = |v: f32| v.clamp(Self::MIN, Self::MAX);
         Self { pid: c(self.pid), cpu: c(self.cpu), memory: c(self.memory), disk: c(self.disk) }
+    }
+
+    /// 在可用宽度 `available`（列表宽度减去右侧留白）内求有效列宽：名称列至少保留 `name_min`，
+    /// 其余列超出预算时，把各自高出下限的部分按同一比例缩小。保存值不变，窗口放大后自然恢复。
+    /// 可用宽度未知（<= 0）时原样返回。界面布局通过 `Columns.fit` 调用本函数。
+    pub fn fit(self, available: f32, name_min: f32) -> Self {
+        let w = self.clamped();
+        let sum = w.pid + w.cpu + w.memory + w.disk;
+        // 预算不足以容纳四列的下限时，各列取下限（窗口的最小宽度保证这种情况不会出现）。
+        let budget = (available - name_min).max(4.0 * Self::MIN);
+        if available <= 0.0 || sum <= budget {
+            return w;
+        }
+        let f = (budget - 4.0 * Self::MIN) / (sum - 4.0 * Self::MIN);
+        let s = |v: f32| Self::MIN + (v - Self::MIN) * f;
+        Self { pid: s(w.pid), cpu: s(w.cpu), memory: s(w.memory), disk: s(w.disk) }
     }
 }
 
@@ -250,7 +267,16 @@ impl Store {
         &self.path
     }
 
+    /// 临时文件名带进程 id：提权重启期间新旧实例可能同时存在，不能争用同一个临时文件。
+    fn tmp_path(&self) -> PathBuf {
+        self.path.with_extension(format!("json.{}.tmp", std::process::id()))
+    }
+
     pub fn load(&self) -> (Settings, LoadOutcome) {
+        // 设置文件只有几百字节；异常巨大的文件视为损坏，避免启动时被它拖住。
+        if fs::metadata(&self.path).is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
+            return (Settings::default(), LoadOutcome::Corrupt);
+        }
         match fs::read(&self.path) {
             Ok(bytes) => {
                 let (s, ok) = Settings::parse(&String::from_utf8_lossy(&bytes));
@@ -266,7 +292,7 @@ impl Store {
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let tmp = self.path.with_extension("json.tmp");
+        let tmp = self.tmp_path();
         let result = (|| {
             let mut f = fs::File::create(&tmp)?;
             f.write_all(settings.to_json().as_bytes())?;
@@ -356,6 +382,58 @@ mod tests {
         assert_eq!(s.window, None);
     }
 
+    fn total(c: ColumnWidths) -> f32 {
+        c.pid + c.cpu + c.memory + c.disk
+    }
+
+    #[test]
+    fn 列宽在预算内时不变() {
+        let c = ColumnWidths::default();
+        assert_eq!(c.fit(1040.0 - 10.0, 180.0), c);
+        // 可用宽度未知时不约束。
+        let wide = ColumnWidths { pid: 480.0, cpu: 480.0, memory: 480.0, disk: 480.0 };
+        assert_eq!(wide.fit(0.0, 180.0), wide);
+    }
+
+    #[test]
+    fn 列宽超出预算时按比例缩小并保证名称列下限() {
+        let wide = ColumnWidths { pid: 480.0, cpu: 480.0, memory: 480.0, disk: 480.0 };
+        for available in [750.0f32, 800.0, 1000.0, 1500.0] {
+            let e = wide.fit(available, 180.0);
+            let budget = available - 180.0;
+            assert!(total(e) <= budget + 0.01, "{available}: {e:?}");
+            assert!((total(e) - budget).abs() < 0.01, "超出预算时应正好用满预算");
+            for v in [e.pid, e.cpu, e.memory, e.disk] {
+                assert!(v >= ColumnWidths::MIN);
+            }
+        }
+        // 各列按高出下限的部分等比缩小，大小次序不变。
+        let mixed = ColumnWidths { pid: 100.0, cpu: 100.0, memory: 400.0, disk: 480.0 };
+        let e = mixed.fit(760.0, 180.0);
+        assert!(e.memory > e.pid && e.disk > e.memory);
+        assert!(total(e) <= 580.01);
+    }
+
+    #[test]
+    fn 预算小于四列下限时取下限() {
+        let wide = ColumnWidths { pid: 300.0, cpu: 300.0, memory: 300.0, disk: 300.0 };
+        let e = wide.fit(100.0, 180.0);
+        assert_eq!(e, ColumnWidths { pid: 48.0, cpu: 48.0, memory: 48.0, disk: 48.0 });
+    }
+
+    #[test]
+    fn 超过_1_mb_的文件视为损坏() {
+        let dir = temp_dir("big");
+        fs::create_dir_all(&dir).unwrap();
+        let store = Store::new(&dir);
+        let mut text = String::from("{\"tree\": true, \"pad\": \"");
+        text.push_str(&"x".repeat(MAX_FILE_BYTES as usize));
+        text.push_str("\"}");
+        fs::write(store.path(), text).unwrap();
+        assert_eq!(store.load(), (Settings::default(), LoadOutcome::Corrupt));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn 数值越界被忽略或夹紧() {
         let s = parse(
@@ -428,7 +506,7 @@ mod tests {
         let blocked = Store::new(dir.join("blocked"));
         fs::create_dir_all(blocked.path()).unwrap();
         assert!(blocked.save(&s).is_err());
-        assert!(!blocked.path().with_extension("json.tmp").exists());
+        assert!(!blocked.tmp_path().exists());
         assert_eq!(store.load(), (s, LoadOutcome::Loaded));
         let _ = fs::remove_dir_all(&dir);
     }
