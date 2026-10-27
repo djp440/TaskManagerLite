@@ -1,0 +1,26 @@
+export struct ProcRow {
+    name: string,
+    pid: int,
+    cpu: string,
+    memory: string,
+    disk: string,
+    cpu-heat: float,
+    memory-heat: float,
+    disk-heat: float,
+    depth: int,
+    has-children: bool,
+    expanded: bool,
+    critical: bool,
+}
+
+// 性能概览中的一类资源。标题和统计项标签由界面按下标提供，便于翻译。
+export struct Resource {
+    value: string,
+    detail: string,
+    line: string,
+    area: string,
+    mini-line: string,
+    mini-area: string,
+    scale: string,
+    stats: [string],
+}

@@ -9,7 +9,7 @@ name = "TaskManagerLite"
 path = "src/main.rs"
 
 [features]
-default = ["renderer-femtovg"]
+default = ["renderer-software"]
 renderer-femtovg = ["slint/renderer-femtovg"]
 renderer-software = ["slint/renderer-software"]
 

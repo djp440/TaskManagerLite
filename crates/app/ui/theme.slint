@@ -1,0 +1,35 @@
+import { Palette } from "std-widgets.slint";
+
+export global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+
+    out property <color> cpu: #4c9bf5;
+    out property <color> memory: #b37feb;
+    out property <color> disk: #3fbf74;
+    out property <color> network: #f2a33a;
+    out property <color> heat: #ffb900;
+    out property <color> danger: #e5484d;
+
+    out property <brush> subtle-text: dark ? #ffffff99 : #00000099;
+    out property <brush> faint-text: dark ? #ffffff5c : #0000005c;
+    out property <brush> surface: dark ? #202020 : #ffffff;
+    out property <brush> surface-raised: dark ? #2b2b2b : #ffffff;
+    out property <brush> divider: dark ? #ffffff14 : #0000000f;
+    out property <brush> hover: dark ? #ffffff0f : #0000000a;
+    out property <brush> selected: dark ? #4c9bf540 : #4c9bf52e;
+    out property <brush> grid: dark ? #ffffff10 : #0000000d;
+
+    out property <length> row-height: 30px;
+    out property <length> radius: 8px;
+}
+
+// V 形箭头图标。direction：0 向下，1 向上，2 向右。
+export component Chevron inherits Path {
+    in property <int> direction;
+    width: 10px;
+    height: 10px;
+    viewbox-width: 10;
+    viewbox-height: 10;
+    stroke-width: 1.4px;
+    commands: root.direction == 0 ? "M 2 3.5 L 5 6.5 L 8 3.5" : root.direction == 1 ? "M 2 6.5 L 5 3.5 L 8 6.5" : "M 3.5 2 L 6.5 5 L 3.5 8";
+}
