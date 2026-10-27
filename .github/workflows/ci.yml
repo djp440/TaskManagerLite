@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: 测试与 release 构建
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 测试
+        run: cargo test --locked -p tml-core -p tml-app
+
+      - name: release 构建
+        run: cargo build --locked -p tml-app --release
+
+      - name: 记录产物体积
+        shell: pwsh
+        run: |
+          $exe = Get-Item target/release/TaskManagerLite.exe
+          "TaskManagerLite.exe：{0:N2} MB" -f ($exe.Length / 1MB) >> $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TaskManagerLite-${{ github.sha }}
+          path: target/release/TaskManagerLite.exe
+          retention-days: 7
