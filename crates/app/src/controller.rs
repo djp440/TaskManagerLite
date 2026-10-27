@@ -15,7 +15,8 @@ mod resources;
 use crate::format;
 use crate::logging::Log;
 use crate::sampling::{Command, SamplerHandle};
-use crate::{AppWindow, ProcRow, Resource, ResourceKind};
+use crate::settings::{ColumnWidths, Settings, Store};
+use crate::{AppWindow, Columns, ProcRow, Resource, ResourceKind, placement};
 use resources::{Edit, Instance, ResourceSet};
 
 const STATUS_ENDED: i32 = 1;
@@ -34,6 +35,10 @@ pub struct Controller {
     sampler: SamplerHandle,
     state: RefCell<State>,
     pub log: RefCell<Log>,
+    /// 启动时读到的设置；保存时在它的基础上更新，未识别的字段因此得以保留。
+    settings: RefCell<Settings>,
+    /// 开发模式（`--screenshot`、`--measure-startup`）下为 `None`，不读写用户设置。
+    store: Option<Store>,
 }
 
 #[derive(Default)]
@@ -75,14 +80,24 @@ fn sort_index(k: SortKey) -> i32 {
 }
 
 impl Controller {
-    pub fn new(ui: &AppWindow, sampler: SamplerHandle, log: Log) -> Rc<Self> {
+    pub fn new(ui: &AppWindow, sampler: SamplerHandle, log: Log, settings: Settings, store: Option<Store>) -> Rc<Self> {
         let rows = Rc::new(VecModel::default());
         let set = ResourceSet::new(resources::summary_instances());
         let resources = Rc::new(VecModel::from(set.instances().iter().map(Self::resource_row).collect::<Vec<_>>()));
         ui.set_rows(ModelRc::from(rows.clone()));
         ui.set_resources(ModelRc::from(resources.clone()));
         ui.set_elevated(tml_core::is_elevated());
-        let state = State { visible: true, resources: set, ..Default::default() };
+        let mut state = State { visible: true, resources: set, ..Default::default() };
+        state.opts.sort_key = settings.sort_key;
+        state.opts.descending = settings.descending;
+        state.opts.tree = settings.tree;
+        ui.set_tree_mode(settings.tree);
+        ui.set_page(settings.page);
+        let cols = ui.global::<Columns>();
+        cols.set_pid(settings.columns.pid);
+        cols.set_cpu(settings.columns.cpu);
+        cols.set_memory(settings.columns.memory);
+        cols.set_disk(settings.columns.disk);
         let c = Rc::new(Self {
             ui: ui.as_weak(),
             rows,
@@ -90,9 +105,19 @@ impl Controller {
             sampler,
             state: RefCell::new(state),
             log: RefCell::new(log),
+            settings: RefCell::new(settings.clone()),
+            store,
         });
-        c.sync_selection(&c.state.borrow());
+        // 恢复上次选中的资源实例；实例不存在时保持默认的 CPU。
+        if !c.select_resource(&settings.resource) {
+            c.log.borrow_mut().line(format!("设置中的资源 {} 不存在，使用 {}", settings.resource, resources::CPU));
+        }
         c.bind(ui);
+        // 默认的 1 秒与采样线程的初始值一致，无需通知。
+        if settings.interval_index != 1 {
+            ui.set_interval_index(settings.interval_index);
+            c.set_interval(settings.interval_index);
+        }
         c
     }
 
@@ -203,22 +228,57 @@ impl Controller {
         let c = Rc::downgrade(self);
         ui.on_interval_changed(move |i| {
             if let Some(c) = c.upgrade() {
-                let interval = match i {
-                    0 => Some(Duration::from_millis(500)),
-                    1 => Some(Duration::from_secs(1)),
-                    2 => Some(Duration::from_secs(2)),
-                    _ => None,
-                };
-                {
-                    let mut s = c.state.borrow_mut();
-                    if interval.is_none() || s.paused {
-                        s.gap = true;
-                    }
-                    s.paused = interval.is_none();
-                }
-                c.sampler.send(Command::Interval(interval));
+                c.set_interval(i);
             }
         });
+    }
+
+    fn set_interval(&self, index: i32) {
+        let interval = match index {
+            0 => Some(Duration::from_millis(500)),
+            1 => Some(Duration::from_secs(1)),
+            2 => Some(Duration::from_secs(2)),
+            _ => None,
+        };
+        {
+            let mut s = self.state.borrow_mut();
+            if interval.is_none() || s.paused {
+                s.gap = true;
+            }
+            s.paused = interval.is_none();
+        }
+        self.sampler.send(Command::Interval(interval));
+    }
+
+    /// 收集当前状态并写入设置文件（退出前、以管理员身份重启前调用）。
+    pub fn save_settings(&self) {
+        let (Some(store), Some(ui)) = (&self.store, self.ui.upgrade()) else { return };
+        let mut settings = self.settings.borrow_mut();
+        placement::capture(&ui, &mut settings);
+        {
+            let s = self.state.borrow();
+            settings.sort_key = s.opts.sort_key;
+            settings.descending = s.opts.descending;
+            settings.tree = s.opts.tree;
+            settings.resource = s.resources.selected().to_owned();
+        }
+        settings.interval_index = ui.get_interval_index();
+        settings.page = ui.get_page();
+        let cols = ui.global::<Columns>();
+        settings.columns = ColumnWidths {
+            pid: cols.get_pid(),
+            cpu: cols.get_cpu(),
+            memory: cols.get_memory(),
+            disk: cols.get_disk(),
+        }
+        .clamped();
+        let result = store.save(&settings);
+        drop(settings);
+        let mut log = self.log.borrow_mut();
+        match result {
+            Ok(()) => log.line(format!("设置已保存 {}", store.path().display())),
+            Err(e) => log.line(format!("设置保存失败 {e}")),
+        }
     }
 
     /// 由定时器轮询窗口是否最小化。
@@ -494,6 +554,8 @@ impl Controller {
     }
 
     fn elevate(&self) {
+        // 新进程会立刻读取设置，先保存。
+        self.save_settings();
         if tml_core::relaunch_elevated() {
             let _ = slint::quit_event_loop();
         } else if let Some(ui) = self.ui.upgrade() {

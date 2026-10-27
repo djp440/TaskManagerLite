@@ -3,8 +3,10 @@
 mod controller;
 mod format;
 mod logging;
+mod placement;
 mod sampling;
 mod screenshot;
+mod settings;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -42,7 +44,19 @@ fn main() -> Result<(), slint::PlatformError> {
     log.line(format!("启动 渲染器={RENDERER} 提权={}", tml_core::is_elevated()));
     log.line(format!("进入 main {entered:.1} ms"));
 
+    // 设置在创建窗口前读取（一个很小的文件）；开发模式不读写用户设置，保证截图与测量可复现。
+    let dev_mode = measure || std::env::args().any(|a| a == "--screenshot");
+    let store = if dev_mode { None } else { settings::Store::from_env() };
+    let (loaded, outcome) = store.as_ref().map_or((settings::Settings::default(), None), |s| {
+        let (settings, outcome) = s.load();
+        (settings, Some(outcome))
+    });
+    log.line(format!("设置 {outcome:?} 窗口={:?}", loaded.window));
+
     let ui = AppWindow::new()?;
+    if store.is_some() {
+        placement::apply(&ui, &loaded);
+    }
     log.line(format!("窗口组件创建 {:.1} ms", tml_core::ms_since_process_start()));
     let sampler = sampling::spawn(|sample| {
         let _ = slint::invoke_from_event_loop(move || {
@@ -53,8 +67,13 @@ fn main() -> Result<(), slint::PlatformError> {
             })
         });
     });
-    let controller = Controller::new(&ui, sampler, log);
+    let controller = Controller::new(&ui, sampler, log, loaded, store);
     CONTROLLER.with(|c| *c.borrow_mut() = Some(controller.clone()));
+    let saver = controller.clone();
+    ui.window().on_close_requested(move || {
+        saver.save_settings();
+        slint::CloseRequestResponse::HideWindow
+    });
 
     // 首帧与首个快照帧的耗时（自进程创建起算，含加载器时间）。
     let first_frame_logged = Cell::new(false);
