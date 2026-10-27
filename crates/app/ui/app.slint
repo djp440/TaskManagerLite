@@ -3,8 +3,9 @@ import { Theme } from "theme.slint";
 import { ColumnLayout, ProcRow, Resource, ResourceKind, ResourceTint } from "types.slint";
 import { ProcessPage, Columns } from "process-page.slint";
 import { PerformancePage } from "performance-page.slint";
+import { MemoryView, StatItem } from "memory-detail.slint";
 
-export { ColumnLayout, ProcRow, Resource, ResourceKind, ResourceTint, Columns }
+export { ColumnLayout, MemoryView, ProcRow, Resource, ResourceKind, ResourceTint, StatItem, Columns }
 
 component Tab inherits Rectangle {
     in property <string> text;
@@ -137,6 +138,7 @@ export component AppWindow inherits Window {
     in-out property <int> interval-index: 1;
     in property <bool> elevated;
     in property <[Resource]> resources;
+    in property <MemoryView> memory-view;
     in property <int> process-count;
     in property <string> cpu-summary;
     in property <string> memory-summary;
@@ -372,6 +374,7 @@ export component AppWindow inherits Window {
                 perf-page := PerformancePage {
                     visible: root.page == 1;
                     resources: root.resources;
+                    memory: root.memory-view;
                     selected-resource: root.selected-resource;
                     selected-index: root.resource-index;
                     resource-selected(id) => {

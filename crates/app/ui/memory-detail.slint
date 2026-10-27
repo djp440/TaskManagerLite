@@ -1,0 +1,142 @@
+import { Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// 一个“标签 + 值”的统计项。
+export struct StatItem {
+    label: string,
+    value: string,
+}
+
+// 内存详情页底部所需的数据，由 Rust 整形（controller/memory.rs）。
+export struct MemoryView {
+    // 大号数值统计项：使用中、可用、已提交、已缓存、已压缩、分页缓冲池、非分页缓冲池。
+    stats: [StatItem],
+    // 基本信息键值：总容量、速度、已使用的插槽、外形规格、为硬件保留的内存。
+    info: [StatItem],
+    // 内存组合条图例：使用中、已修改、备用、空闲。
+    composition: [StatItem],
+    // 组合条前三段占物理总量的比例，余下为空闲。
+    in-use: float,
+    modified: float,
+    standby: float,
+}
+
+// 内存组合条：使用中（实心）、已修改（中等）、备用（浅色），其余为空闲。
+component CompositionBar inherits Rectangle {
+    in property <MemoryView> view;
+    in property <color> tint;
+
+    height: 18px;
+    border-width: 1px;
+    border-color: root.tint.with-alpha(0.55);
+    clip: true;
+    Rectangle {
+        x: 0;
+        width: parent.width * root.view.in-use;
+        background: root.tint.with-alpha(0.85);
+    }
+
+    Rectangle {
+        x: parent.width * root.view.in-use;
+        width: parent.width * root.view.modified;
+        background: root.tint.with-alpha(0.5);
+    }
+
+    Rectangle {
+        x: parent.width * (root.view.in-use + root.view.modified);
+        width: parent.width * root.view.standby;
+        background: root.tint.with-alpha(0.22);
+    }
+}
+
+// 内存详情：组合条 + 统计项 + 基本信息。
+export component MemoryDetail inherits VerticalLayout {
+    in property <MemoryView> view;
+    in property <color> tint;
+
+    spacing: 6px;
+    alignment: start;
+    Text {
+        text: @tr("内存组合");
+        font-size: 12px;
+        color: Theme.subtle-text;
+    }
+
+    CompositionBar {
+        view: root.view;
+        tint: root.tint;
+    }
+
+    HorizontalLayout {
+        spacing: 16px;
+        alignment: start;
+        for item[i] in root.view.composition: HorizontalLayout {
+            spacing: 5px;
+            alignment: start;
+            Rectangle {
+                width: 9px;
+                height: 9px;
+                y: (parent.height - self.height) / 2;
+                background: i == 0 ? root.tint.with-alpha(0.85) : i == 1 ? root.tint.with-alpha(0.5) : i == 2 ? root.tint.with-alpha(0.22) : transparent;
+                border-width: 1px;
+                border-color: root.tint.with-alpha(0.55);
+            }
+
+            Text {
+                text: item.label + " " + item.value;
+                font-size: 12px;
+                color: Theme.subtle-text;
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-top: 8px;
+        spacing: 40px;
+        alignment: start;
+        // 统计项：标签 + 大号数值，4 列网格，与其他资源页的统计项样式一致。
+        GridLayout {
+            spacing: 12px;
+            for item[i] in root.view.stats: VerticalLayout {
+                row: floor(i / 4);
+                col: mod(i, 4);
+                padding-right: 16px;
+                spacing: 2px;
+                Text {
+                    text: item.label;
+                    font-size: 12px;
+                    color: Theme.subtle-text;
+                }
+
+                Text {
+                    text: item.value;
+                    font-size: 20px;
+                    font-weight: 600;
+                    color: Palette.foreground;
+                }
+            }
+        }
+
+        // 基本信息：键值对。
+        VerticalLayout {
+            spacing: 4px;
+            alignment: start;
+            for item in root.view.info: HorizontalLayout {
+                spacing: 12px;
+                Text {
+                    width: 120px;
+                    text: item.label;
+                    font-size: 12px;
+                    color: Theme.subtle-text;
+                }
+
+                Text {
+                    text: item.value;
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Palette.foreground;
+                }
+            }
+        }
+    }
+}

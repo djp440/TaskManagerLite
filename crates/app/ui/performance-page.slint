@@ -1,6 +1,7 @@
 import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Resource, ResourceTint } from "types.slint";
+import { Resource, ResourceKind, ResourceTint } from "types.slint";
+import { MemoryDetail, MemoryView } from "memory-detail.slint";
 
 // 资源曲线：路径由 Rust 按图表的实际尺寸（逻辑像素）生成。
 component Graph inherits Rectangle {
@@ -98,6 +99,8 @@ export component PerformancePage inherits Rectangle {
     in property <string> selected-resource;
     in property <int> selected-index;
     callback resource-selected(string);
+    // 内存详情页的数据（kind == memory 时使用）。
+    in property <MemoryView> memory;
     out property <length> graph-width: detail-graph.width;
     out property <length> graph-height: detail-graph.height;
     callback graph-resized();
@@ -218,7 +221,12 @@ export component PerformancePage inherits Rectangle {
 
                 // 详情区目前对所有类型通用；需要按类型定制时（CPU、内存等），
                 // 在这里按 root.data.kind 分支，并让通用统计项排除这些类型。
-                HorizontalLayout {
+                if root.data.kind == ResourceKind.memory: MemoryDetail {
+                    view: root.memory;
+                    tint: root.tint;
+                }
+
+                if root.data.kind != ResourceKind.memory: HorizontalLayout {
                     padding-top: 8px;
                     spacing: 40px;
                     alignment: start;

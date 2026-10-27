@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use tml_core::{
-    EndError, ProcessKey, ProcessSnapshot, Sample, SortKey, SystemMetrics, ViewOptions, ViewRow, build_view,
-    end_process, tree_from,
+    EndError, MemoryHardware, MemoryStatus, ProcessKey, ProcessSnapshot, Sample, SortKey, SystemMetrics, ViewOptions,
+    ViewRow, build_view, end_process, tree_from,
 };
 
+mod memory;
 mod resources;
 
 use crate::format;
@@ -50,6 +51,9 @@ struct State {
     /// 性能页的资源实例、曲线历史与选中项。
     resources: ResourceSet,
     system: SystemMetrics,
+    memory: MemoryStatus,
+    /// 内存硬件信息只读取一次，首个快照之后才有。
+    memory_hardware: Option<MemoryHardware>,
     /// 采样中断后，下一个点前需要先插入断点。
     gap: bool,
     paused: bool,
@@ -329,6 +333,10 @@ impl Controller {
             }
             s.snapshot = sample.snapshot;
             s.system = m;
+            s.memory = sample.memory;
+            if sample.memory_hardware.is_some() {
+                s.memory_hardware = sample.memory_hardware;
+            }
             s.first_data = true;
             self.update_resources(&s, now);
         }
@@ -350,6 +358,7 @@ impl Controller {
         let cpu = format::percent(m.cpu_usage);
         let gib = |b: u64| b as f64 / 1024.0 / 1024.0 / 1024.0;
         let mem = format!("{:.1}/{:.1} GB", gib(m.memory_used), gib(m.memory_total));
+        let mem_text = memory::describe(&s.memory, s.memory_hardware.as_ref());
         let rows: Vec<Resource> = s
             .resources
             .instances()
@@ -391,7 +400,9 @@ impl Controller {
                 };
                 let (line, area) = history.paths(now, scale, detail);
                 let (mini_line, mini_area) = history.paths(now, scale, Self::MINI);
+                let detail = if inst.kind == ResourceKind::Memory { mem_text.header.clone() } else { String::new() };
                 Resource {
+                    detail: detail.into(),
                     value: value.into(),
                     line: line.into(),
                     area: area.into(),
@@ -404,6 +415,7 @@ impl Controller {
             })
             .collect();
         self.apply_resources(s, rows);
+        ui.set_memory_view(memory::view(mem_text));
         ui.set_process_count(s.snapshot.processes.len() as i32);
         ui.set_cpu_summary(cpu.into());
         ui.set_memory_summary(format!("{mem_pct:.0}%").into());

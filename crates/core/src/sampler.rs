@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::control::is_critical;
+use crate::memory::{MemoryHardware, MemoryStatus, read_hardware, read_status};
 use crate::nt::ProcessQuery;
 use crate::snapshot::{Baseline, ProcessKey, ProcessSnapshot};
 use crate::system::{CpuTimes, DiskCounters, SystemMetrics, cpu_times, memory, network_octets};
@@ -11,6 +12,10 @@ use crate::system::{CpuTimes, DiskCounters, SystemMetrics, cpu_times, memory, ne
 pub struct Sample {
     pub snapshot: ProcessSnapshot,
     pub system: SystemMetrics,
+    /// 内存详情（组成、提交、内核池）。
+    pub memory: MemoryStatus,
+    /// 内存硬件信息（SMBIOS），只在读取完成的那次采样里出现一次。
+    pub memory_hardware: Option<MemoryHardware>,
 }
 
 #[derive(Default)]
@@ -22,6 +27,7 @@ pub struct Sampler {
     last: Option<Instant>,
     disk: Option<DiskCounters>,
     disk_tried: bool,
+    hardware_tried: bool,
     critical: HashMap<ProcessKey, bool>,
 }
 
@@ -52,6 +58,9 @@ impl Sampler {
         self.critical = seen;
 
         let (memory_used, memory_total) = memory();
+        let memory_status = read_status(self.query.compressed_working_set);
+        // SMBIOS 解析稍慢，放在首次采样之后，避免拖慢第一个快照。
+        let memory_hardware = (!first && !std::mem::replace(&mut self.hardware_tried, true)).then(read_hardware);
 
         // PDH 初始化稍慢，放在首次采样之后，避免拖慢第一个快照。
         let (disk_active, disk_read, disk_write) = match &mut self.disk {
@@ -88,6 +97,8 @@ impl Sampler {
                 net_recv,
                 net_send,
             },
+            memory: memory_status,
+            memory_hardware,
         }
     }
 }
