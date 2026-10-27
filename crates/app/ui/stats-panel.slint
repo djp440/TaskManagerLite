@@ -1,0 +1,84 @@
+import { Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// 一个“标签 + 值”的条目：既用作大号数值统计项，也用作基本信息的键值行。
+export struct StatItem {
+    label: string,
+    value: string,
+}
+
+// 资源详情页下半部分的通用面板：上方是“标签 + 大号数值”的统计项网格，下方是“基本信息”键值区。
+// 布局完全由自身宽度决定，不会横向溢出：
+// - 统计项列数随宽度在 2–4 之间变化，列宽相等，过长的值用省略号；
+// - 基本信息宽度足够时排成两列，否则一列。
+// 面板的高度由内容决定（固定行高），父级纵向空间不足时应让曲线先收缩，再由外层滚动。
+export component StatsPanel inherits Rectangle {
+    in property <[StatItem]> stats;
+    in property <[StatItem]> info;
+
+    property <length> stat-height: 46px;
+    property <length> stat-gap: 8px;
+    property <length> info-row-height: 22px;
+    property <length> section-gap: 12px;
+
+    property <int> cols: max(2, min(4, floor(self.width / 160px)));
+    property <int> info-cols: self.width >= 520px ? 2 : 1;
+    property <int> stat-rows: ceil(root.stats.length / root.cols);
+    property <int> info-rows: ceil(root.info.length / root.info-cols);
+    property <length> stats-total: root.stat-rows * root.stat-height + max(0, root.stat-rows - 1) * root.stat-gap;
+    property <length> info-offset: root.stats-total + root.section-gap;
+    property <length> info-total: root.info.length > 0 ? root.info-rows * root.info-row-height : 0px;
+    property <length> content-height: root.info.length > 0 ? root.info-offset + root.info-total : root.stats-total;
+
+    min-height: root.content-height;
+    preferred-height: root.content-height;
+    max-height: root.content-height;
+
+    for item[i] in root.stats: VerticalLayout {
+        x: mod(i, root.cols) * (root.width / root.cols);
+        y: floor(i / root.cols) * (root.stat-height + root.stat-gap);
+        width: root.width / root.cols - 12px;
+        height: root.stat-height;
+        spacing: 2px;
+        Text {
+            text: item.label;
+            font-size: 12px;
+            color: Theme.subtle-text;
+            overflow: elide;
+        }
+
+        Text {
+            text: item.value;
+            font-size: 20px;
+            font-weight: 600;
+            color: Palette.foreground;
+            overflow: elide;
+        }
+    }
+
+    for item[i] in root.info: HorizontalLayout {
+        x: mod(i, root.info-cols) * (root.width / root.info-cols);
+        y: root.info-offset + floor(i / root.info-cols) * root.info-row-height;
+        width: root.width / root.info-cols - 12px;
+        height: root.info-row-height;
+        spacing: 12px;
+        Text {
+            width: 118px;
+            text: item.label;
+            font-size: 12px;
+            color: Theme.subtle-text;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Text {
+            horizontal-stretch: 1;
+            text: item.value;
+            font-size: 12px;
+            font-weight: 600;
+            color: Palette.foreground;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}

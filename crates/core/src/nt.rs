@@ -69,11 +69,13 @@ struct SystemProcessInfo {
 /// 复用缓冲区的进程枚举器。
 pub struct ProcessQuery {
     buffer: Vec<u64>,
+    /// 最近一次枚举中 Memory Compression 进程的工作集（字节），没有该进程时为 0。
+    pub compressed_working_set: u64,
 }
 
 impl Default for ProcessQuery {
     fn default() -> Self {
-        Self { buffer: vec![0; 256 * 1024 / 8] }
+        Self { buffer: vec![0; 256 * 1024 / 8], compressed_working_set: 0 }
     }
 }
 
@@ -101,7 +103,8 @@ impl ProcessQuery {
         }
     }
 
-    fn parse(&self) -> Vec<RawProcess> {
+    fn parse(&mut self) -> Vec<RawProcess> {
+        self.compressed_working_set = 0;
         let mut out = Vec::with_capacity(512);
         let base = self.buffer.as_ptr().cast::<u8>();
         let mut offset = 0usize;
@@ -117,6 +120,9 @@ impl ProcessQuery {
                 };
                 String::from_utf16_lossy(units)
             };
+            if name == "Memory Compression" {
+                self.compressed_working_set = info.working_set_size as u64;
+            }
             out.push(RawProcess {
                 pid,
                 parent_pid: info.inherited_from_unique_process_id as u32,

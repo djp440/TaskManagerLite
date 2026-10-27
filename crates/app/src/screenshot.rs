@@ -72,6 +72,19 @@ const STEPS: &[Step] = &[
     ("11-窗口放大后列宽恢复-深色", |ui| {
         ui.window().set_size(LogicalSize::new(2000.0, 700.0));
     }),
+    // 编号从 12 起，避开其他功能新增的步骤；每步显式设置主题与窗口尺寸，不依赖前一步的状态。
+    ("12-性能内存-浅色", |ui| {
+        resize(ui, 1040.0, 700.0);
+        ui.invoke_set_dark(false);
+        ui.set_page(1);
+        ui.invoke_resource_selected("memory".into());
+    }),
+    ("13-性能内存-深色-最小尺寸760x480", |ui| {
+        ui.invoke_set_dark(true);
+        resize(ui, 760.0, 480.0);
+    }),
+    ("14-性能内存-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
+    ("15-性能内存-深色-默认尺寸", |ui| resize(ui, 1040.0, 700.0)),
 ];
 
 /// 在表头（y = 56 + 17）的 `x` 处按下并水平拖动 `dx` 逻辑像素。
@@ -87,6 +100,10 @@ fn drag(ui: &AppWindow, x: f32, dx: f32) {
         w.dispatch_event(WindowEvent::PointerMoved { position: at(start + dx * i as f32 / 6.0) });
     }
     w.dispatch_event(WindowEvent::PointerReleased { position: at(start + dx), button: PointerEventButton::Left });
+}
+
+fn resize(ui: &AppWindow, width: f32, height: f32) {
+    ui.window().set_size(LogicalSize::new(width, height));
 }
 
 /// 先采样一段时间让曲线有内容，再逐步截图，最后退出。
