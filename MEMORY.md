@@ -1,5 +1,10 @@
 # 开发经验
 
+## 2026-10-27 23:59 右键菜单
+- Windows 上 Slint 的 `ContextMenuArea` 走 muda 的原生弹出菜单（`TrackPopupMenu`，模态）：`take_snapshot` 截不到，`--screenshot` 里触发会阻塞事件循环。菜单截图用 `scripts/menu-screenshots.ps1`（应用 `--menu-shot` 自己右键，脚本按类名 `#32768` 找菜单窗口并 `PrintWindow`，脚本须声明 DPI 感知）。原生菜单不随应用深浅色变化。
+- 行内 `TouchArea` 会吞掉右键，`ContextMenuArea` 收不到：在 `pointer-event` 里右键按下时先选中行、让 Rust 读取路径/命令行设置 `ProcessMenu` 的可用状态，再调用 `menu.show(...)`。菜单项 `enabled` 绑定全局属性，弹出时求值。
+- 命令行用 `NtQueryInformationProcess(ProcessCommandLineInformation=60)` + 受限查询权限；受保护进程（System）返回 `None`。`std::process::Command` 会给程序名加引号，测试断言要带引号。
+
 ## 2026-10-27 23:40 进程图标
 - `slint::Image` 的 `PartialEq` 按像素缓冲指针比较，空 `Image` 彼此不相等：放进 `ProcRow` 会让“行未变化则跳过”的判断全部失效。空图标用同一个 1×1 透明图的克隆占位。
 - `slint::Image` 不是 Send：后台线程只传 `SharedPixelBuffer`，界面线程再转 Image。

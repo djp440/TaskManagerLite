@@ -32,7 +32,7 @@ impl IconBitmap {
 }
 
 /// 该线程第一次调用时初始化 COM（外壳 API 需要）；线程退出时由系统回收。
-fn ensure_com() {
+pub(crate) fn ensure_com() {
     thread_local! {
         static INIT: () = unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);

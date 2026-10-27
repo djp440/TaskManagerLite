@@ -10,6 +10,7 @@ use tml_core::{
     end_process, tree_from,
 };
 
+mod process_menu;
 mod resources;
 
 use crate::format;
@@ -138,6 +139,7 @@ impl Controller {
             c.log.borrow_mut().line(format!("设置中的资源 {} 暂不存在，待其出现后恢复", settings.resource));
         }
         c.bind(ui);
+        c.bind_process_menu(ui);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
         if settings.interval_index != 1 {
             ui.set_interval_index(settings.interval_index);
