@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use slint::{ComponentHandle, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
 
-use crate::AppWindow;
+use crate::{AppWindow, CpuData};
 
 type Step = (&'static str, fn(&AppWindow));
 
@@ -27,6 +27,7 @@ const STEPS: &[Step] = &[
         ui.set_page(1);
         ui.invoke_resource_selected("cpu".into());
     }),
+    ("03b-性能CPU逻辑处理器-深色", |ui| ui.global::<CpuData>().set_per_core(true)),
     ("04-性能内存-深色", |ui| ui.invoke_resource_selected("memory".into())),
     ("05-性能网络-深色", |ui| ui.invoke_resource_selected("network".into())),
     ("06-结束进程树确认-深色", |ui| {
@@ -41,9 +42,11 @@ const STEPS: &[Step] = &[
         ui.invoke_set_dark(false);
     }),
     ("08-性能CPU-浅色", |ui| {
+        ui.global::<CpuData>().set_per_core(false);
         ui.set_page(1);
         ui.invoke_resource_selected("cpu".into());
     }),
+    ("08b-性能CPU逻辑处理器-浅色", |ui| ui.global::<CpuData>().set_per_core(true)),
 ];
 
 /// 先采样一段时间让曲线有内容，再逐步截图，最后退出。

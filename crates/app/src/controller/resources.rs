@@ -45,7 +45,14 @@ impl Instance {
 /// 后续按物理磁盘、网卡、GPU 拆分时，在这里按设备枚举结果生成。
 pub fn summary_instances() -> Vec<Instance> {
     vec![
-        Instance::new(CPU, ResourceKind::Cpu, ResourceTint::Cpu, "CPU", "% 利用率", &["利用率", "逻辑处理器", "进程数"]),
+        Instance::new(CPU, ResourceKind::Cpu, ResourceTint::Cpu, "CPU", "% 利用率", &[
+            "利用率",
+            "速度",
+            "进程",
+            "线程",
+            "句柄",
+            "正常运行时间",
+        ]),
         Instance::new(MEMORY, ResourceKind::Memory, ResourceTint::Memory, "内存", "内存使用量", &[
             "使用中", "可用", "总量",
         ]),

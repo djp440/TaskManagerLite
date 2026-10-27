@@ -1,6 +1,7 @@
 import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Resource, ResourceTint } from "types.slint";
+import { Resource, ResourceKind, ResourceTint } from "types.slint";
+import { CpuBottom, CpuCoreGrid, CpuData, CpuModeSwitch } from "cpu-detail.slint";
 
 // 资源曲线：路径由 Rust 按图表的实际尺寸（逻辑像素）生成。
 component Graph inherits Rectangle {
@@ -124,6 +125,8 @@ export component PerformancePage inherits Rectangle {
 
     property <Resource> data: root.resources[root.selected-index];
     property <color> tint: root.tint-of(root.data.tint);
+    // CPU 页切换到“逻辑处理器”视图时，整体曲线被网格盖住。
+    property <bool> core-grid: root.data.kind == ResourceKind.cpu && CpuData.per-core;
 
     HorizontalLayout {
         padding: 12px;
@@ -172,16 +175,21 @@ export component PerformancePage inherits Rectangle {
                 }
 
                 HorizontalLayout {
+                    spacing: 12px;
                     Text {
                         text: root.data.caption;
                         font-size: 12px;
                         color: Theme.subtle-text;
+                        vertical-alignment: center;
                     }
+
+                    if root.data.kind == ResourceKind.cpu: CpuModeSwitch { }
 
                     Text {
                         horizontal-stretch: 1;
                         text: root.data.scale;
                         horizontal-alignment: right;
+                        vertical-alignment: center;
                         font-size: 12px;
                         color: Theme.subtle-text;
                     }
@@ -190,7 +198,7 @@ export component PerformancePage inherits Rectangle {
                 Rectangle {
                     vertical-stretch: 1;
                     min-height: 160px;
-                    border-width: 1px;
+                    border-width: root.core-grid ? 0px : 1px;
                     border-color: root.tint.with-alpha(0.55);
                     detail-graph := Graph {
                         line: root.data.line;
@@ -198,6 +206,8 @@ export component PerformancePage inherits Rectangle {
                         tint: root.tint;
                         grid: true;
                     }
+
+                    if root.core-grid: CpuCoreGrid { }
                 }
 
                 HorizontalLayout {
@@ -218,11 +228,18 @@ export component PerformancePage inherits Rectangle {
 
                 // 详情区目前对所有类型通用；需要按类型定制时（CPU、内存等），
                 // 在这里按 root.data.kind 分支，并让通用统计项排除这些类型。
+                if root.data.kind == ResourceKind.cpu: CpuBottom {
+                    labels: root.data.stat-labels;
+                    values: root.data.stats;
+                }
+
                 HorizontalLayout {
+                    // CPU 页没有通用统计项，这里是空布局，不能抢走曲线图的空间。
+                    vertical-stretch: 0;
                     padding-top: 8px;
                     spacing: 40px;
                     alignment: start;
-                    for value[i] in root.data.stats: VerticalLayout {
+                    for value[i] in root.data.kind == ResourceKind.cpu ? [] : root.data.stats: VerticalLayout {
                         spacing: 2px;
                         Text {
                             text: root.data.stat-labels[i];

@@ -10,12 +10,14 @@ use tml_core::{
     end_process, tree_from,
 };
 
+mod cpu;
 mod resources;
 
 use crate::format;
 use crate::logging::Log;
 use crate::sampling::{Command, SamplerHandle};
-use crate::{AppWindow, ProcRow, Resource, ResourceKind};
+use crate::{AppWindow, CpuData, ProcRow, Resource, ResourceKind};
+use cpu::CpuState;
 use resources::{Edit, Instance, ResourceSet};
 
 const STATUS_ENDED: i32 = 1;
@@ -44,6 +46,8 @@ struct State {
     selected: Option<ProcessKey>,
     /// 性能页的资源实例、曲线历史与选中项。
     resources: ResourceSet,
+    /// CPU 详情：每个逻辑处理器的历史与基本信息。
+    cpu: CpuState,
     system: SystemMetrics,
     /// 采样中断后，下一个点前需要先插入断点。
     gap: bool,
@@ -92,6 +96,7 @@ impl Controller {
             log: RefCell::new(log),
         });
         c.sync_selection(&c.state.borrow());
+        c.state.borrow().cpu.attach(ui);
         c.bind(ui);
         c
     }
@@ -141,6 +146,7 @@ impl Controller {
         ui.on_confirm_accepted(with(Controller::confirm));
         ui.on_elevate(with(Controller::elevate));
         ui.on_graph_resized(with(Controller::redraw_graphs));
+        ui.global::<CpuData>().on_cell_resized(with(Controller::redraw_graphs));
         let c = Rc::downgrade(self);
         ui.on_resource_selected(move |id| {
             if let Some(c) = c.upgrade() {
@@ -245,6 +251,7 @@ impl Controller {
             s.resources.update(resources::summary_instances());
             if std::mem::take(&mut s.gap) {
                 s.resources.push_gap(now);
+                s.cpu.push_gap(now);
             }
             // 首次采样没有基线，CPU、磁盘、网络都是 0，不画进曲线。
             if s.first_data {
@@ -253,6 +260,8 @@ impl Controller {
                 s.resources.push(resources::DISK, now, Some(m.disk_active as f64));
                 s.resources.push(resources::NETWORK, now, Some(m.net_recv + m.net_send));
             }
+            let with_history = s.first_data;
+            s.cpu.record(now, sample.cpu, with_history);
             s.snapshot = sample.snapshot;
             s.system = m;
             s.first_data = true;
@@ -271,7 +280,6 @@ impl Controller {
             (w, h) if w > 1.0 && h > 1.0 => (w, h),
             _ => (600.0, 300.0),
         };
-        let logical = std::thread::available_parallelism().map_or(0, |n| n.get());
         let mem_pct = if m.memory_total > 0 { m.memory_used as f64 / m.memory_total as f64 * 100.0 } else { 0.0 };
         let cpu = format::percent(m.cpu_usage);
         let gib = |b: u64| b as f64 / 1024.0 / 1024.0 / 1024.0;
@@ -284,11 +292,9 @@ impl Controller {
                 let history = s.resources.history(&inst.id);
                 // (纵轴顶端取值, 卡片摘要, 纵轴标注, 统计项取值)
                 let (scale, value, scale_label, stats) = match inst.kind {
-                    ResourceKind::Cpu => (100.0, cpu.clone(), "100%".to_string(), vec![
-                        cpu.clone(),
-                        logical.to_string(),
-                        s.snapshot.processes.len().to_string(),
-                    ]),
+                    ResourceKind::Cpu => {
+                        (100.0, s.cpu.card_value(&cpu), "100%".to_string(), s.cpu.stats(&cpu, s.snapshot.processes.len()))
+                    }
                     ResourceKind::Memory => (
                         m.memory_total.max(1) as f64,
                         format!("{mem} ({mem_pct:.0}%)"),
@@ -318,6 +324,7 @@ impl Controller {
                 let (line, area) = history.paths(now, scale, detail);
                 let (mini_line, mini_area) = history.paths(now, scale, Self::MINI);
                 Resource {
+                    detail: if inst.kind == ResourceKind::Cpu { s.cpu.model_name() } else { String::new() }.into(),
                     value: value.into(),
                     line: line.into(),
                     area: area.into(),
@@ -330,6 +337,7 @@ impl Controller {
             })
             .collect();
         self.apply_resources(s, rows);
+        s.cpu.refresh(&ui, now);
         ui.set_process_count(s.snapshot.processes.len() as i32);
         ui.set_cpu_summary(cpu.into());
         ui.set_memory_summary(format!("{mem_pct:.0}%").into());

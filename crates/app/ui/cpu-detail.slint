@@ -1,0 +1,242 @@
+import { Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// 逻辑处理器网格里的一张小图。曲线路径由 Rust 按小图的实际尺寸生成。
+export struct CoreGraph {
+    label: string,
+    value: string,
+    line: string,
+    area: string,
+}
+
+// “基本信息”键值区的一行。
+export struct InfoRow {
+    label: string,
+    value: string,
+}
+
+// CPU 详情的数据与视图状态。放在全局对象里，不占用 AppWindow / PerformancePage 的属性。
+export global CpuData {
+    // 为 true 时显示每个逻辑处理器一张小图，否则显示整体曲线。
+    in-out property <bool> per-core: false;
+    in property <[CoreGraph]> cores;
+    in property <[InfoRow]> info;
+    // 网格中单张小图内部的绘制尺寸，由布局得出，Rust 据此生成曲线。
+    in-out property <length> cell-width;
+    in-out property <length> cell-height;
+    callback cell-resized();
+}
+
+component Segment inherits Rectangle {
+    in property <string> text;
+    in property <bool> active;
+    callback clicked;
+
+    border-radius: 5px;
+    background: root.active ? Theme.selected : touch.has-hover ? Theme.hover : transparent;
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Text {
+        text: root.text;
+        font-size: 12px;
+        color: root.active ? Palette.foreground : Theme.subtle-text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// “整体利用率 / 逻辑处理器”视图切换。
+export component CpuModeSwitch inherits Rectangle {
+    width: 176px;
+    height: 24px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: Theme.divider;
+
+    HorizontalLayout {
+        padding: 2px;
+        spacing: 2px;
+        Segment {
+            text: @tr("整体利用率");
+            active: !CpuData.per-core;
+            clicked => {
+                CpuData.per-core = false;
+            }
+        }
+
+        Segment {
+            text: @tr("逻辑处理器");
+            active: CpuData.per-core;
+            clicked => {
+                CpuData.per-core = true;
+            }
+        }
+    }
+}
+
+component CoreCell inherits Rectangle {
+    in property <CoreGraph> data;
+
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: Theme.cpu.with-alpha(0.6);
+    clip: true;
+
+    Rectangle {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        clip: true;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: self.width / 1px;
+            viewbox-height: self.height / 1px;
+            commands: root.data.area;
+            fill: Theme.cpu.with-alpha(0.16);
+        }
+
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: self.width / 1px;
+            viewbox-height: self.height / 1px;
+            commands: root.data.line;
+            stroke: Theme.cpu;
+            stroke-width: 1.2px;
+        }
+    }
+
+    Text {
+        x: 6px;
+        y: 3px;
+        text: root.data.label;
+        font-size: 11px;
+        color: Theme.subtle-text;
+    }
+
+    Text {
+        x: parent.width - self.width - 6px;
+        y: 3px;
+        text: root.data.value;
+        font-size: 11px;
+        color: Theme.subtle-text;
+    }
+}
+
+// 每个逻辑处理器一张小图。列数随数量与可用空间自适应：
+// 让小图接近 1.6:1 的宽高比，同时不窄于 64px。
+export component CpuCoreGrid inherits Rectangle {
+    property <length> gap: 6px;
+    property <int> count: CpuData.cores.length;
+    property <int> max-cols: Math.max(1, Math.floor((root.width + root.gap) / (64px + root.gap)));
+    property <int> ideal-cols: Math.round(Math.sqrt(root.count * root.width / (Math.max(root.height, 1px) * 1.6)));
+    property <int> cols: Math.max(1, Math.min(Math.max(root.count, 1), Math.min(root.max-cols, root.ideal-cols)));
+    property <int> rows: Math.max(1, Math.ceil(root.count / root.cols));
+    property <length> cell-w: (root.width - root.gap * (root.cols - 1)) / root.cols;
+    property <length> cell-h: (root.height - root.gap * (root.rows - 1)) / root.rows;
+
+    // 小图内部（去掉 1px 边框）的绘制尺寸。
+    out property <length> inner-w: max(root.cell-w - 2px, 1px);
+    out property <length> inner-h: max(root.cell-h - 2px, 1px);
+
+    changed inner-w => {
+        CpuData.cell-width = self.inner-w;
+        CpuData.cell-resized();
+    }
+    changed inner-h => {
+        CpuData.cell-height = self.inner-h;
+        CpuData.cell-resized();
+    }
+
+    background: Theme.surface-raised;
+    for core[i] in CpuData.cores: CoreCell {
+        x: Math.mod(i, root.cols) * (root.cell-w + root.gap);
+        y: Math.floor(i / root.cols) * (root.cell-h + root.gap);
+        width: root.cell-w;
+        height: root.cell-h;
+        data: core;
+    }
+}
+
+// CPU 页底部：左侧是“标签 + 大号数值”的统计项（与其他资源页一致），右侧是“基本信息”键值区。
+// 宽度不足时基本信息折到统计项下方。
+export component CpuBottom inherits Rectangle {
+    in property <[string]> labels;
+    in property <[string]> values;
+
+    property <length> stat-col: 104px;
+    property <length> stat-row: 52px;
+    property <length> stats-w: root.stat-col * 3;
+    property <length> stats-h: root.stat-row * 2;
+    property <length> info-row: 22px;
+    property <int> info-rows: Math.max(1, Math.ceil(CpuData.info.length / 2));
+    property <length> info-h: root.info-row * root.info-rows;
+    // 键值区放在右侧至少需要的宽度：两列各 160px。
+    property <bool> stacked: root.width < root.stats-w + 24px + 320px;
+    property <length> info-x: root.stacked ? 0px : root.stats-w + 24px;
+    property <length> info-y: root.stacked ? root.stats-h + 8px : 0px;
+    property <length> info-col-w: (root.width - root.info-x) / 2;
+
+    property <length> total-h: root.stacked ? root.info-y + root.info-h : max(root.stats-h, root.info-h);
+
+    // 在父级垂直布局里固定高度，把多余空间留给曲线图。
+    vertical-stretch: 0;
+    min-height: root.total-h;
+    max-height: root.total-h;
+    preferred-height: root.total-h;
+
+    for value[i] in root.values: VerticalLayout {
+        x: Math.mod(i, 3) * root.stat-col;
+        y: Math.floor(i / 3) * root.stat-row;
+        width: root.stat-col;
+        height: root.stat-row;
+        alignment: start;
+        spacing: 2px;
+        Text {
+            text: root.labels[i];
+            font-size: 12px;
+            color: Theme.subtle-text;
+        }
+
+        Text {
+            text: value;
+            font-size: 20px;
+            font-weight: 600;
+            color: Palette.foreground;
+            overflow: elide;
+        }
+    }
+
+    for row[i] in CpuData.info: Rectangle {
+        // 先按列填充：左列从上到下，再到右列。
+        x: root.info-x + Math.floor(i / root.info-rows) * root.info-col-w;
+        y: root.info-y + Math.mod(i, root.info-rows) * root.info-row;
+        width: root.info-col-w - 12px;
+        height: root.info-row;
+        Text {
+            x: 0px;
+            width: 78px;
+            text: row.label;
+            font-size: 12px;
+            color: Theme.subtle-text;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Text {
+            x: 82px;
+            width: parent.width - 82px;
+            text: row.value;
+            font-size: 13px;
+            color: Palette.foreground;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}

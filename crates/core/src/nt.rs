@@ -2,6 +2,8 @@
 
 use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation};
 
+use crate::cpu::ProcessTotals;
+
 const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
 
 /// 一个进程在某一时刻的原始计数器，尚未与上一次采样做差。
@@ -69,11 +71,13 @@ struct SystemProcessInfo {
 /// 复用缓冲区的进程枚举器。
 pub struct ProcessQuery {
     buffer: Vec<u64>,
+    /// 最近一次查询里全部进程的线程数与句柄数之和。
+    pub totals: ProcessTotals,
 }
 
 impl Default for ProcessQuery {
     fn default() -> Self {
-        Self { buffer: vec![0; 256 * 1024 / 8] }
+        Self { buffer: vec![0; 256 * 1024 / 8], totals: ProcessTotals::default() }
     }
 }
 
@@ -97,18 +101,23 @@ impl ProcessQuery {
                 continue;
             }
             status.ok()?;
-            return Ok(self.parse());
+            let (processes, totals) = self.parse();
+            self.totals = totals;
+            return Ok(processes);
         }
     }
 
-    fn parse(&self) -> Vec<RawProcess> {
+    fn parse(&self) -> (Vec<RawProcess>, ProcessTotals) {
         let mut out = Vec::with_capacity(512);
+        let mut totals = ProcessTotals::default();
         let base = self.buffer.as_ptr().cast::<u8>();
         let mut offset = 0usize;
         loop {
             // SAFETY: 系统保证每个条目按 8 字节对齐，且 next_entry_offset 链在缓冲区内。
             let info = unsafe { &*base.add(offset).cast::<SystemProcessInfo>() };
             let pid = info.unique_process_id as u32;
+            totals.threads += info.number_of_threads;
+            totals.handles += info.handle_count;
             let name = if info.image_name.buffer.is_null() {
                 if pid == 0 { "System Idle Process".into() } else { String::new() }
             } else {
@@ -132,6 +141,6 @@ impl ProcessQuery {
             }
             offset += info.next_entry_offset as usize;
         }
-        out
+        (out, totals)
     }
 }
