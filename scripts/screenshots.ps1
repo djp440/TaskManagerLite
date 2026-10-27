@@ -1,0 +1,23 @@
+# 生成视觉验收截图：以 --screenshot 模式离屏截图，再把 BMP 转成 PNG。
+# 用法：pwsh scripts/screenshots.ps1 [-Out docs/checklist/media/<日期>] [-Exe target/release/TaskManagerLite.exe]
+param(
+    [string]$Out = "$PSScriptRoot/../docs/checklist/media/$(Get-Date -Format yyyy-MM-dd)",
+    [string]$Exe = "$PSScriptRoot/../target/release/TaskManagerLite.exe"
+)
+
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+New-Item -ItemType Directory -Force $Out | Out-Null
+$Out = (Resolve-Path $Out).Path
+$env:TML_LOG_DIR = Join-Path ([System.IO.Path]::GetTempPath()) "tml-shots"
+
+$p = Start-Process -FilePath (Resolve-Path $Exe).Path -ArgumentList '--screenshot', "`"$Out`"" -PassThru
+if (-not $p.WaitForExit(60000)) { $p.Kill(); throw '截图超时' }
+
+foreach ($bmp in Get-ChildItem $Out -Filter *.bmp) {
+    $img = [System.Drawing.Image]::FromFile($bmp.FullName)
+    $img.Save([System.IO.Path]::ChangeExtension($bmp.FullName, '.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+    $img.Dispose()
+    Remove-Item $bmp.FullName
+}
+Get-ChildItem $Out -Filter *.png | ForEach-Object Name

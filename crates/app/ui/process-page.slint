@@ -1,0 +1,296 @@
+import { ListView, Palette } from "std-widgets.slint";
+import { Theme, Chevron } from "theme.slint";
+import { ProcRow } from "types.slint";
+
+// 列宽：名称列伸缩，其余固定。
+global Columns {
+    out property <length> pid: 76px;
+    out property <length> cpu: 76px;
+    out property <length> memory: 108px;
+    out property <length> disk: 108px;
+}
+
+component HeaderCell inherits Rectangle {
+    in property <string> text;
+    in property <bool> active;
+    in property <bool> descending;
+    in property <TextHorizontalAlignment> align: right;
+    callback clicked;
+
+    background: touch.has-hover ? Theme.hover : transparent;
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 4px;
+        Text {
+            text: root.text;
+            horizontal-stretch: 1;
+            horizontal-alignment: root.align;
+            vertical-alignment: center;
+            font-size: 12px;
+            font-weight: root.active ? 600 : 400;
+            color: root.active ? Palette.foreground : Theme.subtle-text;
+            overflow: elide;
+        }
+
+        Chevron {
+            y: (parent.height - self.height) / 2;
+            direction: root.descending ? 0 : 1;
+            stroke: root.active ? Theme.subtle-text : transparent;
+        }
+    }
+}
+
+component ValueCell inherits Rectangle {
+    in property <string> text;
+    in property <float> heat;
+
+    background: Theme.heat.with-alpha(root.heat * (Theme.dark ? 0.32 : 0.42));
+    Text {
+        x: 10px;
+        width: parent.width - 28px;
+        height: parent.height;
+        text: root.text;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        color: Palette.foreground;
+    }
+}
+
+component ProcRowView inherits Rectangle {
+    in property <ProcRow> data;
+    in property <bool> selected;
+    callback select();
+    callback toggle();
+    callback end-process();
+    callback end-tree();
+
+    height: Theme.row-height;
+    background: root.selected ? Theme.selected : touch.has-hover ? Theme.hover : transparent;
+
+    ContextMenuArea {
+        width: 100%;
+        height: 100%;
+        Menu {
+            MenuItem {
+                title: @tr("结束进程");
+                activated => {
+                    root.select();
+                    root.end-process();
+                }
+            }
+
+            MenuItem {
+                title: @tr("结束进程树");
+                activated => {
+                    root.select();
+                    root.end-tree();
+                }
+            }
+        }
+
+        touch := TouchArea {
+            clicked => {
+                root.select();
+            }
+            double-clicked => {
+                if root.data.has-children {
+                    root.toggle();
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        HorizontalLayout {
+            horizontal-stretch: 1;
+            padding-left: 6px + root.data.depth * 18px;
+            padding-right: 10px;
+            spacing: 4px;
+
+            Rectangle {
+                width: 18px;
+                expander := TouchArea {
+                    enabled: root.data.has-children;
+                    clicked => {
+                        root.select();
+                        root.toggle();
+                    }
+                }
+
+                if root.data.has-children: Chevron {
+                    direction: root.data.expanded ? 0 : 2;
+                    stroke: expander.has-hover ? Palette.foreground : Theme.subtle-text;
+                }
+            }
+
+            Text {
+                text: root.data.name;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                overflow: elide;
+                color: Palette.foreground;
+            }
+
+            if root.data.critical: Rectangle {
+                y: (parent.height - self.height) / 2;
+                height: 18px;
+                width: tag.preferred-width + 12px;
+                border-radius: 9px;
+                background: Theme.danger.with-alpha(0.14);
+                tag := Text {
+                    text: @tr("关键");
+                    font-size: 11px;
+                    color: Theme.danger;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        ValueCell {
+            width: Columns.pid;
+            text: root.data.pid;
+            heat: 0;
+        }
+
+        ValueCell {
+            width: Columns.cpu;
+            text: root.data.cpu;
+            heat: root.data.cpu-heat;
+        }
+
+        ValueCell {
+            width: Columns.memory;
+            text: root.data.memory;
+            heat: root.data.memory-heat;
+        }
+
+        ValueCell {
+            width: Columns.disk;
+            text: root.data.disk;
+            heat: root.data.disk-heat;
+        }
+    }
+}
+
+export component ProcessPage inherits Rectangle {
+    in property <[ProcRow]> rows;
+    in property <int> selected;
+    in property <int> sort-key;
+    in property <bool> sort-descending;
+    in property <bool> filtering;
+    callback sort-by(int);
+    callback select(int);
+    callback toggle(int);
+    callback end-process();
+    callback end-tree();
+
+    // 键盘移动选中行后，让它保持在可视范围内。
+    public function ensure-visible(index: int) {
+        if index * Theme.row-height + list.content-y < 0 {
+            list.content-y = -index * Theme.row-height;
+        } else if (index + 1) * Theme.row-height + list.content-y > list.visible-height {
+            list.content-y = list.visible-height - (index + 1) * Theme.row-height;
+        }
+    }
+
+    VerticalLayout {
+        Rectangle {
+            height: 34px;
+            HorizontalLayout {
+                padding-right: 10px;
+                HeaderCell {
+                    horizontal-stretch: 1;
+                    text: @tr("名称");
+                    align: left;
+                    active: root.sort-key == 0;
+                    descending: root.sort-descending;
+                    clicked => {
+                        root.sort-by(0);
+                    }
+                }
+
+                HeaderCell {
+                    width: Columns.pid;
+                    text: @tr("PID");
+                    active: root.sort-key == 1;
+                    descending: root.sort-descending;
+                    clicked => {
+                        root.sort-by(1);
+                    }
+                }
+
+                HeaderCell {
+                    width: Columns.cpu;
+                    text: @tr("CPU");
+                    active: root.sort-key == 2;
+                    descending: root.sort-descending;
+                    clicked => {
+                        root.sort-by(2);
+                    }
+                }
+
+                HeaderCell {
+                    width: Columns.memory;
+                    text: @tr("内存");
+                    active: root.sort-key == 3;
+                    descending: root.sort-descending;
+                    clicked => {
+                        root.sort-by(3);
+                    }
+                }
+
+                HeaderCell {
+                    width: Columns.disk;
+                    text: @tr("磁盘");
+                    active: root.sort-key == 4;
+                    descending: root.sort-descending;
+                    clicked => {
+                        root.sort-by(4);
+                    }
+                }
+            }
+
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Theme.divider;
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            list := ListView {
+                for row[i] in root.rows: ProcRowView {
+                    data: row;
+                    selected: i == root.selected;
+                    select => {
+                        root.select(i);
+                    }
+                    toggle => {
+                        root.toggle(i);
+                    }
+                    end-process => {
+                        root.end-process();
+                    }
+                    end-tree => {
+                        root.end-tree();
+                    }
+                }
+            }
+
+            if root.rows.length == 0 && root.filtering: Text {
+                text: @tr("没有匹配的进程");
+                color: Theme.subtle-text;
+                font-size: 14px;
+            }
+        }
+    }
+}

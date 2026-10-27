@@ -1,0 +1,237 @@
+import { Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Resource } from "types.slint";
+
+// 资源曲线：路径由 Rust 按图表的实际尺寸（逻辑像素）生成。
+component Graph inherits Rectangle {
+    in property <string> line;
+    in property <string> area;
+    in property <color> tint;
+    in property <bool> grid;
+
+    clip: true;
+    if root.grid: Rectangle {
+        for i in 3: Rectangle {
+            y: parent.height * (i + 1) / 4;
+            height: 1px;
+            background: Theme.grid;
+        }
+        for i in 5: Rectangle {
+            x: parent.width * (i + 1) / 6;
+            width: 1px;
+            background: Theme.grid;
+        }
+    }
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: self.width / 1px;
+        viewbox-height: self.height / 1px;
+        commands: root.area;
+        fill: root.tint.with-alpha(0.16);
+    }
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: self.width / 1px;
+        viewbox-height: self.height / 1px;
+        commands: root.line;
+        stroke: root.tint;
+        stroke-width: 1.5px;
+    }
+}
+
+component ResourceCard inherits Rectangle {
+    in property <string> title;
+    in property <Resource> data;
+    in property <color> tint;
+    in property <bool> active;
+    callback clicked;
+
+    height: 64px;
+    border-radius: Theme.radius;
+    background: root.active ? Theme.selected : touch.has-hover ? Theme.hover : transparent;
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding: 10px;
+        spacing: 12px;
+        Rectangle {
+            width: 72px;
+            border-width: 1px;
+            border-color: root.tint.with-alpha(0.6);
+            Graph {
+                line: root.data.mini-line;
+                area: root.data.mini-area;
+                tint: root.tint;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.title;
+                font-size: 14px;
+                font-weight: 600;
+                color: Palette.foreground;
+            }
+
+            Text {
+                text: root.data.value;
+                font-size: 12px;
+                color: Theme.subtle-text;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+export component PerformancePage inherits Rectangle {
+    in property <[Resource]> resources;
+    in-out property <int> current: 0;
+    out property <length> graph-width: detail-graph.width;
+    out property <length> graph-height: detail-graph.height;
+    callback graph-resized();
+
+    changed graph-width => {
+        root.graph-resized();
+    }
+    changed graph-height => {
+        root.graph-resized();
+    }
+
+    property <[string]> titles: [@tr("CPU"), @tr("内存"), @tr("磁盘"), @tr("网络")];
+    property <[color]> colors: [Theme.cpu, Theme.memory, Theme.disk, Theme.network];
+    property <[string]> captions: [@tr("% 利用率"), @tr("内存使用量"), @tr("% 活动时间"), @tr("吞吐量（接收 + 发送）")];
+    property <[[string]]> stat-labels: [
+        [@tr("利用率"), @tr("逻辑处理器"), @tr("进程数")],
+        [@tr("使用中"), @tr("可用"), @tr("总量")],
+        [@tr("活动时间"), @tr("读取速度"), @tr("写入速度")],
+        [@tr("接收"), @tr("发送")],
+    ];
+    property <Resource> data: root.resources[root.current];
+    property <color> tint: root.colors[root.current];
+
+    HorizontalLayout {
+        padding: 12px;
+        spacing: 12px;
+
+        VerticalLayout {
+            width: 240px;
+            spacing: 4px;
+            alignment: start;
+            for r[i] in root.resources: ResourceCard {
+                title: root.titles[i];
+                data: r;
+                tint: root.colors[i];
+                active: i == root.current;
+                clicked => {
+                    root.current = i;
+                }
+            }
+        }
+
+        Rectangle {
+            border-radius: Theme.radius;
+            background: Theme.surface-raised;
+            border-width: 1px;
+            border-color: Theme.divider;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+
+                HorizontalLayout {
+                    Text {
+                        text: root.titles[root.current];
+                        font-size: 24px;
+                        font-weight: 600;
+                        color: Palette.foreground;
+                        vertical-alignment: bottom;
+                    }
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.data.detail;
+                        horizontal-alignment: right;
+                        vertical-alignment: bottom;
+                        color: Theme.subtle-text;
+                    }
+                }
+
+                HorizontalLayout {
+                    Text {
+                        text: root.captions[root.current];
+                        font-size: 12px;
+                        color: Theme.subtle-text;
+                    }
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.data.scale;
+                        horizontal-alignment: right;
+                        font-size: 12px;
+                        color: Theme.subtle-text;
+                    }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    min-height: 160px;
+                    border-width: 1px;
+                    border-color: root.tint.with-alpha(0.55);
+                    detail-graph := Graph {
+                        line: root.data.line;
+                        area: root.data.area;
+                        tint: root.tint;
+                        grid: true;
+                    }
+                }
+
+                HorizontalLayout {
+                    Text {
+                        text: @tr("60 秒");
+                        font-size: 12px;
+                        color: Theme.faint-text;
+                    }
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "0";
+                        horizontal-alignment: right;
+                        font-size: 12px;
+                        color: Theme.faint-text;
+                    }
+                }
+
+                HorizontalLayout {
+                    padding-top: 8px;
+                    spacing: 40px;
+                    alignment: start;
+                    for value[i] in root.data.stats: VerticalLayout {
+                        spacing: 2px;
+                        Text {
+                            text: root.stat-labels[root.current][i];
+                            font-size: 12px;
+                            color: Theme.subtle-text;
+                        }
+
+                        Text {
+                            text: value;
+                            font-size: 20px;
+                            font-weight: 600;
+                            color: Palette.foreground;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
