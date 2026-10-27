@@ -22,7 +22,19 @@ thread_local! {
 
 const RENDERER: &str = if cfg!(feature = "renderer-software") { "software" } else { "femtovg" };
 
+/// 开发用参数：测量、截图与 `--allow-multiple` 不受单实例限制，也不占用单实例锁。
+const UNRESTRICTED_FLAGS: [&str; 3] = ["--measure-startup", "--screenshot", "--allow-multiple"];
+
 fn main() -> Result<(), slint::PlatformError> {
+    // 单实例：已有实例则通知它把窗口带到前台，本进程直接退出。须在打开日志等之前完成。
+    let mut instance = if std::env::args().any(|a| UNRESTRICTED_FLAGS.contains(&a.as_str())) {
+        None
+    } else {
+        match tml_core::acquire(tml_core::wait_for_arg(std::env::args())) {
+            tml_core::Acquired::Primary(i) => Some(i),
+            tml_core::Acquired::Existing => return Ok(()),
+        }
+    };
     // `--measure-startup`：首个带进程快照的帧渲染完成后记录耗时并退出，供测量脚本使用。
     let measure = std::env::args().any(|a| a == "--measure-startup");
     let entered = tml_core::ms_since_process_start();
@@ -95,6 +107,13 @@ fn main() -> Result<(), slint::PlatformError> {
 
     if let Some(dir) = std::env::args().skip_while(|a| a != "--screenshot").nth(1) {
         screenshot::run(&ui, dir.into(), Duration::from_secs(8));
+    }
+
+    // 其他实例请求唤起时，在界面线程还原并前置窗口；最小化期间暂停的采样由下面的可见性轮询恢复。
+    if let Some(i) = instance.as_mut() {
+        i.listen(|| {
+            let _ = slint::invoke_from_event_loop(tml_core::activate_own_window);
+        });
     }
 
     // 窗口最小化时停止采样。

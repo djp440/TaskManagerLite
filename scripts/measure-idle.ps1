@@ -10,7 +10,8 @@ $logDir = Join-Path ([System.IO.Path]::GetTempPath()) "tml-idle-$(Get-Random)"
 New-Item -ItemType Directory -Force $logDir | Out-Null
 $env:TML_LOG_DIR = $logDir
 
-$p = Start-Process -FilePath (Resolve-Path $Exe).Path -PassThru
+# --allow-multiple：绕过单实例限制，用户自己的实例在运行时也不会被挡掉。
+$p = Start-Process -FilePath (Resolve-Path $Exe).Path -ArgumentList '--allow-multiple' -PassThru
 Start-Sleep -Seconds 3
 $p.Refresh(); $cpu0 = $p.TotalProcessorTime.TotalMilliseconds
 Start-Sleep -Seconds $Seconds
