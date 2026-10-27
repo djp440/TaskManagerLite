@@ -72,9 +72,23 @@ const STEPS: &[Step] = &[
     ("11-窗口放大后列宽恢复-深色", |ui| {
         ui.window().set_size(LogicalSize::new(2000.0, 700.0));
     }),
+    // 编号从 12 起，避开其他功能新增的步骤；每步显式设置主题与窗口尺寸，不依赖前一步的状态。
+    ("12-性能内存-浅色", |ui| {
+        resize(ui, 1040.0, 700.0);
+        ui.invoke_set_dark(false);
+        ui.set_page(1);
+        ui.invoke_resource_selected("memory".into());
+    }),
+    ("13-性能内存-深色-最小尺寸760x480", |ui| {
+        ui.invoke_set_dark(true);
+        resize(ui, 760.0, 480.0);
+    }),
+    ("14-性能内存-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
+    ("15-性能内存-深色-默认尺寸", |ui| resize(ui, 1040.0, 700.0)),
     // 分组视图：应用 / 后台进程两组，各有标题行与数量。
-    ("12-分组视图-深色", |ui| {
+    ("16-分组视图-深色", |ui| {
         ui.window().set_size(LogicalSize::new(1040.0, 700.0));
+        ui.invoke_set_dark(true);
         let cols = ui.global::<Columns>();
         cols.set_pid(cols.get_default_pid());
         cols.set_cpu(cols.get_default_cpu());
@@ -84,14 +98,14 @@ const STEPS: &[Step] = &[
         ui.set_view_mode(2);
         ui.invoke_view_changed(2);
     }),
-    ("13-分组视图-浅色", |ui| ui.invoke_set_dark(false)),
-    ("14-分组与搜索-深色", |ui| {
+    ("17-分组视图-浅色", |ui| ui.invoke_set_dark(false)),
+    ("18-分组与搜索-深色", |ui| {
         ui.invoke_set_dark(true);
         ui.set_filter("conhost".into());
         ui.invoke_filter_edited("conhost".into());
     }),
     // 键盘：从最后一个应用按 ↓，越过“后台进程”标题行，选中后台组的第一行。
-    ("15-分组键盘下移跳过标题-深色", |ui| {
+    ("19-分组键盘下移跳过标题-深色", |ui| {
         ui.set_filter("".into());
         ui.invoke_filter_edited("".into());
         // 按 PID 升序：CPU 排序下行会随采样跳动，选中项可能被挤出可视范围。
@@ -102,7 +116,7 @@ const STEPS: &[Step] = &[
         press(ui, Key::DownArrow);
     }),
     // 键盘：选中第一个应用按 ↑，停在原处而不是落到“应用”标题行。
-    ("16-分组键盘上移不选标题-深色", |ui| {
+    ("20-分组键盘上移不选标题-深色", |ui| {
         ui.set_selected(1);
         ui.invoke_select(1);
         press(ui, Key::UpArrow);
@@ -136,6 +150,10 @@ fn drag(ui: &AppWindow, x: f32, dx: f32) {
         w.dispatch_event(WindowEvent::PointerMoved { position: at(start + dx * i as f32 / 6.0) });
     }
     w.dispatch_event(WindowEvent::PointerReleased { position: at(start + dx), button: PointerEventButton::Left });
+}
+
+fn resize(ui: &AppWindow, width: f32, height: f32) {
+    ui.window().set_size(LogicalSize::new(width, height));
 }
 
 /// 先采样一段时间让曲线有内容，再逐步截图，最后退出。

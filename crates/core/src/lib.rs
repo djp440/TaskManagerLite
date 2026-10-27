@@ -3,6 +3,7 @@
 mod apps;
 mod control;
 mod instance;
+mod memory;
 mod nt;
 mod sampler;
 mod snapshot;
@@ -12,6 +13,7 @@ mod view;
 pub use apps::app_pids;
 pub use control::{EndError, end_process, is_elevated, relaunch_elevated};
 pub use instance::{Acquired, SingleInstance, acquire, activate_own_window, is_relaunch};
+pub use memory::{MemoryHardware, MemoryStatus};
 pub use sampler::{Sample, Sampler};
 pub use snapshot::{Process, ProcessKey, ProcessSnapshot};
 pub use system::SystemMetrics;
