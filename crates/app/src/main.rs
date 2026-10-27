@@ -2,6 +2,7 @@
 
 mod controller;
 mod format;
+mod icons;
 mod logging;
 mod placement;
 mod sampling;

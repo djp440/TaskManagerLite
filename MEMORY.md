@@ -1,5 +1,11 @@
 # 开发经验
 
+## 2026-10-27 23:40 进程图标
+- `slint::Image` 的 `PartialEq` 按像素缓冲指针比较，空 `Image` 彼此不相等：放进 `ProcRow` 会让“行未变化则跳过”的判断全部失效。空图标用同一个 1×1 透明图的克隆占位。
+- `slint::Image` 不是 Send：后台线程只传 `SharedPixelBuffer`，界面线程再转 Image。
+- 图标尺寸按 `16 × scale_factor` 取物理像素（200% 缩放取 32px）；`PrivateExtractIconsW` 可按任意尺寸取，没有图标资源的 exe（如 rustc、svchost）回退外壳通用图标，与原生任务管理器一致。
+- `procinfo.rs` 的路径读取只用 `PROCESS_QUERY_LIMITED_INFORMATION`，System（PID 4）等取不到时为 `None`；#4、#17 复用该模块。
+
 ## 2026-10-27 23:10 设置持久化与窗口恢复
 - 窗口显示前调用 `set_size` 会被 `preferred-width/height` 覆盖：改为把保存的大小写入 `initial-width/height` 属性并绑定到 preferred。大小按逻辑像素保存（不同缩放的显示器上视觉大小一致），位置按物理像素，`set_position` 在显示前有效。
 - 优雅退出靠 `on_close_requested` 保存（WM_CLOSE 会触发）；以管理员身份重启前也要先保存。

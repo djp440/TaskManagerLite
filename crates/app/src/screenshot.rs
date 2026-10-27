@@ -72,6 +72,11 @@ const STEPS: &[Step] = &[
     ("11-窗口放大后列宽恢复-深色", |ui| {
         ui.window().set_size(LogicalSize::new(2000.0, 700.0));
     }),
+    // 进程图标：浏览器（有自己的图标）。依赖本机正在运行 chrome，没有时列表为空。
+    ("12-进程图标-chrome-深色", |ui| {
+        ui.set_filter("chrome".into());
+        ui.invoke_filter_edited("chrome".into());
+    }),
 ];
 
 /// 在表头（y = 56 + 17）的 `x` 处按下并水平拖动 `dx` 逻辑像素。
