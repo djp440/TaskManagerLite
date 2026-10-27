@@ -25,6 +25,16 @@ pub enum ShellError {
     Failed(String),
 }
 
+impl std::fmt::Display for ShellError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShellError::NotFound => f.write_str("文件已不存在"),
+            ShellError::Failed(msg) if msg.trim().is_empty() => f.write_str("系统调用失败"),
+            ShellError::Failed(msg) => write!(f, "系统调用失败：{}", msg.trim()),
+        }
+    }
+}
+
 fn wide(s: &OsStr) -> Vec<u16> {
     s.encode_wide().chain(std::iter::once(0)).collect()
 }
@@ -100,6 +110,13 @@ pub fn search_online(process_name: &str) -> Result<(), ShellError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn errors_display_as_chinese_text_not_debug() {
+        assert_eq!(ShellError::NotFound.to_string(), "文件已不存在");
+        assert_eq!(ShellError::Failed("拒绝访问".into()).to_string(), "系统调用失败：拒绝访问");
+        assert_eq!(ShellError::Failed(String::new()).to_string(), "系统调用失败");
+    }
 
     #[test]
     fn target_must_be_existing_absolute_path() {

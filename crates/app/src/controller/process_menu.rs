@@ -98,7 +98,7 @@ impl Controller {
         let Some((_, _, path)) = self.selected_with_path("打开文件位置") else { return };
         if let Err(e) = tml_core::reveal_in_explorer(&path) {
             self.log.borrow_mut().line(format!("打开文件位置失败 {} {e:?}", path.display()));
-            self.report(STATUS_ERROR, failure("打开文件位置", &format!("{e:?}")));
+            self.report(STATUS_ERROR, failure("打开文件位置", &e.to_string()));
         }
     }
 
@@ -129,7 +129,7 @@ impl Controller {
         let Some((_, _, path)) = self.selected_with_path("打开属性") else { return };
         if let Err(e) = tml_core::show_properties(&path) {
             self.log.borrow_mut().line(format!("打开属性失败 {} {e:?}", path.display()));
-            self.report(STATUS_ERROR, failure("打开属性", &format!("{e:?}")));
+            self.report(STATUS_ERROR, failure("打开属性", &e.to_string()));
         }
     }
 
@@ -137,7 +137,7 @@ impl Controller {
         let Some((_, name, _)) = self.selected_process() else { return };
         if let Err(e) = tml_core::search_online(&name) {
             self.log.borrow_mut().line(format!("在线搜索失败 {name} {e:?}"));
-            self.report(STATUS_ERROR, failure("在线搜索", &format!("{e:?}")));
+            self.report(STATUS_ERROR, failure("在线搜索", &e.to_string()));
         }
     }
 }

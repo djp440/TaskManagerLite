@@ -225,6 +225,17 @@ component ProcRowView inherits Rectangle {
                 width: 18px;
                 expander := TouchArea {
                     enabled: root.data.has-children;
+                    // 箭头区域叠在整行的 TouchArea 之上，会吞掉右键，这里同样弹出菜单（坐标换算到整行）。
+                    pointer-event(e) => {
+                        if e.button == PointerEventButton.right && e.kind == PointerEventKind.down {
+                            root.select();
+                            ProcessMenu.opening();
+                            menu.show({
+                                x: self.absolute-position.x - touch.absolute-position.x + self.mouse-x,
+                                y: self.absolute-position.y - touch.absolute-position.y + self.mouse-y,
+                            });
+                        }
+                    }
                     clicked => {
                         root.select();
                         root.toggle();

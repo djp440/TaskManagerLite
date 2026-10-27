@@ -37,15 +37,17 @@ fn reads_the_exact_command_line_of_a_spawned_child() {
 
 #[test]
 fn quoted_arguments_are_preserved() {
+    // 直接启动 ping（不经 cmd，避免遗留孙进程）；主机名参数含空格，会被加引号。
     let child = Child(
-        std::process::Command::new("cmd")
-            .args(["/c", "ping -t 127.0.0.1 >nul & rem a b"])
+        std::process::Command::new("ping")
+            .args(["-t", "-w", "7777", "no such host.invalid"])
+            .stdout(std::process::Stdio::null())
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .expect("启动子进程"),
     );
     let line = command_line(key_of(child.0.id())).expect("应能读到子进程命令行");
-    assert!(line.contains(r#""ping -t 127.0.0.1 >nul & rem a b""#), "{line}");
+    assert!(line.ends_with(r#" -t -w 7777 "no such host.invalid""#), "{line}");
 }
 
 #[test]
