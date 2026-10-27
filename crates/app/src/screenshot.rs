@@ -25,10 +25,10 @@ const STEPS: &[Step] = &[
         ui.set_filter("".into());
         ui.invoke_filter_edited("".into());
         ui.set_page(1);
-        ui.set_resource_index(0);
+        ui.invoke_resource_selected("cpu".into());
     }),
-    ("04-性能内存-深色", |ui| ui.set_resource_index(1)),
-    ("05-性能网络-深色", |ui| ui.set_resource_index(3)),
+    ("04-性能内存-深色", |ui| ui.invoke_resource_selected("memory".into())),
+    ("05-性能网络-深色", |ui| ui.invoke_resource_selected("network".into())),
     ("06-结束进程树确认-深色", |ui| {
         ui.set_page(0);
         ui.set_confirm_name("chrome.exe".into());
@@ -42,7 +42,7 @@ const STEPS: &[Step] = &[
     }),
     ("08-性能CPU-浅色", |ui| {
         ui.set_page(1);
-        ui.set_resource_index(0);
+        ui.invoke_resource_selected("cpu".into());
     }),
 ];
 

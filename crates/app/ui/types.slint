@@ -13,8 +13,31 @@ export struct ProcRow {
     critical: bool,
 }
 
-// 性能概览中的一类资源。标题和统计项标签由界面按下标提供，便于翻译。
+// 资源类型：右侧详情区按类型分支，便于为某类资源定制详情。
+export enum ResourceKind {
+    cpu,
+    memory,
+    disk,
+    network,
+}
+
+// 配色类型：对应 Theme 中的资源色。
+export enum ResourceTint {
+    cpu,
+    memory,
+    disk,
+    network,
+}
+
+// 性能概览中的一张资源卡片。元数据（id、类型、标题、说明、统计项标签）随数据一起由 Rust 提供。
 export struct Resource {
+    // 稳定的实例 id，选中状态按它保持。
+    id: string,
+    kind: ResourceKind,
+    tint: ResourceTint,
+    title: string,
+    caption: string,
+    stat-labels: [string],
     value: string,
     detail: string,
     line: string,
