@@ -30,7 +30,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let mut instance = if std::env::args().any(|a| UNRESTRICTED_FLAGS.contains(&a.as_str())) {
         None
     } else {
-        match tml_core::acquire(tml_core::wait_for_arg(std::env::args())) {
+        match tml_core::acquire(tml_core::is_relaunch(std::env::args())) {
             tml_core::Acquired::Primary(i) => Some(i),
             tml_core::Acquired::Existing => return Ok(()),
         }

@@ -28,7 +28,8 @@ $script:started = @()
 function Check($ok, $msg) {
     if ($ok) { "  [通过] $msg" } else { "  [失败] $msg"; $script:failed++ }
 }
-function Instances { @(Get-Process -Name TaskManagerLite -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exePath }) }
+# 按进程名统计（提权进程在非管理员 shell 下读不到 Path）；前置检查保证系统里原本没有同名进程。
+function Instances { @(Get-Process -Name TaskManagerLite -ErrorAction SilentlyContinue) }
 function Launch($argList) {
     $p = if ($argList) { Start-Process -FilePath $exePath -ArgumentList $argList -PassThru } else { Start-Process -FilePath $exePath -PassThru }
     $script:started += $p
@@ -56,7 +57,7 @@ function StopAll {
     $script:started = @()
 }
 
-if ((Instances).Count -gt 0) { throw '系统中已有 TaskManagerLite 实例在运行，请先关闭它再运行本测试（脚本不会结束不属于自己的进程）。' }
+if ((Instances).Count -gt 0) { throw '系统中已有 TaskManagerLite 进程在运行（可能是你自己的实例，也可能是提权运行的），请先手动关闭再运行本测试。脚本不会结束不属于自己的进程。' }
 $env:TML_LOG_DIR = Join-Path ([System.IO.Path]::GetTempPath()) "tml-single-$(Get-Random)"
 New-Item -ItemType Directory -Force $env:TML_LOG_DIR | Out-Null
 
@@ -110,6 +111,29 @@ try {
     Check (($LASTEXITCODE -eq 0) -and ($out -match 'CPU 占整机') -and ($out -match '首个快照帧')) 'measure-idle.ps1 正常'
     Check (-not $a.HasExited) '整个过程中 A 一直在运行'
     Remove-Item -Recurse -Force $shots -ErrorAction SilentlyContinue
+    StopAll
+
+    '== 场景 4：低完整性进程打不开事件，既不唤起窗口也不崩溃 =='
+    # exe 文件带 Low 完整性标签时，进程以 Low 完整性运行；互斥量/事件的标签是 Medium + NO_WRITE_UP。
+    $lowDir = Join-Path ([System.IO.Path]::GetTempPath()) "tml-single-low-$(Get-Random)"
+    New-Item -ItemType Directory -Force $lowDir | Out-Null
+    $lowExe = Join-Path $lowDir 'TaskManagerLite.exe'
+    Copy-Item $exePath $lowExe
+    $null = & icacls $lowExe /setintegritylevel low
+    Check ($LASTEXITCODE -eq 0) '已把 exe 副本标为低完整性'
+    $a = Launch $null
+    $ha = WaitWindow $a
+    [void][Win]::ShowWindow($ha, 6)
+    Start-Sleep -Milliseconds 800
+    Check ([Win]::IsIconic($ha)) 'A 已被最小化'
+    $low = Start-Process -FilePath $lowExe -PassThru
+    $script:started += $low
+    Check ($low.WaitForExit(5000)) '低完整性实例在 5 秒内退出（按已有实例处理）'
+    Check ($low.ExitCode -eq 0) "低完整性实例正常退出而非崩溃（退出码 $($low.ExitCode)）"
+    Start-Sleep -Seconds 1
+    Check ([Win]::IsIconic($ha)) 'A 没有被低完整性进程唤起（NO_WRITE_UP 生效）'
+    Check ((Instances).Count -eq 1) '系统中只剩 A'
+    Remove-Item -Recurse -Force $lowDir -ErrorAction SilentlyContinue
 }
 finally {
     StopAll

@@ -9,7 +9,7 @@ mod system;
 mod view;
 
 pub use control::{EndError, end_process, is_elevated, relaunch_elevated};
-pub use instance::{Acquired, SingleInstance, acquire, activate_own_window, wait_for_arg};
+pub use instance::{Acquired, SingleInstance, acquire, activate_own_window, is_relaunch};
 pub use sampler::{Sample, Sampler};
 pub use snapshot::{Process, ProcessKey, ProcessSnapshot};
 pub use system::SystemMetrics;
