@@ -7,14 +7,15 @@ use tml_core::{ProcessKey, Sampler, default_icon, file_icon, image_path, image_p
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// 自己启动的、可预期路径的子进程（cmd 里 ping 挂起），测试结束时只结束它。
+/// 自己启动的、可预期路径的子进程（直接启动 ping.exe 挂起，不经 cmd，避免遗留孙进程），测试结束时只结束它。
 struct Child(std::process::Child);
 
 impl Child {
     fn spawn() -> Self {
         Self(
-            std::process::Command::new("cmd")
-                .args(["/c", "ping -t 127.0.0.1 >nul"])
+            std::process::Command::new("ping")
+                .args(["-t", "127.0.0.1"])
+                .stdout(std::process::Stdio::null())
                 .creation_flags(CREATE_NO_WINDOW)
                 .spawn()
                 .expect("启动子进程"),
@@ -33,7 +34,7 @@ impl Drop for Child {
 fn reads_path_of_a_spawned_process() {
     let child = Child::spawn();
     let path = image_path(child.0.id()).expect("应能读到子进程路径");
-    assert_eq!(path.file_name().unwrap().to_ascii_lowercase(), "cmd.exe");
+    assert_eq!(path.file_name().unwrap().to_ascii_lowercase(), "ping.exe");
     assert!(path.is_file());
 }
 
