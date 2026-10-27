@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: 构建并发布
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 核对 tag 与 Cargo 版本一致
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+            Where-Object name -eq 'tml-app' | Select-Object -ExpandProperty version
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          if ($tag -ne $version -and -not $tag.StartsWith("$version-")) {
+            throw "tag $tag 与 Cargo 版本 $version 不一致"
+          }
+
+      - name: 测试
+        run: cargo test --locked -p tml-core -p tml-app
+
+      - name: release 构建
+        run: cargo build --locked -p tml-app --release
+
+      - name: 发布到 GitHub Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $asset = "TaskManagerLite-$tag.exe"
+          Copy-Item target/release/TaskManagerLite.exe $asset
+          $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
+          "$hash  $asset" | Out-File -Encoding utf8 "$asset.sha256"
+          $flags = @('--generate-notes')
+          if ($tag.Contains('-')) { $flags += '--prerelease' }
+          gh release create $tag $asset "$asset.sha256" --title "TaskManagerLite $tag" @flags
