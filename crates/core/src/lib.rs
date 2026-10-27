@@ -3,6 +3,7 @@
 mod control;
 mod icon;
 mod instance;
+mod memory;
 mod nt;
 mod procinfo;
 mod sampler;
@@ -13,6 +14,7 @@ mod view;
 pub use control::{EndError, end_process, is_elevated, relaunch_elevated};
 pub use icon::{IconBitmap, default_icon, file_icon};
 pub use instance::{Acquired, SingleInstance, acquire, activate_own_window, is_relaunch};
+pub use memory::{MemoryHardware, MemoryStatus};
 pub use procinfo::{image_path, image_path_of};
 pub use sampler::{Sample, Sampler};
 pub use snapshot::{Process, ProcessKey, ProcessSnapshot};
