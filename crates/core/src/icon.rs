@@ -3,20 +3,18 @@
 //! 调用较慢（要读文件资源），应放在后台线程。图标按请求的像素尺寸取，
 //! 高 DPI 下请求物理像素尺寸即可保持清晰。
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
     BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits, GetObjectW,
     HBITMAP, ReleaseDC,
 };
-use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
-use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
-use windows::Win32::UI::Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_SMALLICON, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW};
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyIcon, GetIconInfo, HICON, ICONINFO, IDI_APPLICATION, IMAGE_ICON, LR_SHARED, LoadImageW, PrivateExtractIconsW,
 };
-use windows::core::PCWSTR;
 
 /// 一个图标的像素，RGBA 字节序，非预乘，自上而下。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,16 +29,6 @@ impl IconBitmap {
     pub fn has_visible_pixels(&self) -> bool {
         self.rgba.chunks_exact(4).any(|p| p[3] != 0)
     }
-}
-
-/// 该线程第一次调用时初始化 COM（外壳 API 需要）；线程退出时由系统回收。
-pub(crate) fn ensure_com() {
-    thread_local! {
-        static INIT: () = unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        };
-    }
-    INIT.with(|_| {});
 }
 
 struct OwnedIcon(HICON);
@@ -131,8 +119,9 @@ fn to_wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
 }
 
-/// 按目标像素尺寸直接从文件资源里取最接近的图标；文件没有图标资源时失败。
-fn extract_sized(path: &Path, px: u32) -> Option<IconBitmap> {
+/// 按目标像素尺寸直接从文件资源里取最接近的图标。`index` 为非负时是图标序号，
+/// 为负时取资源 ID（`-id`）；文件没有图标资源时失败。只读文件资源，不加载外壳。
+fn extract_indexed(path: &Path, index: i32, px: u32) -> Option<IconBitmap> {
     let wide = to_wide(path);
     // PrivateExtractIconsW 的文件名参数是固定的 MAX_PATH 缓冲区。
     if wide.len() > 260 {
@@ -141,36 +130,11 @@ fn extract_sized(path: &Path, px: u32) -> Option<IconBitmap> {
     let mut name = [0u16; 260];
     name[..wide.len()].copy_from_slice(&wide);
     let mut icons = [HICON::default()];
-    let n = unsafe { PrivateExtractIconsW(&name, 0, px as i32, px as i32, Some(&mut icons), None, 0) };
+    let n = unsafe { PrivateExtractIconsW(&name, index, px as i32, px as i32, Some(&mut icons), None, 0) };
     if n == 0 || n == u32::MAX || icons[0].is_invalid() {
         return None;
     }
     let owned = OwnedIcon(icons[0]);
-    hicon_to_rgba(owned.0)
-}
-
-/// 用外壳取图标（含关联图标与通用图标）。`path` 为不存在的文件时配合 `use_attributes` 取按扩展名的通用图标。
-fn shell_icon(path: &Path, px: u32, use_attributes: bool) -> Option<IconBitmap> {
-    ensure_com();
-    let wide = to_wide(path);
-    let mut info = SHFILEINFOW::default();
-    let mut flags = SHGFI_ICON | if px > 20 { SHGFI_LARGEICON } else { SHGFI_SMALLICON };
-    if use_attributes {
-        flags |= SHGFI_USEFILEATTRIBUTES;
-    }
-    let ok = unsafe {
-        SHGetFileInfoW(
-            PCWSTR(wide.as_ptr()),
-            FILE_ATTRIBUTE_NORMAL,
-            Some(&mut info),
-            size_of::<SHFILEINFOW>() as u32,
-            flags,
-        )
-    };
-    if ok == 0 || info.hIcon.is_invalid() {
-        return None;
-    }
-    let owned = OwnedIcon(info.hIcon);
     hicon_to_rgba(owned.0)
 }
 
@@ -221,8 +185,8 @@ fn fit_to(icon: IconBitmap, px: u32) -> IconBitmap {
     IconBitmap { width: px, height: px, rgba: out }
 }
 
-/// 不依赖外壳的系统共享图标（`IDI_APPLICATION`），按 `px` 取最接近的尺寸。
-/// 外壳取不到图标时（例如精简环境、CI 的无桌面会话）作为最后的兜底。
+/// 系统共享图标（`IDI_APPLICATION`），按 `px` 取最接近的尺寸。
+/// imageres.dll 的通用 exe 图标取不到时（精简环境）作为最后的兜底。
 /// 共享图标由系统持有，不能 `DestroyIcon`，所以不包进 `OwnedIcon`。
 pub(crate) fn system_app_icon(px: u32) -> Option<IconBitmap> {
     let handle = unsafe { LoadImageW(None, IDI_APPLICATION, IMAGE_ICON, px as i32, px as i32, LR_SHARED) }.ok()?;
@@ -235,20 +199,35 @@ fn usable(icon: Option<IconBitmap>, px: u32) -> Option<IconBitmap> {
     icon.filter(IconBitmap::has_visible_pixels).map(|i| fit_to(i, px))
 }
 
+/// 系统自带的“可执行文件通用图标”（蓝色应用窗口）：`imageres.dll` 的资源 ID 15，
+/// 与外壳给没有图标的 exe 显示的是同一个。资源 ID 比序号稳定；取不到时由调用方继续回退。
+const GENERIC_EXE_ICON_RESOURCE: i32 = -15;
+
+pub(crate) fn generic_exe_icon(px: u32) -> Option<IconBitmap> {
+    let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    usable(extract_indexed(&root.join("System32").join("imageres.dll"), GENERIC_EXE_ICON_RESOURCE, px), px)
+}
+
 /// 可执行文件的图标，边长恰为 `px` 像素。文件不存在时返回 `None`；
-/// 文件存在但取不到图标（没有图标资源且外壳也失败）时回退到 [`default_icon`]。
+/// 文件存在但取不到图标（没有图标资源，如 svchost）时回退到 [`default_icon`]。
+/// 全程只读文件资源，不使用外壳（`SHGetFileInfo` 会把整套外壳 DLL 拉进进程，约 6 MB，且并发调用会失败）。
 pub fn file_icon(path: &Path, px: u32) -> Option<IconBitmap> {
     if !path.exists() {
         return None;
     }
-    usable(extract_sized(path, px).or_else(|| shell_icon(path, px, false)), px).or_else(|| default_icon(px))
+    usable(extract_indexed(path, 0, px), px).or_else(|| default_icon(px))
 }
 
-/// 通用的可执行文件图标，用于拿不到路径（System、受保护进程）的进程。
-/// 先按扩展名向外壳要通用 exe 图标，外壳不可用时退到系统应用程序图标。
+/// 通用的可执行文件图标，用于拿不到路径（System、受保护进程）和没有图标资源的进程。
+/// 依次尝试 imageres.dll 的通用 exe 图标与系统应用程序图标；每个尺寸只取一次并缓存。
 pub fn default_icon(px: u32) -> Option<IconBitmap> {
-    // 文件不必存在：只按扩展名取通用图标。
-    usable(shell_icon(Path::new("x.exe"), px, true), px).or_else(|| system_app_icon(px))
+    static CACHE: Mutex<Option<HashMap<u32, Option<IconBitmap>>>> = Mutex::new(None);
+    let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .get_or_insert_with(HashMap::new)
+        .entry(px)
+        .or_insert_with(|| generic_exe_icon(px).or_else(|| system_app_icon(px)))
+        .clone()
 }
 
 #[cfg(test)]
@@ -257,12 +236,40 @@ mod tests {
 
     #[test]
     fn system_app_icon_works_without_the_shell() {
-        // CI 的无桌面会话里外壳取不到通用图标，走的就是这条兜底路径。
+        // 最后的兜底，不依赖外壳与任何文件资源。
         for px in [16, 32] {
             let icon = system_app_icon(px).expect("系统应用程序图标");
             assert_eq!((icon.width, icon.height), (px, px));
             assert!(icon.has_visible_pixels());
         }
+    }
+
+    #[test]
+    fn generic_exe_icon_comes_from_imageres_without_the_shell() {
+        for px in [16, 32, 48] {
+            let icon = generic_exe_icon(px).expect("imageres.dll 的通用 exe 图标");
+            assert_eq!((icon.width, icon.height), (px, px));
+            assert!(icon.has_visible_pixels());
+        }
+        // 与系统应用程序图标（兜底）不是同一张。
+        assert_ne!(generic_exe_icon(32), system_app_icon(32));
+    }
+
+    #[test]
+    fn default_icon_is_cached_per_size() {
+        let a = default_icon(24).expect("默认图标");
+        assert_eq!((a.width, a.height), (24, 24));
+        assert_eq!(default_icon(24), Some(a));
+        let b = default_icon(40).expect("默认图标");
+        assert_eq!((b.width, b.height), (40, 40));
+    }
+
+    #[test]
+    fn exe_without_icon_resource_falls_back_to_default_icon() {
+        // 测试可执行文件本身没有图标资源。
+        let me = std::env::current_exe().unwrap();
+        assert!(extract_indexed(&me, 0, 32).is_none());
+        assert_eq!(file_icon(&me, 32), default_icon(32));
     }
 
     #[test]

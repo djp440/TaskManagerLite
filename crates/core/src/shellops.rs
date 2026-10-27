@@ -7,7 +7,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use windows::Win32::Foundation::ERROR_CANCELLED;
-use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, SHOpenFolderAndSelectItems, SHParseDisplayName, ShellExecuteExW, ShellExecuteW,
@@ -15,7 +15,6 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HRESULT, PCWSTR, w};
 
-use crate::icon::ensure_com;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellError {
@@ -33,6 +32,16 @@ impl std::fmt::Display for ShellError {
             ShellError::Failed(msg) => write!(f, "系统调用失败：{}", msg.trim()),
         }
     }
+}
+
+/// 该线程第一次调用时初始化 COM（外壳 API 需要）；线程退出时由系统回收。
+fn ensure_com() {
+    thread_local! {
+        static INIT: () = unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        };
+    }
+    INIT.with(|_| {});
 }
 
 fn wide(s: &OsStr) -> Vec<u16> {
