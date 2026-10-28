@@ -14,6 +14,7 @@ use tml_core::{
 mod columns;
 mod cpu;
 mod memory;
+mod mini;
 mod process_menu;
 
 pub use columns::sort_index as detail_sort_index;
@@ -68,6 +69,10 @@ pub struct Controller {
     tray_failed: Cell<bool>,
     /// 窗口被隐藏到托盘（与最小化不同：任务栏上没有按钮，只能从托盘或再次启动唤起）。
     hidden: Cell<bool>,
+    /// 迷你模式的窗口，第一次进入迷你模式时创建（见 `mini.rs`）。
+    mini: OnceCell<crate::MiniWindow>,
+    /// 已安排在本次事件处理之后开始系统拖动，避免一次拖动里重复投递。
+    drag_pending: Cell<bool>,
 }
 
 #[derive(Default)]
@@ -90,6 +95,8 @@ struct State {
     gap: bool,
     paused: bool,
     visible: bool,
+    /// 迷你模式：只显示资源卡片，只采系统指标，卡片不画详情大图。
+    mini: bool,
     /// 后台继续采样：窗口不可见时只采系统指标，见 `sampling::plan`。
     background: bool,
     /// 恢复可见后的下一次完整采样把曲线连续性写进日志（供自动化验收核对）。
@@ -118,7 +125,7 @@ impl State {
 
     /// 当前是否在采样（见 `sampling::plan`）；它的变化意味着曲线上要留断点。
     fn sampling(&self) -> bool {
-        crate::sampling::plan(self.visible, self.background, self.paused) != crate::sampling::Plan::Idle
+        crate::sampling::plan(self.visible, self.mini, self.background, self.paused) != crate::sampling::Plan::Idle
     }
 }
 
@@ -221,6 +228,8 @@ impl Controller {
             tray: RefCell::new(None),
             tray_failed: Cell::new(false),
             hidden: Cell::new(false),
+            mini: OnceCell::new(),
+            drag_pending: Cell::new(false),
         });
         // 恢复上次选中的资源实例；实例暂时不存在时先用 CPU，实例出现后自动切回。
         let restored = c.state.borrow_mut().resources.restore(&settings.resource);
@@ -232,6 +241,7 @@ impl Controller {
         c.bind(ui);
         c.bind_process_menu(ui);
         c.bind_columns(ui);
+        c.bind_mini(ui);
         ui.set_pinned(settings.always_on_top);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
         if settings.interval_index != 1 {
@@ -397,8 +407,11 @@ impl Controller {
     }
 
     /// 记录最近一次的普通（非最大化、非最小化）窗口矩形，由定时器周期调用。
+    /// 迷你模式下完整窗口隐藏，改为记录迷你窗口的位置。
     pub fn track_window(&self) {
-        if let Some(ui) = self.ui.upgrade() {
+        if self.is_mini() {
+            self.capture_mini();
+        } else if let Some(ui) = self.ui.upgrade() {
             placement::capture(&ui, &mut self.settings.borrow_mut());
         }
     }
@@ -406,8 +419,8 @@ impl Controller {
     /// 收集当前状态并写入设置文件（退出前、以管理员身份重启前调用）。
     pub fn save_settings(&self) {
         let (Some(store), Some(ui)) = (&self.store, self.ui.upgrade()) else { return };
+        self.track_window();
         let mut settings = self.settings.borrow_mut();
-        placement::capture(&ui, &mut settings);
         {
             let s = self.state.borrow();
             settings.sort_key = s.opts.sort_key;
@@ -416,6 +429,7 @@ impl Controller {
             settings.resource = s.resources.selected_for_save().to_owned();
             settings.details = s.details.clone();
         }
+        settings.mini.active = self.is_mini();
         settings.interval_index = ui.get_interval_index();
         settings.page = ui.get_page();
         settings.always_on_top = ui.get_pinned();
@@ -456,8 +470,8 @@ impl Controller {
 
     /// 由定时器轮询：窗口隐藏到托盘或最小化时不可见。
     pub fn poll_visible(&self) {
-        if let Some(ui) = self.ui.upgrade() {
-            self.set_visible(!self.hidden.get() && !ui.window().is_minimized());
+        if let Some(minimized) = self.with_active(|w| w.is_minimized()) {
+            self.set_visible(!self.hidden.get() && !minimized);
         }
     }
 
@@ -476,9 +490,8 @@ impl Controller {
 
     /// 显示并前置窗口（托盘菜单、托盘单击、再次启动 exe 都走这里）；隐藏时先重新显示。
     pub fn show_window(&self) {
-        let Some(ui) = self.ui.upgrade() else { return };
         if self.hidden.replace(false) {
-            let _ = ui.show();
+            let _ = self.with_active(|w| w.show());
         }
         // 立即恢复完整采样，数据随即刷新；窗口若仍最小化，下一次轮询会改回。
         self.set_visible(true);
@@ -487,13 +500,12 @@ impl Controller {
 
     /// 隐藏窗口到托盘；没有托盘图标时窗口将无法唤回，所以什么也不做。
     fn hide_window(&self) {
-        let Some(ui) = self.ui.upgrade() else { return };
         if self.tray.borrow().is_none() {
             return;
         }
         self.track_window();
         self.hidden.set(true);
-        let _ = ui.hide();
+        let _ = self.with_active(|w| w.hide());
         self.set_visible(false);
         self.log_hidden();
     }
@@ -506,8 +518,8 @@ impl Controller {
     }
 
     fn toggle_window(&self) {
-        let Some(ui) = self.ui.upgrade() else { return };
-        if self.hidden.get() || ui.window().is_minimized() {
+        let Some(minimized) = self.with_active(|w| w.is_minimized()) else { return };
+        if self.hidden.get() || minimized {
             self.show_window();
         } else {
             self.hide_window();
@@ -647,8 +659,8 @@ impl Controller {
             }
             s.first_data = true;
             self.update_tray_tip(&s);
-            if fresh {
-                if std::mem::take(&mut s.report_history) {
+            if fresh || s.mini {
+                if fresh && std::mem::take(&mut s.report_history) {
                     let (points, gaps, step) = s.resources.history(resources::CPU).stats();
                     self.log.borrow_mut().line(format!(
                         "恢复可见 后台采样={} CPU曲线 点数={points} 断点={gaps} 最大间隔={} ms",
@@ -775,7 +787,8 @@ impl Controller {
                         )
                     }
                 };
-                let (line, area) = history.paths(now, scale, detail);
+                // 迷你模式下完整窗口隐藏，详情大图不画；回到完整模式时 redraw_graphs 立即补画。
+                let (line, area) = if s.mini { Default::default() } else { history.paths(now, scale, detail) };
                 let (mini_line, mini_area) = history.paths(now, scale, Self::MINI);
                 let detail = match (&mem_text, inst.kind) {
                     (Some(t), ResourceKind::Memory) => t.header.clone(),
@@ -795,6 +808,9 @@ impl Controller {
             })
             .collect();
         self.apply_resources(s, rows);
+        if s.mini {
+            return;
+        }
         s.cpu.refresh(&ui, now, s.snapshot.processes.len(), &cpu, s.resources.selected() == resources::CPU);
         if let Some(t) = mem_text {
             ui.set_memory_view(memory::view(t));

@@ -45,11 +45,18 @@ component Graph inherits Rectangle {
     }
 }
 
-component ResourceCard inherits Rectangle {
+// 资源卡片：性能页左栏与迷你模式共用。
+export component ResourceCard inherits Rectangle {
     in property <Resource> data;
     in property <color> tint;
     in property <bool> active;
+    // 迷你模式：按住移动一小段距离即开始拖动窗口。
+    in property <bool> draggable;
     callback clicked;
+    callback double-clicked;
+    callback drag-started;
+    // 右键按下，参数为窗口内坐标。
+    callback context-menu(length, length);
 
     height: 64px;
     border-radius: Theme.radius;
@@ -57,6 +64,19 @@ component ResourceCard inherits Rectangle {
     touch := TouchArea {
         clicked => {
             root.clicked();
+        }
+        double-clicked => {
+            root.double-clicked();
+        }
+        moved => {
+            if root.draggable && self.pressed && (abs(self.mouse-x - self.pressed-x) > 4px || abs(self.mouse-y - self.pressed-y) > 4px) {
+                root.drag-started();
+            }
+        }
+        pointer-event(e) => {
+            if e.button == PointerEventButton.right && e.kind == PointerEventKind.down {
+                root.context-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
         }
     }
 
@@ -100,6 +120,8 @@ export component PerformancePage inherits Rectangle {
     in property <string> selected-resource;
     in property <int> selected-index;
     callback resource-selected(string);
+    // 双击左栏卡片：切换到迷你模式。
+    callback mini-mode();
     // 内存详情页的数据（kind == memory 时使用）。
     in property <MemoryView> memory;
     out property <length> graph-width: detail-graph.width;
@@ -113,21 +135,8 @@ export component PerformancePage inherits Rectangle {
         root.graph-resized();
     }
 
-    pure function tint-of(t: ResourceTint) -> color {
-        if t == ResourceTint.memory {
-            return Theme.memory;
-        }
-        if t == ResourceTint.disk {
-            return Theme.disk;
-        }
-        if t == ResourceTint.network {
-            return Theme.network;
-        }
-        return Theme.cpu;
-    }
-
     property <Resource> data: root.resources[root.selected-index];
-    property <color> tint: root.tint-of(root.data.tint);
+    property <color> tint: Theme.resource-tint(root.data.tint);
     // CPU 页切换到“逻辑处理器”视图时，整体曲线被网格盖住。
     property <bool> core-grid: root.data.kind == ResourceKind.cpu && CpuData.per-core;
 
@@ -141,10 +150,13 @@ export component PerformancePage inherits Rectangle {
             alignment: start;
             for r in root.resources: ResourceCard {
                 data: r;
-                tint: root.tint-of(r.tint);
+                tint: Theme.resource-tint(r.tint);
                 active: r.id == root.selected-resource;
                 clicked => {
                     root.resource-selected(r.id);
+                }
+                double-clicked => {
+                    root.mini-mode();
                 }
             }
         }

@@ -3,6 +3,7 @@
 use slint::{ComponentHandle, PhysicalPosition};
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromRect};
+use windows::Win32::UI::WindowsAndMessaging::{SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW};
 
 use crate::AppWindow;
 use crate::settings::{Settings, WindowRect};
@@ -28,6 +29,22 @@ fn on_monitor(left: i32, top: i32, right: i32, bottom: i32) -> bool {
     let rect = RECT { left, top, right, bottom };
     // SAFETY: 只读查询，rect 在调用期间有效。
     !unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) }.is_invalid()
+}
+
+/// 小窗口（迷你模式）在物理坐标 (x, y) 处顶部一条是否落在某个显示器内，即用户是否还能看到并拖动它。
+pub fn reachable(x: i32, y: i32, logical_width: f32, scale: f32) -> bool {
+    let w = (logical_width * scale) as i32;
+    on_monitor(x.saturating_add(w / 4), y, x.saturating_add(w * 3 / 4), y.saturating_add((24.0 * scale) as i32))
+}
+
+/// 主显示器的工作区（不含任务栏）：(left, top, right, bottom)，物理像素。
+pub fn work_area() -> (i32, i32, i32, i32) {
+    let mut rect = RECT::default();
+    // SAFETY: 只读查询，rect 在调用期间有效。
+    let ok = unsafe {
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut rect as *mut RECT as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0))
+    };
+    if ok.is_ok() { (rect.left, rect.top, rect.right, rect.bottom) } else { (0, 0, 1280, 720) }
 }
 
 /// 在窗口显示之前调用。大小通过 `initial-width/height`（即 preferred-width/height）设置：

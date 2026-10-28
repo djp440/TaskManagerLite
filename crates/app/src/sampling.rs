@@ -13,6 +13,8 @@ pub enum Command {
     Visible(bool),
     /// 后台继续采样开关（窗口不可见时是否继续采系统指标）。
     Background(bool),
+    /// 迷你模式（只显示系统指标，不需要进程快照）。
+    Mini(bool),
     /// 是否每次采样都枚举窗口、找出应用进程（分组视图需要）。
     Apps(bool),
     /// 是否用 ETW 统计进程磁盘速率（设置项 `accurate_disk_io`；需要管理员权限）。
@@ -26,19 +28,21 @@ pub enum Command {
 pub enum Plan {
     /// 系统指标 + 进程快照。
     Full,
-    /// 只采系统指标（窗口不可见但开启了后台采样）。
+    /// 只采系统指标（迷你模式，或窗口不可见但开启了后台采样）。
     MetricsOnly,
     /// 不采样。
     Idle,
 }
 
-/// 可见性、后台采样开关、是否被用户暂停 → 采样策略。
-pub fn plan(visible: bool, background: bool, paused: bool) -> Plan {
-    match (paused, visible, background) {
-        (true, _, _) => Plan::Idle,
-        (false, true, _) => Plan::Full,
-        (false, false, true) => Plan::MetricsOnly,
-        (false, false, false) => Plan::Idle,
+/// 可见性、是否迷你模式、后台采样开关、是否被用户暂停 → 采样策略。
+/// `visible` 指当前模式的窗口（完整窗口或迷你窗口）是否可见。
+pub fn plan(visible: bool, mini: bool, background: bool, paused: bool) -> Plan {
+    match (paused, visible, mini, background) {
+        (true, ..) => Plan::Idle,
+        (false, true, false, _) => Plan::Full,
+        (false, true, true, _) => Plan::MetricsOnly,
+        (false, false, _, true) => Plan::MetricsOnly,
+        (false, false, _, false) => Plan::Idle,
     }
 }
 
@@ -73,10 +77,11 @@ pub fn spawn(
             let mut interval = Some(Duration::from_secs(1));
             let mut visible = true;
             let mut background = background;
+            let mut mini = false;
             // 暂停时收到 Wake 也补采一次，让结束进程的结果能反映到列表上。
             let mut forced = false;
             loop {
-                let plan = plan(visible, background, interval.is_none());
+                let plan = plan(visible, mini, background, interval.is_none());
                 let active = plan != Plan::Idle;
                 match plan {
                     Plan::Full => deliver(sampler.sample()),
@@ -102,6 +107,7 @@ pub fn spawn(
                     Command::Interval(d) => interval = d,
                     Command::Visible(v) => visible = v,
                     Command::Background(on) => background = on,
+                    Command::Mini(on) => mini = on,
                     Command::AccurateDisk(on) => sampler.set_accurate_disk(on),
                     Command::Apps(on) => {
                         sampler.track_apps(on);
@@ -121,22 +127,32 @@ mod tests {
 
     #[test]
     fn visible_samples_fully_regardless_of_background() {
-        assert_eq!(plan(true, false, false), Plan::Full);
-        assert_eq!(plan(true, true, false), Plan::Full);
+        assert_eq!(plan(true, false, false, false), Plan::Full);
+        assert_eq!(plan(true, false, true, false), Plan::Full);
     }
 
     #[test]
     fn hidden_pauses_unless_background_is_on() {
-        assert_eq!(plan(false, false, false), Plan::Idle);
-        assert_eq!(plan(false, true, false), Plan::MetricsOnly);
+        assert_eq!(plan(false, false, false, false), Plan::Idle);
+        assert_eq!(plan(false, false, true, false), Plan::MetricsOnly);
     }
 
     #[test]
     fn user_pause_wins_over_everything() {
         for visible in [false, true] {
-            for background in [false, true] {
-                assert_eq!(plan(visible, background, true), Plan::Idle);
+            for mini in [false, true] {
+                for background in [false, true] {
+                    assert_eq!(plan(visible, mini, background, true), Plan::Idle);
+                }
             }
         }
+    }
+
+    #[test]
+    fn mini_mode_samples_metrics_only() {
+        assert_eq!(plan(true, true, false, false), Plan::MetricsOnly);
+        // 迷你窗口隐藏到托盘时与完整窗口隐藏相同。
+        assert_eq!(plan(false, true, false, false), Plan::Idle);
+        assert_eq!(plan(false, true, true, false), Plan::MetricsOnly);
     }
 }
