@@ -9,6 +9,7 @@ mod placement;
 mod sampling;
 mod screenshot;
 mod settings;
+mod tray;
 #[cfg(all(test, feature = "renderer-software"))]
 mod toolbar_fit;
 
@@ -79,7 +80,7 @@ fn main() -> Result<(), slint::PlatformError> {
         placement::apply(&ui, &loaded);
     }
     log.line(format!("窗口组件创建 {:.1} ms", tml_core::ms_since_process_start()));
-    let sampler = sampling::spawn(loaded.view == tml_core::ViewMode::Group, loaded.accurate_disk_io, |sample| {
+    let sampler = sampling::spawn(loaded.view == tml_core::ViewMode::Group, loaded.accurate_disk_io, loaded.background_sampling, |sample| {
         let _ = slint::invoke_from_event_loop(move || {
             CONTROLLER.with(|c| {
                 if let Some(c) = c.borrow().as_ref() {
@@ -91,10 +92,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let controller = Controller::new(&ui, sampler, log, loaded, store);
     CONTROLLER.with(|c| *c.borrow_mut() = Some(controller.clone()));
     let saver = controller.clone();
-    ui.window().on_close_requested(move || {
-        saver.save_settings();
-        slint::CloseRequestResponse::HideWindow
-    });
+    ui.window().on_close_requested(move || saver.close_requested());
 
     // 首帧与首个快照帧的耗时（自进程创建起算，含加载器时间）。
     let first_frame_logged = Cell::new(false);
@@ -157,24 +155,32 @@ fn main() -> Result<(), slint::PlatformError> {
         screenshot::run_menu_action(&ui, &spec, Duration::from_secs(4));
     }
 
-    // 其他实例请求唤起时，在界面线程还原并前置窗口；最小化期间暂停的采样由下面的可见性轮询恢复。
+    // 其他实例请求唤起时，在界面线程还原并前置窗口（窗口隐藏在托盘时先重新显示）。
     if let Some(i) = instance.as_mut() {
         i.listen(|| {
-            let _ = slint::invoke_from_event_loop(tml_core::activate_own_window);
+            let _ = slint::invoke_from_event_loop(|| {
+                let controller = CONTROLLER.with(|c| c.borrow().clone());
+                match controller {
+                    Some(c) => c.show_window(),
+                    None => tml_core::activate_own_window(),
+                }
+            });
         });
     }
 
-    // 窗口最小化时停止采样。
+    // 窗口最小化或隐藏时停止采样（开启“后台继续采样”则只采系统指标）。
     let visibility = Timer::default();
-    let weak = ui.as_weak();
+    let tracker = controller.clone();
     visibility.start(TimerMode::Repeated, Duration::from_millis(300), move || {
-        if let Some(ui) = weak.upgrade() {
-            controller.set_visible(!ui.window().is_minimized());
-            controller.track_window();
-        }
+        tracker.poll_visible();
+        tracker.track_window();
     });
 
-    ui.run()?;
+    // 窗口隐藏到托盘后，“最后一个窗口关闭”不再结束事件循环，退出统一走 `quit_event_loop`。
+    ui.show()?;
+    slint::run_event_loop_until_quit()?;
+    ui.hide()?;
+    controller.remove_tray();
     drop(poll);
     CONTROLLER.with(|c| c.borrow_mut().take());
     Ok(())

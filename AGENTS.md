@@ -19,6 +19,8 @@
 - 右键菜单验收截图：`pwsh scripts/menu-screenshots.ps1 -Out <目录>`（原生菜单，菜单会在屏幕上短暂出现；用 `--menu-shot` 参数启动应用）
 - 右键菜单动作端到端验收：`pwsh scripts/test-menu-actions.ps1`（自己启动的子进程；用 `--menu-action <动作>:<pid>` 触发动作，检查资源管理器窗口、属性对话框与剪贴板；会临时改写剪贴板并在结束时还原）
 - 单实例限制的 Win32 自动化验收：`pwsh scripts/test-single-instance.ps1`（需先关闭已有实例）；开发时想多开用 `--allow-multiple`（`--measure-startup`、`--screenshot` 同样不受限制）
+- 后台继续采样（设置字段 `background_sampling`）端到端验收：`pwsh scripts/test-background-sampling.ps1`（最小化自己启动的实例，核对曲线连续性并测最小化期间 CPU）
+- 托盘常驻（设置字段 `close_to_tray`）端到端验收：`pwsh scripts/test-tray.ps1`（用 `TML_INSTANCE_ID` 隔离单实例对象名，机器上已有真实实例也可运行；向托盘消息窗口发消息模拟单击/右键/菜单命令，验证隐藏/显示、WM_CLOSE 后常驻、再次启动唤起、隐藏期间 CPU；截图输出到 `-Out`）
 - 设置持久化：`%APPDATA%\TaskManagerLite\settings.json`（环境变量 `TML_SETTINGS_DIR` 可覆盖目录；`--screenshot`、`--measure-startup` 不读写）。端到端验收：`pwsh scripts/e2e-settings.ps1`（脚本用 `--allow-multiple` 启动，不受已运行实例影响）
 - ETW 磁盘速率（设置项 `accurate_disk_io`，默认关闭，见 ADR-0004）端到端验收（**需提权终端**，未提权直接退出）：`pwsh scripts/test-etw-disk.ps1`；探针：`cargo run -p tml-core --release --example disk_probe -- --secs 20 [--no-etw] [--pid N]`（输出每进程磁盘速率 CSV，`source` 列区分 `etw`/`approx`）
 - 接管 Ctrl+Shift+Esc（IFEO，见 ADR 0003）：开关 `--register-taskmgr` / `--unregister-taskmgr` / `--taskmgr-status`（可加 `--force`）；端到端验收 `pwsh scripts/test-taskmgr-ifeo.ps1`（环境变量 `TML_IFEO_TEST_KEY` 改写到 HKCU 测试键，不碰 HKLM、不提权）

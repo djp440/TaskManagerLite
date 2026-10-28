@@ -90,6 +90,10 @@ pub struct Settings {
     pub always_on_top: bool,
     /// 用户选择用本程序接管 Ctrl+Shift+Esc（IFEO 登记，见 ADR 0003）。这只是意愿，登记是否有效以注册表为准。
     pub replace_taskmgr: bool,
+    /// 后台继续采样：窗口最小化或隐藏时继续采系统指标，曲线不断开。默认关闭。
+    pub background_sampling: bool,
+    /// 关闭窗口时最小化到托盘（窗口隐藏、进程常驻、托盘图标可唤起）。默认关闭，此时关闭窗口即退出。
+    pub close_to_tray: bool,
     /// 本版本不认识的顶层字段，保存时原样写回。
     extra: Map<String, Value>,
 }
@@ -110,6 +114,8 @@ impl Default for Settings {
             accurate_disk_io: false,
             always_on_top: false,
             replace_taskmgr: false,
+            background_sampling: false,
+            close_to_tray: false,
             extra: Map::new(),
         }
     }
@@ -130,6 +136,8 @@ const KNOWN: &[&str] = &[
     "always_on_top",
     "replace_taskmgr",
     "accurate_disk_io",
+    "background_sampling",
+    "close_to_tray",
 ];
 
 fn int<T: TryFrom<i64>>(o: &Map<String, Value>, key: &str) -> Option<T> {
@@ -262,6 +270,12 @@ impl Settings {
                 disk: get("disk", d.disk),
             };
         }
+        if let Some(b) = o.get("background_sampling").and_then(Value::as_bool) {
+            s.background_sampling = b;
+        }
+        if let Some(b) = o.get("close_to_tray").and_then(Value::as_bool) {
+            s.close_to_tray = b;
+        }
         if let Some(b) = o.get("accurate_disk_io").and_then(Value::as_bool) {
             s.accurate_disk_io = b;
         }
@@ -328,6 +342,8 @@ impl Settings {
         o.insert("accurate_disk_io".into(), self.accurate_disk_io.into());
         o.insert("always_on_top".into(), self.always_on_top.into());
         o.insert("replace_taskmgr".into(), self.replace_taskmgr.into());
+        o.insert("background_sampling".into(), self.background_sampling.into());
+        o.insert("close_to_tray".into(), self.close_to_tray.into());
         let mut text = serde_json::to_string_pretty(&Value::Object(o)).unwrap_or_default();
         text.push('\n');
         text
@@ -431,6 +447,8 @@ mod tests {
             accurate_disk_io: true,
             always_on_top: true,
             replace_taskmgr: true,
+            background_sampling: true,
+            close_to_tray: true,
             extra: Map::new(),
         }
     }
@@ -449,6 +467,21 @@ mod tests {
         for bad in ["", "   ", "[1,2]", "null", "42", "{\"view\": tru", "\u{0}\u{1}垃圾"] {
             assert_eq!(Settings::parse(bad), (Settings::default(), false), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn 后台采样默认关闭且只认布尔值() {
+        assert!(!Settings::default().background_sampling);
+        assert!(parse(r#"{"background_sampling": true}"#).background_sampling);
+        assert!(!parse(r#"{"background_sampling": "yes"}"#).background_sampling);
+        assert!(!parse("{}").background_sampling);
+    }
+
+    #[test]
+    fn 关闭到托盘默认关闭且只认布尔值() {
+        assert!(!Settings::default().close_to_tray);
+        assert!(parse(r#"{"close_to_tray": true}"#).close_to_tray);
+        assert!(!parse(r#"{"close_to_tray": 1}"#).close_to_tray);
     }
 
     #[test]

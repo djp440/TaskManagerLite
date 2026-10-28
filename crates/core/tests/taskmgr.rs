@@ -12,17 +12,25 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
+/// 使用测试键的测试串行执行：Drop 会在父键为空时删掉父键，与另一个测试在父键下建子键并发时，
+/// 后者会遇到 ERROR_KEY_DELETED（1018）。
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 随机命名的测试键；Drop 时整棵删除。
 struct TestKey {
     root: String,
+    // 字段在 `Drop::drop` 执行完之后才释放：删除测试键期间仍持有锁。
+    _serial: std::sync::MutexGuard<'static, ()>,
 }
 
 impl TestKey {
     fn new(tag: &str) -> Self {
+        // 前一个测试 panic 会毒化锁，这里不关心，照常继续。
+        let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         let root = format!("{TEST_KEY_PREFIX}{}-{nanos:x}-{tag}", std::process::id());
         assert!(root.starts_with(r"Software\TaskManagerLite-test\"));
-        Self { root }
+        Self { root, _serial: serial }
     }
 
     /// 与真实键同构：`<随机名>\Taskmgr.exe`。
