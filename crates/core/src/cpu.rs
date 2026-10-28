@@ -341,6 +341,10 @@ fn usage_between(prev: &[(u64, u64)], cur: &[(u64, u64)]) -> Vec<f32> {
         .enumerate()
         .map(|(i, &(idle, total))| {
             let Some(&(pi, pt)) = prev.get(i) else { return 0.0 };
+            // 基线总时间为 0 说明从未读到过这个核（首次采样某组失败时用默认值补齐），差值会是开机以来累计，不可信。
+            if pt == 0 {
+                return 0.0;
+            }
             let dt = total.saturating_sub(pt);
             if dt == 0 {
                 return 0.0;
@@ -452,8 +456,8 @@ mod tests {
     #[test]
     fn usage_is_per_core_share_of_busy_time() {
         // 核 0 在 1000 个单位里空闲 250，核 1 全忙，核 2 全闲。
-        let prev = [(0, 0), (0, 0), (0, 0)];
-        let cur = [(250, 1000), (0, 1000), (1000, 1000)];
+        let prev = [(100, 100), (100, 100), (100, 100)];
+        let cur = [(350, 1100), (100, 1100), (1100, 1100)];
         let u = usage_between(&prev, &cur);
         assert!((u[0] - 75.0).abs() < 0.01);
         assert!((u[1] - 100.0).abs() < 0.01);
@@ -464,6 +468,12 @@ mod tests {
     fn usage_handles_new_cores_and_zero_elapsed() {
         assert_eq!(usage_between(&[(5, 10)], &[(5, 10), (1, 2)]), vec![0.0, 0.0]);
         assert!(usage_between(&[(0, 0)], &[]).is_empty());
+    }
+
+    #[test]
+    fn usage_without_baseline_is_zero() {
+        // 首次采样某组读取失败被补成 (0, 0)：下一拍不能把开机以来的累计当成这一拍的占用。
+        assert_eq!(usage_between(&[(0, 0), (100, 1000)], &[(300, 1000), (150, 1100)]), vec![0.0, 50.0]);
     }
 
     /// 模拟按组读取：第 g 组每个核的数据 = (组号 * 1000 + 组内序号)。
