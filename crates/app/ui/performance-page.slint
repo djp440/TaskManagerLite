@@ -185,7 +185,7 @@ export component PerformancePage inherits Rectangle {
 
                     Text {
                         horizontal-stretch: 1;
-                        text: root.data.detail;
+                        text: root.data.kind == ResourceKind.network ? "" : root.data.detail;
                         horizontal-alignment: right;
                         vertical-alignment: bottom;
                         color: Theme.subtle-text;
@@ -273,8 +273,8 @@ export component PerformancePage inherits Rectangle {
                         }
                     }
                 }
-                if root.data.kind == ResourceKind.disk: Text {
-                    text: root.data.disk-info;
+                if root.data.kind == ResourceKind.disk || root.data.kind == ResourceKind.network: Text {
+                    text: root.data.kind == ResourceKind.network ? root.data.detail : root.data.disk-info;
                     wrap: word-wrap;
                     color: Theme.subtle-text;
                     font-size: 12px;

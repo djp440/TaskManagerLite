@@ -99,6 +99,7 @@ struct State {
     cpu: CpuState,
     system: SystemMetrics,
     disks: Vec<tml_core::PhysicalDisk>,
+    networks: Vec<tml_core::NetworkAdapter>,
     memory: MemoryStatus,
     /// 内存硬件信息只读取一次，首个快照之后才有。
     memory_hardware: Option<MemoryHardware>,
@@ -735,26 +736,21 @@ impl Controller {
             let mut s = self.state.borrow_mut();
             let m = sample.system;
             s.resources
-                .update(resources::device_instances(&sample.disks));
-            if std::mem::take(&mut s.gap) {
+                .sync_devices(&sample.disks, &sample.networks);
+            let resumed = std::mem::take(&mut s.gap);
+            if resumed {
                 s.resources.push_gap(now);
                 s.cpu.push_gap(now);
             }
             // 首次采样没有基线，CPU、磁盘、网络都是 0，不画进曲线。
             if s.first_data {
-                s.resources
-                    .push(resources::CPU, now, Some(m.cpu_usage as f64));
-                s.resources
-                    .push(resources::MEMORY, now, Some(m.memory_used as f64));
-                for disk in &sample.disks {
-                    s.resources.push(
-                        &resources::disk_id(disk.number),
-                        now,
-                        disk.active.map(f64::from),
-                    );
+                for (id, value) in &sample.readings {
+                    s.resources.push(id, now, if resumed { None } else { *value });
                 }
-                s.resources
-                    .push(resources::NETWORK, now, Some(m.net_recv + m.net_send));
+                // 恢复后的第一份差值覆盖了暂停区间，只用来刷新读数与基线，不计入窗口统计。
+                if !resumed {
+                    for n in &sample.networks { s.resources.push_network(n, now); }
+                }
             }
             let with_history = s.first_data;
             s.cpu.record(now, sample.cpu, with_history);
@@ -764,6 +760,7 @@ impl Controller {
             }
             s.system = m;
             s.disks = sample.disks;
+            s.networks = sample.networks;
             s.memory = sample.memory;
             if sample.memory_hardware.is_some() {
                 s.memory_hardware = sample.memory_hardware;
@@ -886,6 +883,7 @@ impl Controller {
                     .disks
                     .iter()
                     .find(|d| resources::disk_id(d.number) == inst.id);
+                let network = s.networks.iter().find(|n| n.id == inst.id);
                 let history = s.resources.history(&inst.id);
                 // (纵轴顶端取值, 卡片摘要, 纵轴标注, 统计项取值)
                 let (scale, value, scale_label, stats) = match inst.kind {
@@ -923,16 +921,16 @@ impl Controller {
                             scale,
                             format!(
                                 "↓ {}  ↑ {}",
-                                format::rate(m.net_recv),
-                                format::rate(m.net_send)
+                                network.and_then(|n| n.recv).map(format::rate).unwrap_or_else(|| "—".into()),
+                                network.and_then(|n| n.send).map(format::rate).unwrap_or_else(|| "—".into())
                             ),
                             format::rate(scale),
-                            vec![format::rate(m.net_recv), format::rate(m.net_send)],
+                            vec![network.and_then(|n| n.recv).map(format::rate).unwrap_or_else(|| "—".into()), network.and_then(|n| n.send).map(format::rate).unwrap_or_else(|| "—".into())],
                         )
                     }
                 };
                 // 迷你模式下完整窗口隐藏，详情大图不画；回到完整模式时 redraw_graphs 立即补画。
-                let (line, area) = if s.mini {
+                let (line, area) = if s.mini || s.resources.selected() != inst.id {
                     Default::default()
                 } else {
                     history.paths(now, scale, detail)
@@ -940,7 +938,9 @@ impl Controller {
                 let (mini_line, mini_area) = history.paths(now, scale, Self::MINI);
                 let detail = match (&mem_text, inst.kind) {
                     (Some(t), ResourceKind::Memory) => t.header.clone(),
-                    _ => String::new(),
+                    _ => network.map(|n| format!("{} · 链路 {:.0} Mbps{}\n{}\n{}", n.connection, n.link_speed as f64 / 1e6,
+                        if n.ssid.is_empty() { String::new() } else { format!(" · SSID {}", n.ssid) },
+                        if n.addresses.is_empty() { "地址不可用" } else { &n.addresses }, s.resources.network_stats(&n.id, now))).unwrap_or_default(),
                 };
                 Resource {
                     disk_info: disk

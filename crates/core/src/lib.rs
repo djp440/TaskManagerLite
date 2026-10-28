@@ -13,6 +13,8 @@ mod icon;
 mod instance;
 mod memory;
 mod nt;
+mod network;
+pub use network::NetworkAdapter;
 mod procinfo;
 mod sampler;
 mod shellops;

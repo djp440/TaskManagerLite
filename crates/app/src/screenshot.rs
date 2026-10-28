@@ -38,7 +38,14 @@ const STEPS: &[Step] = &[
         ui.invoke_resource_selected("memory".into())
     }),
     ("05-性能网络-深色", |ui| {
-        ui.invoke_resource_selected("network".into())
+        let resources = ui.get_resources();
+        for i in 0..resources.row_count() {
+            let row = resources.row_data(i).unwrap();
+            if row.kind == crate::ResourceKind::Network {
+                ui.invoke_resource_selected(row.id);
+                break;
+            }
+        }
     }),
     ("05b-性能磁盘-深色", |ui| {
         let resources = ui.get_resources();
