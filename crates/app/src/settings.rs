@@ -80,6 +80,8 @@ pub struct Settings {
     /// 性能页选中的资源实例 id（`cpu`、`memory`、`disk`、`network`……）。
     pub resource: String,
     pub columns: ColumnWidths,
+    /// 窗口置顶。
+    pub always_on_top: bool,
     /// 本版本不认识的顶层字段，保存时原样写回。
     extra: Map<String, Value>,
 }
@@ -96,6 +98,7 @@ impl Default for Settings {
             page: 0,
             resource: "cpu".into(),
             columns: ColumnWidths::default(),
+            always_on_top: false,
             extra: Map::new(),
         }
     }
@@ -103,7 +106,7 @@ impl Default for Settings {
 
 // 顶层字段名。新增字段时同步加入 KNOWN。
 // `tree` 是旧版的布尔视图开关，读取时迁移为 `view`，保存时不再写出。
-const KNOWN: &[&str] = &["window", "interval_index", "tree", "view", "sort", "page", "resource", "columns"];
+const KNOWN: &[&str] = &["window", "interval_index", "tree", "view", "sort", "page", "resource", "columns", "always_on_top"];
 
 fn int<T: TryFrom<i64>>(o: &Map<String, Value>, key: &str) -> Option<T> {
     T::try_from(o.get(key)?.as_i64()?).ok()
@@ -224,6 +227,9 @@ impl Settings {
                 disk: get("disk", d.disk),
             };
         }
+        if let Some(b) = o.get("always_on_top").and_then(Value::as_bool) {
+            s.always_on_top = b;
+        }
         s.extra = o.iter().filter(|(k, _)| !KNOWN.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
         s
     }
@@ -253,6 +259,7 @@ impl Settings {
         c.insert("memory".into(), number(self.columns.memory));
         c.insert("disk".into(), number(self.columns.disk));
         o.insert("columns".into(), Value::Object(c));
+        o.insert("always_on_top".into(), self.always_on_top.into());
         let mut text = serde_json::to_string_pretty(&Value::Object(o)).unwrap_or_default();
         text.push('\n');
         text
@@ -349,6 +356,7 @@ mod tests {
             page: 1,
             resource: "network".into(),
             columns: ColumnWidths { pid: 90.0, cpu: 64.5, memory: 140.0, disk: 200.0 },
+            always_on_top: true,
             extra: Map::new(),
         }
     }
@@ -380,7 +388,7 @@ mod tests {
             r#"{"tree": "yes", "view": 5, "interval_index": "2", "page": 5, "resource": 3,
                 "sort": {"key": 7, "descending": "no"},
                 "window": {"x": 1, "y": 2, "width": "wide", "height": 3},
-                "columns": {"pid": "x", "cpu": 100, "memory": null}}"#,
+                "columns": {"pid": "x", "cpu": 100, "memory": null}, "always_on_top": 1}"#,
         );
         let d = Settings::default();
         assert_eq!(s.view, d.view);
@@ -391,6 +399,7 @@ mod tests {
         assert_eq!(s.descending, d.descending);
         assert_eq!(s.window, None);
         assert_eq!(s.columns, ColumnWidths { cpu: 100.0, ..ColumnWidths::default() });
+        assert!(!s.always_on_top);
     }
 
     #[test]

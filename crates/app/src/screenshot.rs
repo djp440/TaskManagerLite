@@ -191,12 +191,27 @@ const STEPS: &[Step] = &[
     ("39-工具栏-性能-未提权-深色-760x600", |ui| toolbar(ui, 1, false, true, 760.0)),
     ("40-工具栏-进程-未提权-浅色-760x600", |ui| toolbar(ui, 0, false, false, 760.0)),
     ("41-工具栏-进程-未提权-浅色-900x600", |ui| toolbar(ui, 0, false, false, 900.0)),
+    // 置顶开关：按下态与实心图钉。
+    ("42-工具栏-已置顶-深色-1040x600", |ui| {
+        toolbar(ui, 0, false, true, 1040.0);
+        ui.set_pinned(true);
+    }),
+    ("43-工具栏-已置顶-浅色-760x600", |ui| toolbar(ui, 0, false, false, 760.0)),
+    ("44-工具栏-已置顶-性能-深色-760x600", |ui| toolbar(ui, 1, true, true, 760.0)),
     // 指针停在收起后的提权按钮上：先是悬停态，约 0.5 秒后出现完整文字的提示（下一步截图）。放在最后，免得悬停影响其他步骤。
-    ("42-工具栏-提权图标悬停-深色-900x600", |ui| {
+    ("45-工具栏-提权图标悬停-深色-900x600", |ui| {
         toolbar(ui, 0, false, true, 900.0);
+        ui.set_pinned(false);
         hover_compact_elevate(ui);
     }),
-    ("43-工具栏-提权图标提示-深色-900x600", |_| {}),
+    ("46-工具栏-提权图标提示-深色-900x600", |_| {}),
+    // 指针移到置顶按钮上（提权图标左侧 32 + 8）：约 0.5 秒后出现提示。
+    ("47-工具栏-置顶按钮悬停-深色-900x600", |ui| {
+        let width = ui.window().size().to_logical(ui.window().scale_factor()).width;
+        let at = LogicalPosition::new(width - 12.0 - 32.0 - 8.0 - 16.0, 28.0);
+        ui.window().dispatch_event(WindowEvent::PointerMoved { position: at });
+    }),
+    ("48-工具栏-置顶按钮提示-深色-900x600", |_| {}),
 ];
 
 /// 工具栏截图的统一设定：页面、提权状态、主题与窗口宽度（高 600），平铺视图、无搜索词。
