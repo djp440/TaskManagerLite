@@ -86,6 +86,8 @@ pub struct Settings {
     pub always_on_top: bool,
     /// 用户选择用本程序接管 Ctrl+Shift+Esc（IFEO 登记，见 ADR 0003）。这只是意愿，登记是否有效以注册表为准。
     pub replace_taskmgr: bool,
+    /// 后台继续采样：窗口最小化或隐藏时继续采系统指标，曲线不断开。默认关闭。
+    pub background_sampling: bool,
     /// 本版本不认识的顶层字段，保存时原样写回。
     extra: Map<String, Value>,
 }
@@ -105,6 +107,7 @@ impl Default for Settings {
             accurate_disk_io: false,
             always_on_top: false,
             replace_taskmgr: false,
+            background_sampling: false,
             extra: Map::new(),
         }
     }
@@ -112,8 +115,10 @@ impl Default for Settings {
 
 // 顶层字段名。新增字段时同步加入 KNOWN。
 // `tree` 是旧版的布尔视图开关，读取时迁移为 `view`，保存时不再写出。
-const KNOWN: &[&str] =
-    &["window", "interval_index", "tree", "view", "sort", "page", "resource", "columns", "always_on_top", "replace_taskmgr", "accurate_disk_io"];
+const KNOWN: &[&str] = &[
+    "window", "interval_index", "tree", "view", "sort", "page", "resource", "columns", "always_on_top",
+    "replace_taskmgr", "accurate_disk_io", "background_sampling",
+];
 
 fn int<T: TryFrom<i64>>(o: &Map<String, Value>, key: &str) -> Option<T> {
     T::try_from(o.get(key)?.as_i64()?).ok()
@@ -234,6 +239,9 @@ impl Settings {
                 disk: get("disk", d.disk),
             };
         }
+        if let Some(b) = o.get("background_sampling").and_then(Value::as_bool) {
+            s.background_sampling = b;
+        }
         if let Some(b) = o.get("accurate_disk_io").and_then(Value::as_bool) {
             s.accurate_disk_io = b;
         }
@@ -275,6 +283,7 @@ impl Settings {
         o.insert("accurate_disk_io".into(), self.accurate_disk_io.into());
         o.insert("always_on_top".into(), self.always_on_top.into());
         o.insert("replace_taskmgr".into(), self.replace_taskmgr.into());
+        o.insert("background_sampling".into(), self.background_sampling.into());
         let mut text = serde_json::to_string_pretty(&Value::Object(o)).unwrap_or_default();
         text.push('\n');
         text
@@ -374,6 +383,7 @@ mod tests {
             accurate_disk_io: true,
             always_on_top: true,
             replace_taskmgr: true,
+            background_sampling: true,
             extra: Map::new(),
         }
     }
@@ -392,6 +402,14 @@ mod tests {
         for bad in ["", "   ", "[1,2]", "null", "42", "{\"view\": tru", "\u{0}\u{1}垃圾"] {
             assert_eq!(Settings::parse(bad), (Settings::default(), false), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn 后台采样默认关闭且只认布尔值() {
+        assert!(!Settings::default().background_sampling);
+        assert!(parse(r#"{"background_sampling": true}"#).background_sampling);
+        assert!(!parse(r#"{"background_sampling": "yes"}"#).background_sampling);
+        assert!(!parse("{}").background_sampling);
     }
 
     #[test]
