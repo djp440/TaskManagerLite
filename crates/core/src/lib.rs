@@ -1,6 +1,7 @@
 //! TaskManagerLite 的采集与领域逻辑，不依赖界面。
 
 mod apps;
+mod autostart;
 mod clipboard;
 mod control;
 mod cpu;
@@ -20,6 +21,7 @@ mod taskmgr;
 mod view;
 
 pub use apps::app_pids;
+pub use autostart::{AUTOSTART_ARG, AUTOSTART_TEST_KEY_ENV, Autostart, AutostartKey};
 pub use clipboard::{clipboard_text, set_clipboard_text};
 pub use control::{EndError, end_process, is_elevated, relaunch_elevated};
 pub use cpu::{CpuInfo, CpuSample, read_cpu_info};

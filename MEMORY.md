@@ -1,5 +1,18 @@
 # 开发经验
 
+## 2026-10-28 15:10 前端批次（#17 详细信息列、#19 迷你模式、#16 设置页）
+- Slint 列表模型要原地更新（`set_row_data`），不要整体替换 `ModelRc`：`ModelRc` 比较按指针，替换会让依赖它的绑定全部重算；正在执行菜单回调的模型被替换还可能出错。
+- 原生 `MenuItem` 被激活时先自己翻转 `checked` 再调 `activated`；`Switch`、`SegmentedControl` 被点击也会改写自己的属性。所以它们的状态要用 `<=>` 双向绑定到全局/根属性，Rust 侧只在回调里读新值并写回实际结果，否则界面与真实状态会分叉。
+- 每个 `Window` 组件实例有独立的全局对象（含 `Palette`）：迷你窗口的深浅色要单独设置（截图模式里 `invoke_set_dark`，主题设置里 `invoke_set_theme`）。
+- “跟随系统”主题：把 `Palette.color-scheme` 设成 `ColorScheme.unknown`，Fluent 会按系统取色；但自定义 `Theme.dark` 若只看 `color-scheme == dark` 会变成假，改为 unknown 时根据 `Palette.background == #1C1C1C` 推断。
+- winit 在显示/隐藏、切换置顶、最小化还原时整体重写扩展样式，会清掉 `WS_EX_LAYERED`：不透明度要幂等地反复补回。窗口第一次 `show()` 时 HWND 还没创建：`scale_factor()` 恒为 1、`size()` 为 0、`set_minimized(true)` 被忽略（winit 也不支持以最小化状态创建窗口），需要等句柄出现（50ms 重试、有上限）再用 Win32 操作；新窗口定位用 `MonitorFromPoint` + `GetDpiForMonitor` 取目标显示器缩放。
+- 工具栏宽度是硬预算：每加一个顶栏控件都要跑 `toolbar_fit` 测试。设置入口做成 40px 的齿轮按钮而不是第三个页签（页签多约 64px，760 宽进程页放不下），新增“最窄时收起置顶按钮”一档，默认窗口宽度由 1040 调到 1080 以保证进程页默认完整显示。
+- 注册表测试一律用 `HKCU\Software\TaskManagerLite-test\...` 测试键（`TML_IFEO_TEST_KEY`、`TML_AUTOSTART_TEST_KEY`），用完整棵删除；IFEO 测试共享键时要串行。截图模式里只有设置了测试键才真的切换开机启动/接管任务管理器。构建目录授予 Authenticated Users 写权限，登记 IFEO 会被位置检查拒绝，这是预期。
+- PowerShell 把 `$null` 传给 Add-Type 里 C# 方法的 `string` 参数时会变成空字符串，判断要用 `string.IsNullOrEmpty`。winit 进程还有一个可见的 13×13 “Winit Thread Event Target”窗口，统计界面窗口时按类名 `Window Class` 过滤。
+- 不要跑 `cargo fmt`：仓库没有 rustfmt 配置、CI 不查格式，现有代码是约 120 列的手写风格，默认或任何一组参数都会重排几十个无关文件。误跑后：无关文件 `git checkout --`，自己改的文件按“去掉空白、尾逗号、`;}` 后相同”的差异片段还原为 HEAD 原文。
+- 开机启动隐藏到托盘时，登录早期通知区可能还没就绪：托盘创建失败每秒重试（30 次）再兜底显示窗口；最小化用 `SW_SHOWMINNOACTIVE`，避免抢前台。测试键环境变量存在但非法时必须报错，不能退回真实键。
+- 堆叠 PR 中下层被 squash 合并后，上层分支与 main 合并冲突：若上层分支的树就是想要的结果，直接取 HEAD（`git checkout HEAD -- <files>`）。
+
 ## 2026-10-28 12:35 托盘常驻与后台采样
 - 采样策略是纯函数 `sampling::plan(可见性, 后台开关, 暂停)`：`Full` / `MetricsOnly`（跳过 `SystemProcessInformation` 枚举与窗口枚举，约 10 ms/s 对前台约 27 ms/s）/ `Idle`。`Sampler` 的进程基线（时间、整机 CPU 总时间）与系统基线分开，夹着只采指标的采样时进程占用率仍按上一次进程快照做差。`Sample::processes_fresh` 为假时控制器不动进程快照与界面。
 - 曲线连续性的可观测量：恢复可见后第一次完整采样写日志 `恢复可见 … 断点=N 最大间隔=… ms`，`scripts/test-background-sampling.ps1`、`scripts/test-tray.ps1` 都据此断言。

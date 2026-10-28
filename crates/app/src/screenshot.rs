@@ -8,7 +8,7 @@ use std::time::Duration;
 use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, LogicalSize, Model, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
 
-use crate::{AppWindow, Columns, CpuData, MiniWindow, ProcessMenu};
+use crate::{AppWindow, Columns, CpuData, MiniWindow, ProcessMenu, SettingsData};
 
 type Step = (&'static str, fn(&AppWindow));
 
@@ -77,7 +77,7 @@ const STEPS: &[Step] = &[
     }),
     // 编号从 12 起，避开其他功能新增的步骤；每步显式设置主题与窗口尺寸，不依赖前一步的状态。
     ("12-性能内存-浅色", |ui| {
-        resize(ui, 1040.0, 700.0);
+        resize(ui, 1080.0, 700.0);
         ui.invoke_set_dark(false);
         ui.set_page(1);
         ui.invoke_resource_selected("memory".into());
@@ -87,10 +87,10 @@ const STEPS: &[Step] = &[
         resize(ui, 760.0, 480.0);
     }),
     ("14-性能内存-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
-    ("15-性能内存-深色-默认尺寸", |ui| resize(ui, 1040.0, 700.0)),
+    ("15-性能内存-深色-默认尺寸", |ui| resize(ui, 1080.0, 700.0)),
     // 进程图标：浏览器（有自己的图标）。依赖本机正在运行 chrome，没有时列表为空。
     ("16-进程图标-chrome-深色", |ui| {
-        resize(ui, 1040.0, 700.0);
+        resize(ui, 1080.0, 700.0);
         ui.invoke_set_dark(true);
         ui.set_page(0);
         ui.set_filter("chrome".into());
@@ -139,10 +139,10 @@ const STEPS: &[Step] = &[
         use_demo_cores(ui, 64);
         resize(ui, 760.0, 480.0);
     }),
-    ("27-性能CPU64核-深色-1040x700", |ui| resize(ui, 1040.0, 700.0)),
+    ("27-性能CPU64核-深色-1080x700", |ui| resize(ui, 1080.0, 700.0)),
     // 分组视图：应用 / 后台进程两组，各有标题行与数量；应用行与后台行各自显示图标，标题行没有图标。
     ("28-分组视图-深色", |ui| {
-        ui.window().set_size(LogicalSize::new(1040.0, 700.0));
+        ui.window().set_size(LogicalSize::new(1080.0, 700.0));
         ui.invoke_set_dark(true);
         ui.set_filter("".into());
         ui.invoke_filter_edited("".into());
@@ -185,15 +185,15 @@ const STEPS: &[Step] = &[
     ("33-工具栏-进程-未提权-深色-760x600", |ui| toolbar(ui, 0, false, true, 760.0)),
     ("34-工具栏-进程-未提权-深色-900x600", |ui| toolbar(ui, 0, false, true, 900.0)),
     ("35-工具栏-进程-未提权-深色-1000x600", |ui| toolbar(ui, 0, false, true, 1000.0)),
-    ("36-工具栏-进程-未提权-深色-1040x600", |ui| toolbar(ui, 0, false, true, 1040.0)),
+    ("36-工具栏-进程-未提权-深色-1080x600", |ui| toolbar(ui, 0, false, true, 1080.0)),
     ("37-工具栏-进程-已提权-深色-760x600", |ui| toolbar(ui, 0, true, true, 760.0)),
     ("38-工具栏-进程-已提权-深色-1000x600", |ui| toolbar(ui, 0, true, true, 1000.0)),
     ("39-工具栏-性能-未提权-深色-760x600", |ui| toolbar(ui, 1, false, true, 760.0)),
     ("40-工具栏-进程-未提权-浅色-760x600", |ui| toolbar(ui, 0, false, false, 760.0)),
     ("41-工具栏-进程-未提权-浅色-900x600", |ui| toolbar(ui, 0, false, false, 900.0)),
     // 置顶开关：按下态与实心图钉。
-    ("42-工具栏-已置顶-深色-1040x600", |ui| {
-        toolbar(ui, 0, false, true, 1040.0);
+    ("42-工具栏-已置顶-深色-1080x600", |ui| {
+        toolbar(ui, 0, false, true, 1080.0);
         ui.set_pinned(true);
     }),
     ("43-工具栏-已置顶-浅色-760x600", |ui| toolbar(ui, 0, false, false, 760.0)),
@@ -205,18 +205,18 @@ const STEPS: &[Step] = &[
         hover_compact_elevate(ui);
     }),
     ("46-工具栏-提权图标提示-深色-900x600", |_| {}),
-    // 指针移到置顶按钮上（提权图标左侧 32 + 8）：约 0.5 秒后出现提示。
+    // 指针移到置顶按钮上（提权图标左侧 32 + 8，提权图标右边是设置按钮）：约 0.5 秒后出现提示。
     ("47-工具栏-置顶按钮悬停-深色-900x600", |ui| {
         let width = ui.window().size().to_logical(ui.window().scale_factor()).width;
-        let at = LogicalPosition::new(width - 12.0 - 32.0 - 8.0 - 16.0, 28.0);
+        let at = LogicalPosition::new(width - 12.0 - 40.0 - 40.0 - 16.0, 28.0);
         ui.window().dispatch_event(WindowEvent::PointerMoved { position: at });
     }),
     ("48-工具栏-置顶按钮提示-深色-900x600", |_| {}),
     // 详细信息列：依次勾选状态、用户名、句柄、线程、描述、映像路径、命令行（按勾选顺序追加在最右），
     // 总宽超出窗口，表格横向滚动。静态信息由后台读取，下一步再截图，等结果到达。
     ("49-详细信息列-读取中-深色", |ui| {
-        toolbar(ui, 0, false, true, 1040.0);
-        resize(ui, 1040.0, 700.0);
+        toolbar(ui, 0, false, true, 1080.0);
+        resize(ui, 1080.0, 700.0);
         // 指针离开置顶按钮，收起上一步的提示。
         ui.window().dispatch_event(WindowEvent::PointerExited);
         let cols = ui.global::<Columns>();
@@ -250,7 +250,7 @@ const STEPS: &[Step] = &[
     // 恢复默认列：回到只有基本列、名称列伸缩的布局，排序回到 CPU。
     ("54-详细信息列-恢复默认-深色", |ui| {
         ui.invoke_set_dark(true);
-        resize(ui, 1040.0, 700.0);
+        resize(ui, 1080.0, 700.0);
         ui.global::<Columns>().invoke_reset_details();
         assert_eq!(ui.get_sort_key(), 2, "隐藏排序列后应回到按 CPU 排序");
     }),
@@ -303,7 +303,78 @@ const STEPS: &[Step] = &[
         with_mini(|m| press(m, Key::Escape));
         with_controller(|c| assert!(!c.is_mini(), "Esc 应回到完整模式"));
     }),
+    // 设置页：点工具栏最右侧的齿轮进入。开机启动与接管任务管理器只在脚本设置了测试键时才真的切换。
+    ("59-设置页-深色", |ui| {
+        click_settings(ui);
+        assert_eq!(ui.get_page(), 2, "点设置按钮应进入设置页");
+        // 在设置页里保存设置时记录的是这个页面。
+        assert_eq!(ui.get_page_before_settings(), 1, "应记下进入设置页之前的性能页");
+        let d = ui.global::<SettingsData>();
+        // 截图模式不读写设置文件，填一个示例路径展示页脚。
+        d.set_settings_path(r"C:\Users\demo\AppData\Roaming\TaskManagerLite\settings.json".into());
+        if std::env::var_os(tml_core::AUTOSTART_TEST_KEY_ENV).is_some() {
+            assert!(!d.get_autostart(), "测试键里开机启动应为关闭");
+            d.invoke_autostart_toggled(true);
+            assert!(d.get_autostart(), "开启开机启动后应读到已登记");
+            assert_eq!(d.get_autostart_note(), "", "开启成功不应有说明");
+            eprintln!("设置页：开机启动已在测试键中开启");
+        }
+    }),
+    ("60-设置页-浅色", |ui| {
+        ui.invoke_set_dark(false);
+        let d = ui.global::<SettingsData>();
+        if std::env::var_os(tml_core::AUTOSTART_TEST_KEY_ENV).is_some() {
+            d.invoke_autostart_toggled(false);
+            assert!(!d.get_autostart(), "关闭开机启动后应读到未登记");
+        }
+        // 接管任务管理器在后台线程里执行，下一步核对结果。
+        if std::env::var_os(tml_core::TEST_KEY_ENV).is_some() {
+            d.invoke_replace_taskmgr_toggled(true);
+            assert!(d.get_taskmgr_busy(), "登记期间应显示等待状态并禁用开关");
+        }
+    }),
+    // 最小宽度：设置页内容随窗口收窄换行，工具栏不被裁剪。
+    ("61-设置页-深色-760x600", |ui| {
+        ui.invoke_set_dark(true);
+        resize(ui, 760.0, 600.0);
+        let d = ui.global::<SettingsData>();
+        if std::env::var_os(tml_core::TEST_KEY_ENV).is_some() {
+            assert!(!d.get_taskmgr_busy(), "登记应已结束");
+            // 构建目录通常允许普通用户写入，登记会因位置检查被拒绝；无论成败，开关都应与注册表一致。
+            eprintln!(
+                "设置页：接管任务管理器 开关={} 说明={} 错误={}",
+                d.get_replace_taskmgr(),
+                d.get_taskmgr_note(),
+                d.get_taskmgr_error()
+            );
+            assert!(d.get_replace_taskmgr() != d.get_taskmgr_error(), "登记失败时开关应回到关闭并显示错误");
+        }
+    }),
+    // 滚到底：接管任务管理器的状态说明与设置文件路径。
+    ("61b-设置页底部-深色-760x600", |ui| {
+        let at = LogicalPosition::new(380.0, 300.0);
+        ui.window().dispatch_event(WindowEvent::PointerScrolled { position: at, delta_x: 0.0, delta_y: -3000.0 });
+    }),
+    // 再点一次设置按钮回到进入之前的页面（性能页）。
+    ("62-设置页返回-深色", |ui| {
+        let need = ui.get_toolbar_min_width();
+        assert!(need <= 760.5, "760 宽设置页的工具栏最小宽度 {need} 超出窗口");
+        resize(ui, 1080.0, 700.0);
+        click_settings(ui);
+        assert_eq!(ui.get_page(), 1, "再点设置按钮应回到性能页");
+    }),
 ];
+
+/// 点工具栏最右侧的设置按钮：右内边距 12，按钮 32×32，顶栏高 56。
+fn click_settings(ui: &AppWindow) {
+    let width = ui.window().size().to_logical(ui.window().scale_factor()).width;
+    let at = LogicalPosition::new(width - 12.0 - 16.0, 28.0);
+    let w = ui.window();
+    w.dispatch_event(WindowEvent::PointerMoved { position: at });
+    w.dispatch_event(WindowEvent::PointerPressed { position: at, button: PointerEventButton::Left });
+    w.dispatch_event(WindowEvent::PointerReleased { position: at, button: PointerEventButton::Left });
+    w.dispatch_event(WindowEvent::PointerExited);
+}
 
 /// 当前控制器（截图模式下总是存在）。
 fn with_controller(f: impl FnOnce(&crate::controller::Controller)) {
@@ -350,11 +421,11 @@ fn toolbar(ui: &AppWindow, page: i32, elevated: bool, dark: bool, width: f32) {
     resize(ui, width, 600.0);
 }
 
-/// 把指针移到收起后的提权按钮中心：顶栏高 56，右内边距 12，按钮 32×32。
+/// 把指针移到收起后的提权按钮中心：顶栏高 56，右内边距 12，按钮 32×32，右边还有设置按钮（32 + 间距 8）。
 fn hover_compact_elevate(ui: &AppWindow) {
     assert!(ui.get_toolbar_elevate_compact(), "900 宽时提权按钮应已收成图标");
     let width = ui.window().size().to_logical(ui.window().scale_factor()).width;
-    let at = LogicalPosition::new(width - 12.0 - 16.0, 28.0);
+    let at = LogicalPosition::new(width - 12.0 - 40.0 - 16.0, 28.0);
     ui.window().dispatch_event(WindowEvent::PointerMoved { position: at });
 }
 

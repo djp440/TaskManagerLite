@@ -44,6 +44,11 @@ export component MiniWindow inherits Window {
         Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
     }
 
+    // 主题设置：0 跟随系统，1 浅色，2 深色。
+    public function set-theme(mode: int) {
+        Palette.color-scheme = mode == 1 ? ColorScheme.light : mode == 2 ? ColorScheme.dark : ColorScheme.unknown;
+    }
+
     menu := ContextMenuArea {
         width: 100%;
         height: 100%;

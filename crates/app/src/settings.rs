@@ -101,7 +101,7 @@ pub struct Settings {
     pub view: ViewMode,
     pub sort_key: SortKey,
     pub descending: bool,
-    /// 0 = 进程，1 = 性能。
+    /// 0 = 进程，1 = 性能。设置页（2）不记录：下次启动回到进入设置页之前的页面。
     pub page: i32,
     /// 性能页选中的资源实例 id（`cpu`、`memory`、`disk`、`network`……）。
     pub resource: String,
@@ -118,6 +118,8 @@ pub struct Settings {
     pub background_sampling: bool,
     /// 关闭窗口时最小化到托盘（窗口隐藏、进程常驻、托盘图标可唤起）。默认关闭，此时关闭窗口即退出。
     pub close_to_tray: bool,
+    /// 主题：0 跟随系统，1 浅色，2 深色。
+    pub theme: i32,
     pub mini: MiniSettings,
     /// 本版本不认识的顶层字段，保存时原样写回。
     extra: Map<String, Value>,
@@ -141,6 +143,7 @@ impl Default for Settings {
             replace_taskmgr: false,
             background_sampling: false,
             close_to_tray: false,
+            theme: 0,
             mini: MiniSettings::default(),
             extra: Map::new(),
         }
@@ -164,8 +167,12 @@ const KNOWN: &[&str] = &[
     "accurate_disk_io",
     "background_sampling",
     "close_to_tray",
+    "theme",
     "mini",
 ];
+
+/// `theme` 字段的取值，下标即 [`Settings::theme`]。
+const THEMES: [&str; 3] = ["system", "light", "dark"];
 
 fn int<T: TryFrom<i64>>(o: &Map<String, Value>, key: &str) -> Option<T> {
     T::try_from(o.get(key)?.as_i64()?).ok()
@@ -303,6 +310,9 @@ impl Settings {
         if let Some(b) = o.get("close_to_tray").and_then(Value::as_bool) {
             s.close_to_tray = b;
         }
+        if let Some(t) = o.get("theme").and_then(Value::as_str).and_then(|t| THEMES.iter().position(|&n| n == t)) {
+            s.theme = t as i32;
+        }
         if let Some(m) = o.get("mini").and_then(Value::as_object) {
             let flag = |key: &str, default: bool| m.get(key).and_then(Value::as_bool).unwrap_or(default);
             s.mini.active = flag("active", false);
@@ -385,6 +395,7 @@ impl Settings {
         o.insert("replace_taskmgr".into(), self.replace_taskmgr.into());
         o.insert("background_sampling".into(), self.background_sampling.into());
         o.insert("close_to_tray".into(), self.close_to_tray.into());
+        o.insert("theme".into(), THEMES[self.theme.clamp(0, 2) as usize].into());
         let mut m = Map::new();
         m.insert("active".into(), self.mini.active.into());
         if let Some((x, y)) = self.mini.position {
@@ -499,6 +510,7 @@ mod tests {
             replace_taskmgr: true,
             background_sampling: true,
             close_to_tray: true,
+            theme: 2,
             mini: MiniSettings { active: true, position: Some((-1500, 40)), on_top: false, opacity: 80 },
             extra: Map::new(),
         }
@@ -545,6 +557,16 @@ mod tests {
         assert!(!Settings::default().close_to_tray);
         assert!(parse(r#"{"close_to_tray": true}"#).close_to_tray);
         assert!(!parse(r#"{"close_to_tray": 1}"#).close_to_tray);
+    }
+
+    #[test]
+    fn 主题默认跟随系统且只认已知名称() {
+        assert_eq!(Settings::default().theme, 0);
+        assert_eq!(parse(r#"{"theme": "light"}"#).theme, 1);
+        assert_eq!(parse(r#"{"theme": "dark"}"#).theme, 2);
+        assert_eq!(parse(r#"{"theme": "blue"}"#).theme, 0);
+        assert_eq!(parse(r#"{"theme": 2}"#).theme, 0);
+        assert!(Settings { theme: 1, ..Settings::default() }.to_json().contains(r#""theme": "light""#));
     }
 
     #[test]
