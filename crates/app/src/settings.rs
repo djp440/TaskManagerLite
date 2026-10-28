@@ -86,6 +86,8 @@ pub struct Settings {
     pub details: Vec<Shown>,
     /// 窗口置顶。
     pub always_on_top: bool,
+    /// 用户选择用本程序接管 Ctrl+Shift+Esc（IFEO 登记，见 ADR 0003）。这只是意愿，登记是否有效以注册表为准。
+    pub replace_taskmgr: bool,
     /// 本版本不认识的顶层字段，保存时原样写回。
     extra: Map<String, Value>,
 }
@@ -104,6 +106,7 @@ impl Default for Settings {
             columns: ColumnWidths::default(),
             details: Vec::new(),
             always_on_top: false,
+            replace_taskmgr: false,
             extra: Map::new(),
         }
     }
@@ -111,7 +114,19 @@ impl Default for Settings {
 
 // 顶层字段名。新增字段时同步加入 KNOWN。
 // `tree` 是旧版的布尔视图开关，读取时迁移为 `view`，保存时不再写出。
-const KNOWN: &[&str] = &["window", "interval_index", "tree", "view", "sort", "page", "resource", "columns", "detail_columns", "always_on_top"];
+const KNOWN: &[&str] = &[
+    "window",
+    "interval_index",
+    "tree",
+    "view",
+    "sort",
+    "page",
+    "resource",
+    "columns",
+    "detail_columns",
+    "always_on_top",
+    "replace_taskmgr",
+];
 
 fn int<T: TryFrom<i64>>(o: &Map<String, Value>, key: &str) -> Option<T> {
     T::try_from(o.get(key)?.as_i64()?).ok()
@@ -260,6 +275,9 @@ impl Settings {
                 s.details.push(Shown { column, width });
             }
         }
+        if let Some(b) = o.get("replace_taskmgr").and_then(Value::as_bool) {
+            s.replace_taskmgr = b;
+        }
         s.extra = o.iter().filter(|(k, _)| !KNOWN.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
         s
     }
@@ -301,6 +319,7 @@ impl Settings {
             .collect();
         o.insert("detail_columns".into(), Value::Array(shown));
         o.insert("always_on_top".into(), self.always_on_top.into());
+        o.insert("replace_taskmgr".into(), self.replace_taskmgr.into());
         let mut text = serde_json::to_string_pretty(&Value::Object(o)).unwrap_or_default();
         text.push('\n');
         text
@@ -402,6 +421,7 @@ mod tests {
                 Shown { column: DetailColumn::Handles, width: 76.0 },
             ],
             always_on_top: true,
+            replace_taskmgr: true,
             extra: Map::new(),
         }
     }
@@ -560,6 +580,16 @@ mod tests {
         assert_eq!(out["future"]["a"][1], 2);
         assert_eq!(out["another"], "x");
         assert_eq!(out["view"], "tree");
+    }
+
+    #[test]
+    fn 接管任务管理器开关默认关闭且类型不对时回退() {
+        assert!(!Settings::default().replace_taskmgr);
+        assert!(!parse("{}").replace_taskmgr);
+        assert!(parse(r#"{"replace_taskmgr": true}"#).replace_taskmgr);
+        assert!(!parse(r#"{"replace_taskmgr": "yes"}"#).replace_taskmgr);
+        let out: Value = serde_json::from_str(&parse(r#"{"replace_taskmgr": true}"#).to_json()).unwrap();
+        assert_eq!(out["replace_taskmgr"], true);
     }
 
     #[test]
