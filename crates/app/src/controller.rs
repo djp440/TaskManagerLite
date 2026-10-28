@@ -186,7 +186,7 @@ impl Controller {
         ui.on_confirm_accepted(with(Controller::confirm));
         ui.on_elevate(with(Controller::elevate));
         ui.on_graph_resized(with(Controller::redraw_graphs));
-        ui.global::<CpuData>().on_cell_resized(with(Controller::redraw_graphs));
+        ui.global::<CpuData>().on_grid_resized(with(Controller::redraw_graphs));
         let c = Rc::downgrade(self);
         ui.on_resource_selected(move |id| {
             if let Some(c) = c.upgrade() {
@@ -324,6 +324,13 @@ impl Controller {
     /// 截图模式：逻辑处理器网格改用演示曲线。
     pub fn use_demo_cpu_history(&self, cores: usize) {
         self.state.borrow_mut().cpu.use_demo_history(cores);
+    }
+
+    /// 截图模式：核对逻辑处理器网格的曲线路径尺寸是否是最新的（见 `CpuState::check_paths_current`）。
+    pub fn check_cpu_paths(&self) -> Result<(), String> {
+        let Some(ui) = self.ui.upgrade() else { return Ok(()) };
+        let s = self.state.borrow();
+        s.cpu.check_paths_current(&ui, s.resources.selected() == resources::CPU)
     }
 
     pub fn has_first_data(&self) -> bool {

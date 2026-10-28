@@ -30,10 +30,11 @@ export global CpuData {
     // 大号数值统计项（利用率、速度、进程、线程、句柄、正常运行时间）与基本信息键值，交给通用 StatsPanel 显示。
     in property <[StatItem]> stats;
     in property <[StatItem]> info;
-    // 网格中单张小图内部的绘制尺寸，由布局得出，Rust 据此生成曲线。
-    in-out property <length> cell-width;
-    in-out property <length> cell-height;
-    callback cell-resized();
+    // 网格区（不是单张小图）的尺寸，由布局得出。Rust 用它和小图数量经同一个 grid-layout 算出小图尺寸并生成曲线，
+    // 所以小图的列数、行数怎么变，曲线尺寸都跟小图实际尺寸一致。
+    in-out property <length> grid-width;
+    in-out property <length> grid-height;
+    callback grid-resized();
     // 按小图数量与网格区尺寸计算列数、行数和小图尺寸，由 Rust 实现。
     pure callback grid-layout(int, length, length) -> GridLayout;
 }
@@ -146,25 +147,21 @@ component CoreCell inherits Rectangle {
 export component CpuCoreGrid inherits Rectangle {
     property <GridLayout> plan: CpuData.grid-layout(CpuData.cores.length, root.width, root.height);
 
-    // 小图内部（去掉 1px 边框）的绘制尺寸。
-    out property <length> inner-w: max(root.plan.cell-w - 2px, 1px);
-    out property <length> inner-h: max(root.plan.cell-h - 2px, 1px);
-
+    // 只上报网格区的尺寸：它只随窗口布局变化，不受小图数量（模型从空到满）的影响。
     // changed 只在属性值“变化”时触发：网格创建时若布局已经给出最终尺寸，就不会有变化，
-    // 所以创建时（init）也要主动上报一次，否则 Rust 会一直用默认尺寸生成曲线。
-    // 同时，切到“逻辑处理器”视图时网格才被创建，这一次上报也让 Rust 立即刷新小图数据。
+    // 所以创建时（init）也要主动上报一次。切到“逻辑处理器”视图时网格才被创建，这一次上报也让 Rust 立即刷新小图数据。
     init => {
-        CpuData.cell-width = self.inner-w;
-        CpuData.cell-height = self.inner-h;
-        CpuData.cell-resized();
+        CpuData.grid-width = self.width;
+        CpuData.grid-height = self.height;
+        CpuData.grid-resized();
     }
-    changed inner-w => {
-        CpuData.cell-width = self.inner-w;
-        CpuData.cell-resized();
+    changed width => {
+        CpuData.grid-width = self.width;
+        CpuData.grid-resized();
     }
-    changed inner-h => {
-        CpuData.cell-height = self.inner-h;
-        CpuData.cell-resized();
+    changed height => {
+        CpuData.grid-height = self.height;
+        CpuData.grid-resized();
     }
 
     background: Theme.surface-raised;

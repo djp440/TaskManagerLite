@@ -4,6 +4,7 @@
 
 mod grid;
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -13,7 +14,7 @@ use tml_core::{CpuInfo, CpuSample};
 use crate::format::History;
 use crate::{AppWindow, CoreGraph, CpuData, GridLayout, StatItem};
 
-/// 单张小图在布局尚未给出尺寸前的默认绘制尺寸。
+/// 单张小图在布局尚未给出网格区尺寸前的默认绘制尺寸。
 const DEFAULT_CELL: (f64, f64) = (100.0, 50.0);
 
 #[derive(Default)]
@@ -25,6 +26,8 @@ pub struct CpuState {
     demo: bool,
     /// 截图模式下假装有这么多个逻辑处理器（0 表示用真实数量），用来核对核数很多时的网格。
     demo_cores: usize,
+    /// 最近一次生成曲线路径时用的小图绘制尺寸，供截图模式核对路径是否与网格最新尺寸一致。
+    last_cell: Cell<Option<(f64, f64)>>,
     cores: Rc<VecModel<CoreGraph>>,
     stats: Rc<VecModel<StatItem>>,
     info: Rc<VecModel<StatItem>>,
@@ -142,9 +145,41 @@ impl CpuState {
             sync(&self.info, items(info));
         }
         if scope.cores {
-            let cell = cell_size(f64::from(data.get_cell_width()), f64::from(data.get_cell_height()));
+            let cell = self.expected_cell(&data);
+            self.last_cell.set(Some(cell));
             sync(&self.cores, self.core_graphs(now, cell));
         }
+    }
+}
+
+impl CpuState {
+    /// 网格里小图的数量：演示模式用假装的核数，否则是真实的逻辑处理器数。
+    fn core_count(&self) -> usize {
+        if self.demo && self.demo_cores > 0 { self.demo_cores } else { self.latest.per_core.len() }
+    }
+
+    /// 按界面当前上报的网格区尺寸与小图数量算出的小图绘制尺寸（与 Slint 里排布小图用同一个 `grid_plan`）。
+    fn expected_cell(&self, data: &CpuData<'_>) -> (f64, f64) {
+        cell_size(self.core_count(), f64::from(data.get_grid_width()), f64::from(data.get_grid_height()))
+    }
+
+    /// 截图模式的核对：逻辑处理器网格正在显示时，最近一次生成的曲线路径尺寸必须等于小图按最新网格区尺寸
+    /// 得出的绘制尺寸，且每个核都有一张小图。不一致说明路径是按过期尺寸生成的（会被裁剪或只占一角）。
+    pub fn check_paths_current(&self, ui: &AppWindow, selected: bool) -> Result<(), String> {
+        let data = ui.global::<CpuData>();
+        if !Scope::of(selected, data.get_per_core()).cores {
+            return Ok(());
+        }
+        let expected = self.expected_cell(&data);
+        let used = self.last_cell.get().ok_or("逻辑处理器网格显示时尚未生成过曲线路径")?;
+        if (used.0 - expected.0).abs() > 0.01 || (used.1 - expected.1).abs() > 0.01 {
+            return Err(format!("曲线路径按 {used:?} 生成，但小图的实际绘制尺寸是 {expected:?}"));
+        }
+        let rows = self.cores.row_count();
+        if rows != self.core_count() {
+            return Err(format!("小图数量 {rows} 与逻辑处理器数 {} 不一致", self.core_count()));
+        }
+        Ok(())
     }
 }
 
@@ -190,9 +225,14 @@ fn demo_histories(n: usize, now: Instant) -> Vec<History> {
         .collect()
 }
 
-/// 小图的绘制尺寸：布局尚未上报（≤1px）时用默认值。
-fn cell_size(w: f64, h: f64) -> (f64, f64) {
-    if w > 1.0 && h > 1.0 { (w, h) } else { DEFAULT_CELL }
+/// 小图的绘制尺寸：由小图数量与网格区尺寸经 `grid_plan` 得出；布局尚未上报（≤1px）时用默认值。
+fn cell_size(count: usize, area_w: f64, area_h: f64) -> (f64, f64) {
+    if area_w > 1.0 && area_h > 1.0 {
+        let (w, h) = grid::grid_plan(count, area_w as f32, area_h as f32).inner_size();
+        (f64::from(w), f64::from(h))
+    } else {
+        DEFAULT_CELL
+    }
 }
 
 /// 把新数据原地写入模型，避免整体替换造成界面重建。
@@ -359,9 +399,26 @@ mod tests {
 
     #[test]
     fn cell_size_falls_back_until_layout_reports() {
-        assert_eq!(cell_size(0.0, 0.0), DEFAULT_CELL);
-        assert_eq!(cell_size(176.0, 1.0), DEFAULT_CELL);
-        assert_eq!(cell_size(176.0, 96.0), (176.0, 96.0));
+        assert_eq!(cell_size(12, 0.0, 0.0), DEFAULT_CELL);
+        assert_eq!(cell_size(12, 724.0, 1.0), DEFAULT_CELL);
+    }
+
+    #[test]
+    fn cell_size_follows_the_grid_plan_for_any_count_and_area() {
+        // 回归：小图尺寸由“数量 + 网格区尺寸”决定，数量从 0 变到 12、网格区变化时都要跟着变，
+        // 路径尺寸才不会停留在“只有一个大格子”或上一次布局的尺寸。
+        let area_of = |count| cell_size(count, 724.0, 241.0);
+        assert_ne!(area_of(1), area_of(12), "核数变了小图尺寸必然不同");
+        for (count, w, h) in [(12, 724.0, 241.0), (12, 464.0, 80.0), (64, 724.0, 241.0), (64, 464.0, 80.0), (128, 1100.0, 600.0)] {
+            let plan = grid::grid_plan(count, w as f32, h as f32);
+            let (cw, ch) = cell_size(count, w, h);
+            assert!((cw - f64::from(plan.cell_w) + 2.0).abs() < 1e-3 && (ch - f64::from(plan.cell_h) + 2.0).abs() < 1e-3);
+            // 绘制尺寸一定落在小图内部。
+            assert!(cw <= f64::from(plan.cell_w) && ch <= f64::from(plan.cell_h));
+        }
+        // 12 核的格子在默认窗口约 4x3：绘制尺寸约 173x74，而不是首次创建时那个铺满整个网格区的 722x239。
+        let (w, h) = cell_size(12, 724.0, 241.0);
+        assert!(w < 200.0 && h < 80.0, "{w}x{h}");
     }
 
     #[test]

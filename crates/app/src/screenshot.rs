@@ -171,6 +171,14 @@ fn step(weak: slint::Weak<AppWindow>, dir: Rc<PathBuf>, i: usize) {
     // 等待重新布局与渲染后再截图。
     Timer::single_shot(Duration::from_millis(400), move || {
         let Some(ui) = weak.upgrade() else { return };
+        // 出图前核对逻辑处理器网格的曲线路径尺寸是最新的；不一致就让截图直接失败，不留下错误的图。
+        crate::CONTROLLER.with(|c| {
+            if let Some(c) = c.borrow().as_ref()
+                && let Err(e) = c.check_cpu_paths()
+            {
+                panic!("截图步骤 {name}：{e}");
+            }
+        });
         match ui.window().take_snapshot() {
             Ok(buf) => {
                 let path = dir.join(format!("{name}.bmp"));
