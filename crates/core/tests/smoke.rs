@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use tml_core::{Sampler, build_view, ViewOptions};
+use tml_core::{Sampler, ViewMode, ViewOptions, build_view};
 
 #[test]
 fn samples_real_system() {
@@ -23,7 +23,7 @@ fn samples_real_system() {
     let total_cpu: f32 = second.snapshot.processes.iter().map(|p| p.cpu_usage).sum();
     assert!(total_cpu <= 100.5, "单进程占用率合计不应超过整机 100%: {total_cpu}");
 
-    let tree = build_view(&second.snapshot, &ViewOptions { tree: true, ..Default::default() });
+    let tree = build_view(&second.snapshot, &ViewOptions { mode: ViewMode::Tree, ..Default::default() });
     assert_eq!(tree.len(), second.snapshot.processes.len(), "树形视图应包含全部进程");
     eprintln!("首次采样 {first_ms:.1} ms，进程数 {}", first.snapshot.processes.len());
 }

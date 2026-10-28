@@ -10,7 +10,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use serde_json::{Map, Number, Value};
-use tml_core::SortKey;
+use tml_core::{SortKey, ViewMode};
 
 const FILE_NAME: &str = "settings.json";
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -71,7 +71,8 @@ pub struct Settings {
     pub maximized: bool,
     /// 采样间隔：0 = 0.5 秒，1 = 1 秒，2 = 2 秒，3 = 暂停。
     pub interval_index: i32,
-    pub tree: bool,
+    /// 进程列表的视图模式：平铺、树形、分组。
+    pub view: ViewMode,
     pub sort_key: SortKey,
     pub descending: bool,
     /// 0 = 进程，1 = 性能。
@@ -89,7 +90,7 @@ impl Default for Settings {
             window: None,
             maximized: false,
             interval_index: 1,
-            tree: false,
+            view: ViewMode::Flat,
             sort_key: SortKey::Cpu,
             descending: true,
             page: 0,
@@ -101,7 +102,8 @@ impl Default for Settings {
 }
 
 // 顶层字段名。新增字段时同步加入 KNOWN。
-const KNOWN: &[&str] = &["window", "interval_index", "tree", "sort", "page", "resource", "columns"];
+// `tree` 是旧版的布尔视图开关，读取时迁移为 `view`，保存时不再写出。
+const KNOWN: &[&str] = &["window", "interval_index", "tree", "view", "sort", "page", "resource", "columns"];
 
 fn int<T: TryFrom<i64>>(o: &Map<String, Value>, key: &str) -> Option<T> {
     T::try_from(o.get(key)?.as_i64()?).ok()
@@ -109,6 +111,23 @@ fn int<T: TryFrom<i64>>(o: &Map<String, Value>, key: &str) -> Option<T> {
 
 fn float(o: &Map<String, Value>, key: &str) -> Option<f32> {
     o.get(key)?.as_f64().filter(|v| v.is_finite()).map(|v| v as f32)
+}
+
+fn view_mode_name(m: ViewMode) -> &'static str {
+    match m {
+        ViewMode::Flat => "flat",
+        ViewMode::Tree => "tree",
+        ViewMode::Group => "group",
+    }
+}
+
+fn view_mode_from_name(s: &str) -> Option<ViewMode> {
+    Some(match s {
+        "flat" => ViewMode::Flat,
+        "tree" => ViewMode::Tree,
+        "group" => ViewMode::Group,
+        _ => return None,
+    })
 }
 
 fn sort_key_name(k: SortKey) -> &'static str {
@@ -163,8 +182,12 @@ impl Settings {
         {
             s.interval_index = i;
         }
-        if let Some(b) = o.get("tree").and_then(Value::as_bool) {
-            s.tree = b;
+        // 旧版只有“树形”开关：`tree: true` 迁移为树形；新字段 `view` 优先。
+        if o.get("tree").and_then(Value::as_bool) == Some(true) {
+            s.view = ViewMode::Tree;
+        }
+        if let Some(m) = o.get("view").and_then(Value::as_str).and_then(view_mode_from_name) {
+            s.view = m;
         }
         if let Some(sort) = o.get("sort").and_then(Value::as_object) {
             if let Some(k) = sort.get("key").and_then(Value::as_str).and_then(sort_key_from_name) {
@@ -217,7 +240,7 @@ impl Settings {
             o.insert("window".into(), Value::Object(m));
         }
         o.insert("interval_index".into(), self.interval_index.into());
-        o.insert("tree".into(), self.tree.into());
+        o.insert("view".into(), view_mode_name(self.view).into());
         let mut sort = Map::new();
         sort.insert("key".into(), sort_key_name(self.sort_key).into());
         sort.insert("descending".into(), self.descending.into());
@@ -320,7 +343,7 @@ mod tests {
             window: Some(WindowRect { x: -120, y: 80, width: 1200.0, height: 760.5 }),
             maximized: true,
             interval_index: 2,
-            tree: true,
+            view: ViewMode::Group,
             sort_key: SortKey::Memory,
             descending: false,
             page: 1,
@@ -341,26 +364,26 @@ mod tests {
     #[test]
     fn 空对象与非对象回退默认() {
         assert_eq!(Settings::parse("{}"), (Settings::default(), true));
-        for bad in ["", "   ", "[1,2]", "null", "42", "{\"tree\": tru", "\u{0}\u{1}垃圾"] {
+        for bad in ["", "   ", "[1,2]", "null", "42", "{\"view\": tru", "\u{0}\u{1}垃圾"] {
             assert_eq!(Settings::parse(bad), (Settings::default(), false), "{bad:?}");
         }
     }
 
     #[test]
     fn 带_bom_也能读() {
-        assert!(parse("\u{feff}{\"tree\": true}").tree);
+        assert_eq!(parse("\u{feff}{\"view\": \"tree\"}").view, ViewMode::Tree);
     }
 
     #[test]
     fn 类型不对的字段逐项回退() {
         let s = parse(
-            r#"{"tree": "yes", "interval_index": "2", "page": 5, "resource": 3,
+            r#"{"tree": "yes", "view": 5, "interval_index": "2", "page": 5, "resource": 3,
                 "sort": {"key": 7, "descending": "no"},
                 "window": {"x": 1, "y": 2, "width": "wide", "height": 3},
                 "columns": {"pid": "x", "cpu": 100, "memory": null}}"#,
         );
         let d = Settings::default();
-        assert_eq!(s.tree, d.tree);
+        assert_eq!(s.view, d.view);
         assert_eq!(s.interval_index, d.interval_index);
         assert_eq!(s.page, d.page);
         assert_eq!(s.resource, d.resource);
@@ -372,8 +395,8 @@ mod tests {
 
     #[test]
     fn 部分字段缺失时其余照常读取() {
-        let s = parse(r#"{"tree": true, "sort": {"key": "name"}, "interval_index": 3}"#);
-        assert!(s.tree);
+        let s = parse(r#"{"view": "group", "sort": {"key": "name"}, "interval_index": 3}"#);
+        assert_eq!(s.view, ViewMode::Group);
         assert_eq!(s.interval_index, 3);
         assert_eq!(s.sort_key, SortKey::Name);
         // 方向缺失：名称列默认升序。
@@ -426,7 +449,7 @@ mod tests {
         let dir = temp_dir("big");
         fs::create_dir_all(&dir).unwrap();
         let store = Store::new(&dir);
-        let mut text = String::from("{\"tree\": true, \"pad\": \"");
+        let mut text = String::from("{\"view\": \"tree\", \"pad\": \"");
         text.push_str(&"x".repeat(MAX_FILE_BYTES as usize));
         text.push_str("\"}");
         fs::write(store.path(), text).unwrap();
@@ -453,12 +476,26 @@ mod tests {
 
     #[test]
     fn 未知字段被忽略且保存时保留() {
-        let s = parse(r#"{"tree": true, "future": {"a": [1, 2]}, "another": "x"}"#);
-        assert!(s.tree);
+        let s = parse(r#"{"view": "tree", "future": {"a": [1, 2]}, "another": "x"}"#);
+        assert_eq!(s.view, ViewMode::Tree);
         let out: Value = serde_json::from_str(&s.to_json()).unwrap();
         assert_eq!(out["future"]["a"][1], 2);
         assert_eq!(out["another"], "x");
-        assert_eq!(out["tree"], true);
+        assert_eq!(out["view"], "tree");
+    }
+
+    #[test]
+    fn 旧版树形开关迁移为视图模式() {
+        assert_eq!(parse(r#"{"tree": true}"#).view, ViewMode::Tree);
+        assert_eq!(parse(r#"{"tree": false}"#).view, ViewMode::Flat);
+        // 新字段优先；未识别的取值回退到旧开关 / 默认。
+        assert_eq!(parse(r#"{"tree": true, "view": "group"}"#).view, ViewMode::Group);
+        assert_eq!(parse(r#"{"tree": true, "view": "bogus"}"#).view, ViewMode::Tree);
+        assert_eq!(parse(r#"{"view": 3}"#).view, ViewMode::Flat);
+        // 保存后不再写出旧字段。
+        let out: Value = serde_json::from_str(&parse(r#"{"tree": true}"#).to_json()).unwrap();
+        assert_eq!(out["view"], "tree");
+        assert!(out.get("tree").is_none());
     }
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -473,7 +510,7 @@ mod tests {
         let store = Store::new(&dir);
         assert_eq!(store.load(), (Settings::default(), LoadOutcome::Missing));
         fs::create_dir_all(&dir).unwrap();
-        fs::write(store.path(), b"{\"tree\": tr").unwrap();
+        fs::write(store.path(), b"{\"view\": \"tr").unwrap();
         assert_eq!(store.load(), (Settings::default(), LoadOutcome::Corrupt));
         fs::write(store.path(), [0xff, 0xfe, 0x00, 0x80]).unwrap();
         assert_eq!(store.load(), (Settings::default(), LoadOutcome::Corrupt));
@@ -487,7 +524,7 @@ mod tests {
         let s = sample();
         store.save(&s).unwrap();
         assert_eq!(store.load(), (s.clone(), LoadOutcome::Loaded));
-        let s2 = Settings { tree: false, page: 0, ..s };
+        let s2 = Settings { view: ViewMode::Flat, page: 0, ..s };
         store.save(&s2).unwrap();
         assert_eq!(store.load(), (s2, LoadOutcome::Loaded));
         let names: Vec<_> =

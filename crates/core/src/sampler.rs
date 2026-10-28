@@ -1,8 +1,9 @@
 //! 采样器：每调用一次 `sample` 生成一个进程快照和一组系统级指标。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+use crate::apps::app_pids;
 use crate::control::is_critical;
 use crate::cpu::{CpuProbe, CpuSample};
 use crate::memory::{MemoryHardware, MemoryStatus, read_hardware, read_status};
@@ -13,6 +14,8 @@ use crate::system::{CpuTimes, DiskCounters, SystemMetrics, cpu_times, network_oc
 pub struct Sample {
     pub snapshot: ProcessSnapshot,
     pub system: SystemMetrics,
+    /// 应用进程的 PID（见 [`crate::apps`]）；未开启 [`Sampler::track_apps`] 时为 `None`。
+    pub app_pids: Option<HashSet<u32>>,
     pub cpu: CpuSample,
     /// 内存详情（组成、提交、内核池）。
     pub memory: MemoryStatus,
@@ -31,10 +34,16 @@ pub struct Sampler {
     disk_tried: bool,
     hardware_tried: bool,
     critical: HashMap<ProcessKey, bool>,
+    track_apps: bool,
     cpu_probe: CpuProbe,
 }
 
 impl Sampler {
+    /// 开启后每次采样都枚举窗口，找出应用进程（仅分组视图需要）。
+    pub fn track_apps(&mut self, on: bool) {
+        self.track_apps = on;
+    }
+
     pub fn sample(&mut self) -> Sample {
         let now = Instant::now();
         let elapsed = self.last.map_or(0.0, |t| now.duration_since(t).as_secs_f64());
@@ -91,8 +100,11 @@ impl Sampler {
             self.net = Some(cur);
         }
 
+        let app_pids = self.track_apps.then(app_pids);
+
         Sample {
             snapshot,
+            app_pids,
             system: SystemMetrics {
                 cpu_usage,
                 memory_used,

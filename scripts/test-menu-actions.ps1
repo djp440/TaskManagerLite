@@ -115,6 +115,16 @@ try {
     if ($dlg) { [void][W]::PostMessage($dlg, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) }  # WM_CLOSE
     Start-Sleep -Milliseconds 500
     Stop-App $app
+
+    # 分组视图：同样的动作，选中的必须是按 PID 找到的那一行（标题行不可选，应用行 / 后台行都对得上进程）。
+    function Start-AppGroup($action) {
+        Start-Process $exePath -ArgumentList '--menu-action', "${action}:$($child.Id):group" -PassThru
+    }
+    Set-Clipboard -Value 'TML-SENTINEL'
+    $app = Start-AppGroup 'copy-path'
+    $got = Wait-For { $c = Get-Clipboard -Raw; if ($c -and $c -ne 'TML-SENTINEL') { $c } }
+    Stop-App $app
+    Check '分组视图：复制路径选中正确的进程' ($got -and $got.Trim() -ieq $target) "剪贴板=$got"
 }
 finally {
     if ($child -and -not $child.HasExited) { $child.Kill(); $child.WaitForExit() }

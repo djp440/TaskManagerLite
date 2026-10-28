@@ -197,7 +197,8 @@ component ProcRowView inherits Rectangle {
         touch := TouchArea {
             // TouchArea 会吞掉右键，所以由它在右键按下时选中该行、读取菜单状态并弹出菜单。
             pointer-event(e) => {
-                if e.button == PointerEventButton.right && e.kind == PointerEventKind.down {
+                // 标题行不弹进程菜单（上面还有一层吞掉事件的覆盖，这里再防一道）。
+                if e.button == PointerEventButton.right && e.kind == PointerEventKind.down && !root.data.header {
                     root.select();
                     ProcessMenu.opening();
                     menu.show({ x: self.mouse-x, y: self.mouse-y });
@@ -227,7 +228,7 @@ component ProcRowView inherits Rectangle {
                     enabled: root.data.has-children;
                     // 箭头区域叠在整行的 TouchArea 之上，会吞掉右键，这里同样弹出菜单（坐标换算到整行）。
                     pointer-event(e) => {
-                        if e.button == PointerEventButton.right && e.kind == PointerEventKind.down {
+                        if e.button == PointerEventButton.right && e.kind == PointerEventKind.down && !root.data.header {
                             root.select();
                             ProcessMenu.opening();
                             menu.show({
@@ -302,6 +303,28 @@ component ProcRowView inherits Rectangle {
             width: Columns.eff.disk;
             text: root.data.disk;
             heat: root.data.disk-heat;
+        }
+    }
+
+    // 分组标题行：盖住整行，吃掉鼠标事件（不可选中、没有右键菜单）。
+    if root.data.header: Rectangle {
+        background: Theme.surface;
+        TouchArea { }
+
+        Rectangle {
+            background: Theme.dark ? #ffffff0a : #00000008;
+        }
+
+        Text {
+            x: 10px;
+            width: parent.width - 20px;
+            height: parent.height;
+            text: root.data.name;
+            vertical-alignment: center;
+            overflow: elide;
+            font-size: 12px;
+            font-weight: 600;
+            color: Theme.subtle-text;
         }
     }
 }

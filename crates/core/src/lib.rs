@@ -1,5 +1,6 @@
 //! TaskManagerLite 的采集与领域逻辑，不依赖界面。
 
+mod apps;
 mod clipboard;
 mod control;
 mod cpu;
@@ -14,6 +15,7 @@ mod snapshot;
 mod system;
 mod view;
 
+pub use apps::app_pids;
 pub use clipboard::{clipboard_text, set_clipboard_text};
 pub use control::{EndError, end_process, is_elevated, relaunch_elevated};
 pub use cpu::{CpuInfo, CpuSample, read_cpu_info};
@@ -25,7 +27,9 @@ pub use sampler::{Sample, Sampler};
 pub use shellops::{ShellError, reveal_in_explorer, search_online, search_url, show_properties};
 pub use snapshot::{Process, ProcessKey, ProcessSnapshot};
 pub use system::SystemMetrics;
-pub use view::{SortKey, ViewOptions, ViewRow, build_view, tree_from};
+pub use view::{
+    Group, GroupHeader, HEADER_INDEX, SortKey, Totals, ViewMode, ViewOptions, ViewRow, build_group_view, build_view, tree_from,
+};
 
 /// 本地时间，格式 `yyyy-MM-dd HH-mm-ss`，用作日志文件名。
 pub fn local_timestamp() -> String {

@@ -1,13 +1,14 @@
 //! 界面线程上的状态与交互逻辑。
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use tml_core::{
-    EndError, MemoryHardware, MemoryStatus, ProcessKey, ProcessSnapshot, Sample, SortKey, SystemMetrics, ViewOptions,
-    ViewRow, build_view, end_process, tree_from,
+    EndError, Group, GroupHeader, MemoryHardware, MemoryStatus, Process, ProcessKey, ProcessSnapshot, Sample, SortKey,
+    SystemMetrics, ViewMode, ViewOptions, ViewRow, build_group_view, build_view, end_process, tree_from,
 };
 
 mod cpu;
@@ -54,6 +55,8 @@ pub struct Controller {
 #[derive(Default)]
 struct State {
     snapshot: ProcessSnapshot,
+    /// 应用进程的 PID；采样线程只在分组视图下枚举窗口，其余时候为 `None`。
+    app_pids: Option<HashSet<u32>>,
     view: Vec<ViewRow>,
     opts: ViewOptions,
     selected: Option<ProcessKey>,
@@ -85,6 +88,30 @@ fn sort_key(i: i32) -> SortKey {
     }
 }
 
+fn view_mode(i: i32) -> ViewMode {
+    match i {
+        1 => ViewMode::Tree,
+        2 => ViewMode::Group,
+        _ => ViewMode::Flat,
+    }
+}
+
+fn view_mode_index(m: ViewMode) -> i32 {
+    match m {
+        ViewMode::Flat => 0,
+        ViewMode::Tree => 1,
+        ViewMode::Group => 2,
+    }
+}
+
+/// 分组标题行上显示的文字。
+fn group_title(h: GroupHeader) -> String {
+    match h.group {
+        Group::Apps => format!("应用 ({})", h.count),
+        Group::Background => format!("后台进程 ({})", h.count),
+    }
+}
+
 fn sort_index(k: SortKey) -> i32 {
     match k {
         SortKey::Name => 0,
@@ -106,8 +133,8 @@ impl Controller {
         let mut state = State { visible: true, resources: set, ..Default::default() };
         state.opts.sort_key = settings.sort_key;
         state.opts.descending = settings.descending;
-        state.opts.tree = settings.tree;
-        ui.set_tree_mode(settings.tree);
+        state.opts.mode = settings.view;
+        ui.set_view_mode(view_mode_index(settings.view));
         ui.set_page(settings.page);
         let cols = ui.global::<Columns>();
         cols.set_pid(settings.columns.pid);
@@ -218,7 +245,10 @@ impl Controller {
         ui.on_select(move |i| {
             if let Some(c) = c.upgrade() {
                 let mut s = c.state.borrow_mut();
-                s.selected = s.view.get(i as usize).map(|r| s.snapshot.processes[r.index].key);
+                // 分组标题行不可选中，忽略。
+                if let Some(key) = process_key_at(&s.view, &s.snapshot.processes, i as usize) {
+                    s.selected = Some(key);
+                }
             }
         });
         let c = Rc::downgrade(self);
@@ -243,10 +273,12 @@ impl Controller {
             if let Some(c) = c.upgrade() {
                 {
                     let mut s = c.state.borrow_mut();
-                    if let Some(key) = s.view.get(i as usize).map(|r| s.snapshot.processes[r.index].key)
-                        && !s.opts.collapsed.remove(&key)
-                    {
-                        s.opts.collapsed.insert(key);
+                    if let Some(key) = process_key_at(&s.view, &s.snapshot.processes, i as usize) {
+                        // 树形默认展开，记录折叠项；分组默认折叠，记录展开项。
+                        let set = if s.opts.mode == ViewMode::Group { &mut s.opts.expanded } else { &mut s.opts.collapsed };
+                        if !set.remove(&key) {
+                            set.insert(key);
+                        }
                     }
                 }
                 c.refresh_rows();
@@ -260,10 +292,9 @@ impl Controller {
             }
         });
         let c = Rc::downgrade(self);
-        ui.on_tree_changed(move |tree| {
+        ui.on_view_changed(move |mode| {
             if let Some(c) = c.upgrade() {
-                c.state.borrow_mut().opts.tree = tree;
-                c.refresh_rows();
+                c.set_view_mode(view_mode(mode));
             }
         });
         let c = Rc::downgrade(self);
@@ -272,6 +303,23 @@ impl Controller {
                 c.set_interval(i);
             }
         });
+    }
+
+    /// 切换视图模式。分组视图需要采样线程枚举窗口：切到分组时通知它并等下一个快照带着应用进程回来再刷新列表。
+    fn set_view_mode(&self, mode: ViewMode) {
+        let was_group = {
+            let mut s = self.state.borrow_mut();
+            let was = s.opts.mode == ViewMode::Group;
+            s.opts.mode = mode;
+            if mode != ViewMode::Group {
+                s.app_pids = None;
+            }
+            was
+        };
+        if (mode == ViewMode::Group) != was_group {
+            self.sampler.send(Command::Apps(mode == ViewMode::Group));
+        }
+        self.refresh_rows();
     }
 
     fn set_interval(&self, index: i32) {
@@ -307,7 +355,7 @@ impl Controller {
             let s = self.state.borrow();
             settings.sort_key = s.opts.sort_key;
             settings.descending = s.opts.descending;
-            settings.tree = s.opts.tree;
+            settings.view = s.opts.mode;
             settings.resource = s.resources.selected_for_save().to_owned();
         }
         settings.interval_index = ui.get_interval_index();
@@ -377,6 +425,7 @@ impl Controller {
             let with_history = s.first_data;
             s.cpu.record(now, sample.cpu, with_history);
             s.snapshot = sample.snapshot;
+            s.app_pids = sample.app_pids;
             s.system = m;
             s.memory = sample.memory;
             if sample.memory_hardware.is_some() {
@@ -439,11 +488,8 @@ impl Controller {
     /// 刷新满足条件的进程所在行的图标。
     fn update_icons(&self, affected: impl Fn(&State, ProcessKey) -> bool) {
         let s = self.state.borrow();
-        for (i, r) in s.view.iter().enumerate() {
-            let key = s.snapshot.processes[r.index].key;
-            if affected(&s, key)
-                && let Some(mut row) = self.rows.row_data(i)
-            {
+        for (i, key) in icon_rows(&s.view, &s.snapshot.processes, |key| affected(&s, key)) {
+            if let Some(mut row) = self.rows.row_data(i) {
                 row.icon = s.icons.icon(key).cloned().unwrap_or_else(|| self.blank_icon.clone());
                 self.rows.set_row_data(i, row);
             }
@@ -559,7 +605,12 @@ impl Controller {
     fn refresh_rows(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
         let mut s = self.state.borrow_mut();
-        s.view = build_view(&s.snapshot, &s.opts);
+        s.view = match (&s.app_pids, s.opts.mode) {
+            (Some(apps), ViewMode::Group) => build_group_view(&s.snapshot, apps, &s.opts),
+            // 刚切到分组、带窗口信息的快照还没到：保持现有列表，快照一到就会刷新。
+            (None, ViewMode::Group) => return,
+            _ => build_view(&s.snapshot, &s.opts),
+        };
         let procs = &s.snapshot.processes;
         let mut selected_index = -1;
         let rows: Vec<ProcRow> = s
@@ -567,24 +618,40 @@ impl Controller {
             .iter()
             .enumerate()
             .map(|(i, r)| {
+                if let Some(h) = r.header {
+                    // 标题行没有图标；用同一个空白图标，否则空 Image 互不相等，每次刷新都会重写这一行。
+                    return ProcRow {
+                        name: group_title(h).into(),
+                        header: true,
+                        icon: self.blank_icon.clone(),
+                        ..Default::default()
+                    };
+                }
                 let p = &procs[r.index];
                 if Some(p.key) == s.selected {
                     selected_index = i as i32;
                 }
+                // 分组视图的应用行显示“自身 + 全部后代”的合计，其余行显示各自的值。
+                let (cpu, memory, disk) = r
+                    .totals
+                    .map_or((p.cpu_usage, p.private_working_set, p.disk_rate), |t| {
+                        (t.cpu_usage, t.private_working_set, t.disk_rate)
+                    });
                 ProcRow {
                     name: p.name.as_str().into(),
                     pid: p.key.pid as i32,
-                    cpu: format::percent(p.cpu_usage).into(),
-                    memory: format::megabytes(p.private_working_set).into(),
-                    disk: format::disk_rate(p.disk_rate).into(),
-                    cpu_heat: (p.cpu_usage / 40.0).min(1.0),
-                    memory_heat: (p.private_working_set as f32 / (1024.0 * 1024.0 * 1024.0)).min(1.0),
-                    disk_heat: (p.disk_rate / (20.0 * 1024.0 * 1024.0)).min(1.0) as f32,
+                    cpu: format::percent(cpu).into(),
+                    memory: format::megabytes(memory).into(),
+                    disk: format::disk_rate(disk).into(),
+                    cpu_heat: (cpu / 40.0).min(1.0),
+                    memory_heat: (memory as f32 / (1024.0 * 1024.0 * 1024.0)).min(1.0),
+                    disk_heat: (disk / (20.0 * 1024.0 * 1024.0)).min(1.0) as f32,
                     depth: r.depth as i32,
                     has_children: r.has_children,
                     expanded: r.expanded,
                     critical: p.critical,
                     icon: s.icons.icon(p.key).cloned().unwrap_or_else(|| self.blank_icon.clone()),
+                    header: false,
                 }
             })
             .collect();
@@ -695,5 +762,80 @@ impl Controller {
         } else if let Some(ui) = self.ui.upgrade() {
             ui.set_status_kind(STATUS_ELEVATION_CANCELLED);
         }
+    }
+}
+
+/// 列表第 `row` 行对应的进程；分组视图的标题行（`index == HEADER_INDEX`）和越界行没有进程。
+fn process_key_at(view: &[ViewRow], procs: &[Process], row: usize) -> Option<ProcessKey> {
+    let pi = view.get(row).and_then(ViewRow::process)?;
+    procs.get(pi).map(|p| p.key)
+}
+
+/// 满足 `affected` 的进程所在的行（行下标与进程身份）；标题行没有进程，直接跳过。
+fn icon_rows(view: &[ViewRow], procs: &[Process], affected: impl Fn(ProcessKey) -> bool) -> Vec<(usize, ProcessKey)> {
+    (0..view.len()).filter_map(|i| process_key_at(view, procs, i).map(|k| (i, k))).filter(|&(_, k)| affected(k)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn p(pid: u32, parent: u32, name: &str) -> Process {
+        Process {
+            key: ProcessKey { pid, create_time: pid as u64 },
+            parent_pid: parent,
+            name: name.into(),
+            cpu_usage: 0.0,
+            private_working_set: 0,
+            disk_rate: 0.0,
+            critical: false,
+        }
+    }
+
+    /// 应用 chrome(10)（子进程 11 折叠不显示）+ 应用 notepad(20) + 后台进程 svc(30)：
+    /// 视图是 [标题, chrome, notepad, 标题, svc]，标题行的 index 是 HEADER_INDEX。
+    fn group() -> (ProcessSnapshot, Vec<ViewRow>) {
+        let snapshot =
+            ProcessSnapshot { processes: vec![p(10, 1, "chrome"), p(11, 10, "gpu"), p(20, 1, "notepad"), p(30, 1, "svc")] };
+        let apps: HashSet<u32> = [10, 20].into();
+        let opts = ViewOptions { mode: ViewMode::Group, sort_key: SortKey::Pid, descending: false, ..Default::default() };
+        let view = build_group_view(&snapshot, &apps, &opts);
+        (snapshot, view)
+    }
+
+    #[test]
+    fn group_view_has_header_rows_with_out_of_range_index() {
+        let (_, view) = group();
+        assert_eq!(view.len(), 5);
+        assert!(view[0].header.is_some() && view[3].header.is_some());
+        assert_eq!(view[0].index, tml_core::HEADER_INDEX);
+    }
+
+    #[test]
+    fn icon_event_in_group_view_skips_headers_without_panic() {
+        let (snapshot, view) = group();
+        // 所有进程的图标一起到达（含标题行下标越界的情形）：只返回进程行。
+        let all = icon_rows(&view, &snapshot.processes, |_| true);
+        let pids: Vec<(usize, u32)> = all.iter().map(|&(i, k)| (i, k.pid)).collect();
+        assert_eq!(pids, [(1, 10), (2, 20), (4, 30)]);
+        // 只刷新后台进程：行下标 4。
+        let svc = icon_rows(&view, &snapshot.processes, |k| k.pid == 30);
+        assert_eq!(svc.iter().map(|&(i, _)| i).collect::<Vec<_>>(), [4]);
+    }
+
+    #[test]
+    fn selecting_in_group_view_picks_the_row_process_and_ignores_headers() {
+        let (snapshot, view) = group();
+        let pid_at = |i| process_key_at(&view, &snapshot.processes, i).map(|k| k.pid);
+        // 标题行（应用箭头 / 右键 / 点击都走这里）不选中任何进程。
+        assert_eq!(pid_at(0), None);
+        assert_eq!(pid_at(3), None);
+        // 应用行选中的是应用本身（而不是后代或相邻行），后台行同理。
+        assert_eq!(pid_at(1), Some(10));
+        assert_eq!(pid_at(2), Some(20));
+        assert_eq!(pid_at(4), Some(30));
+        // 越界不 panic。
+        assert_eq!(pid_at(99), None);
     }
 }
