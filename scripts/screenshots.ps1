@@ -2,7 +2,8 @@
 # 用法：pwsh scripts/screenshots.ps1 [-Out docs/checklist/media/<日期>] [-Exe target/release/TaskManagerLite.exe]
 param(
     [string]$Out = "$PSScriptRoot/../docs/checklist/media/$(Get-Date -Format yyyy-MM-dd)",
-    [string]$Exe = "$PSScriptRoot/../target/release/TaskManagerLite.exe"
+    [string]$Exe = "$PSScriptRoot/../target/release/TaskManagerLite.exe",
+    [int]$TimeoutSeconds = 60
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,7 +19,7 @@ $env:TML_IFEO_TEST_KEY = "$testKey\Taskmgr.exe"
 try {
     $p = Start-Process -FilePath (Resolve-Path $Exe).Path -ArgumentList '--screenshot', "`"$Out`"" -PassThru
     $null = $p.Handle  # 先取句柄，进程退出后才能读到退出码
-    if (-not $p.WaitForExit(60000)) { $p.Kill(); throw '截图超时' }
+    if (-not $p.WaitForExit($TimeoutSeconds * 1000)) { $p.Kill(); throw '截图超时' }
 } finally {
     Remove-Item Env:TML_AUTOSTART_TEST_KEY, Env:TML_IFEO_TEST_KEY -ErrorAction SilentlyContinue
     Remove-Item "HKCU:\$testKey" -Recurse -Force -ErrorAction SilentlyContinue
