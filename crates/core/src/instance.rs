@@ -40,8 +40,22 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, PCWSTR, w};
 
-const MUTEX_NAME: PCWSTR = w!("Local\\TaskManagerLite.SingleInstance");
-const EVENT_NAME: PCWSTR = w!("Local\\TaskManagerLite.Activate");
+/// 测试隔离：环境变量 `TML_INSTANCE_ID` 非空时追加到对象名后，自动化测试可以在已有真实实例的机器上
+/// 验证单实例行为而不互相干扰（只影响本进程及其子进程）。
+fn object_names() -> &'static [Vec<u16>; 2] {
+    static NAMES: std::sync::OnceLock<[Vec<u16>; 2]> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let suffix = std::env::var("TML_INSTANCE_ID").map(|s| format!(".{s}")).unwrap_or_default();
+        ["Local\\TaskManagerLite.SingleInstance", "Local\\TaskManagerLite.Activate"]
+            .map(|n| format!("{n}{suffix}").encode_utf16().chain(Some(0)).collect())
+    })
+}
+fn mutex_name() -> PCWSTR {
+    PCWSTR(object_names()[0].as_ptr())
+}
+fn event_name() -> PCWSTR {
+    PCWSTR(object_names()[1].as_ptr())
+}
 /// 互斥量：Everyone 仅 SYNCHRONIZE(0x100000)；标签 Medium + NO_WRITE_UP。
 const MUTEX_SDDL: PCWSTR = w!("D:(A;;0x100000;;;WD)S:(ML;;NW;;;ME)");
 /// 事件：Everyone 仅 SYNCHRONIZE|EVENT_MODIFY_STATE(0x100002)；标签同上。
@@ -115,7 +129,7 @@ pub fn acquire(relaunch: bool) -> Acquired {
 fn try_acquire() -> Option<SingleInstance> {
     // 先建事件再建互斥量（见模块说明）。败者得到的是同一事件的另一个句柄，随后关闭即可。
     let event = with_security_attributes(EVENT_SDDL, |sa| {
-        unsafe { CreateEventExW(sa, EVENT_NAME, CREATE_EVENT(0), EVENT_OWNER_ACCESS) }.ok()
+        unsafe { CreateEventExW(sa, event_name(), CREATE_EVENT(0), EVENT_OWNER_ACCESS) }.ok()
     });
     let inst = try_mutex(event);
     if let (None, Some(e)) = (&inst, event) {
@@ -129,7 +143,7 @@ fn try_acquire() -> Option<SingleInstance> {
 /// 创建互斥量；已存在（含被拒绝打开）返回 `None`，其他失败放行，宁可多开也不能打不开。
 fn try_mutex(event: Option<HANDLE>) -> Option<SingleInstance> {
     let mutex = with_security_attributes(MUTEX_SDDL, |sa| {
-        let h = unsafe { CreateMutexExW(sa, MUTEX_NAME, 0, MUTEX_ACCESS) };
+        let h = unsafe { CreateMutexExW(sa, mutex_name(), 0, MUTEX_ACCESS) };
         (h, unsafe { GetLastError() } == ERROR_ALREADY_EXISTS)
     });
     match mutex {
@@ -153,7 +167,7 @@ fn notify_existing() {
         let _ = AllowSetForegroundWindow(ASFW_ANY);
     }
     // 互斥量存在意味着主实例已建好事件，所以只打开、不创建。
-    if let Ok(h) = unsafe { OpenEventW(EVENT_MODIFY_STATE, false, EVENT_NAME) } {
+    if let Ok(h) = unsafe { OpenEventW(EVENT_MODIFY_STATE, false, event_name()) } {
         unsafe {
             let _ = SetEvent(h);
             let _ = CloseHandle(h);

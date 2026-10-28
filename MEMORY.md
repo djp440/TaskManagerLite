@@ -1,5 +1,14 @@
 # 开发经验
 
+## 2026-10-28 12:35 托盘常驻与后台采样
+- 采样策略是纯函数 `sampling::plan(可见性, 后台开关, 暂停)`：`Full` / `MetricsOnly`（跳过 `SystemProcessInformation` 枚举与窗口枚举，约 10 ms/s 对前台约 27 ms/s）/ `Idle`。`Sampler` 的进程基线（时间、整机 CPU 总时间）与系统基线分开，夹着只采指标的采样时进程占用率仍按上一次进程快照做差。`Sample::processes_fresh` 为假时控制器不动进程快照与界面。
+- 曲线连续性的可观测量：恢复可见后第一次完整采样写日志 `恢复可见 … 断点=N 最大间隔=… ms`，`scripts/test-background-sampling.ps1`、`scripts/test-tray.ps1` 都据此断言。
+- 托盘直接用 `Shell_NotifyIconW`（`tray.rs`），不用 `tray-icon`：最小用法也使 release exe +106 KB 并引入第二份 muda 0.21；自己实现整个 #8（含窗口显示/隐藏逻辑）只 +14.8 KB。回调窗口用隐藏的顶层窗口而不是 message-only 窗口，后者收不到 `TaskbarCreated` 广播（资源管理器重启后图标不会恢复）。图标运行时按像素绘制（`CreateIcon`，非预乘 BGRA、AND 掩码全 0），无资源文件。
+- 隐藏到托盘后“最后一个窗口关闭”不再该结束事件循环：`ui.run()` 换成 `ui.show()` + `slint::run_event_loop_until_quit()`，所有退出路径显式 `quit_event_loop()`（普通关闭、托盘“退出”、提权重启）。`Window::hide()` 在 Windows/winit 上只是 `set_visible(false)`，不销毁窗口；可见性不能只看 `is_minimized()`，要同时看自己维护的 `hidden`。
+- 单实例唤起：`activate_own_window` 只找可见窗口，隐藏在托盘时要先 `ui.show()`，所以监听回调改走 `Controller::show_window`。`TML_INSTANCE_ID` 环境变量给互斥量/事件名加后缀，测试可以在已有真实实例的机器上验证单实例。
+- 托盘自动化：向托盘窗口 `PostMessage(WM_APP+1, uID=1, WM_LBUTTONUP/WM_RBUTTONUP)` 等价于真实点击；右键会进入模态菜单，截图后用 `WM_CANCELMODE` 取消；菜单命令可直接 `PostMessage(WM_COMMAND, 1002)`。`Shell_NotifyIconGetRect` 返回 S_OK 或 S_FALSE（在溢出区）都说明图标已登记，NIM_ADD 是异步的，要轮询。PowerShell 双引号字符串里的弯引号 “ ” 会被当成引号，脚本里用「」。
+- `command_line` 集成测试 `quoted_arguments_are_preserved` 偶发失败：ping 无效主机名会立刻退出，读命令行有竞态（与本改动无关）。
+
 ## 2026-10-28 12:30 其他虚拟桌面上的应用（#40）
 - 其他桌面上的窗口和挂起的 UWP 窗口一样是 `DWMWA_CLOAKED=2`。区分靠 `IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop`：挂起的 UWP（计算器、Cortana、Text Input）都回答“在当前桌面”，无效句柄也回答 TRUE，所以“明确 FALSE”才算在其他桌面，不会误把挂起 UWP 算成应用。
 - 第一次调用该接口就会把 `twinapi.dll` 等拉进进程：常驻工作集约 +4 MB（私有基本不变），而且任何 Win10 上几乎总有被 cloak 的挂起 UWP 窗口，会无条件触发。所以先读 `HKCU\...\Explorer\VirtualDesktops\VirtualDesktopIDs`（16 字节一个桌面）：不足 2 个桌面（含值不存在）就不碰 COM；读取出错才按多桌面处理。单桌面机器的分组视图内存与 main 无差别。

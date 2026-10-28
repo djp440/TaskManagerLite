@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
+use slint::{CloseRequestResponse, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use tml_core::{
     EndError, Group, GroupHeader, MemoryHardware, MemoryStatus, Process, ProcessKey, ProcessSnapshot, Sample, SortKey,
     SystemMetrics, ViewMode, ViewOptions, ViewRow, build_group_view, build_view, end_process, tree_from,
@@ -21,6 +21,7 @@ use crate::icons::{self, IconCache, IconWorker};
 use crate::logging::Log;
 use crate::sampling::{Command, SamplerHandle};
 use crate::settings::{ColumnWidths, Settings, Store};
+use crate::tray::{self, Event as TrayEvent, Tray};
 use crate::{AppWindow, ColumnLayout, Columns, CpuData, ProcRow, Resource, ResourceKind, placement};
 use cpu::CpuState;
 use resources::{Edit, Instance, ResourceSet};
@@ -50,6 +51,12 @@ pub struct Controller {
     settings: RefCell<Settings>,
     /// 开发模式（`--screenshot`、`--measure-startup`）下为 `None`，不读写用户设置。
     store: Option<Store>,
+    /// 托盘图标：开启“关闭时最小化到托盘”后在首个快照之后创建。
+    tray: RefCell<Option<Tray>>,
+    /// 托盘图标创建失败过一次就不再重试（例如没有任务栏）。
+    tray_failed: Cell<bool>,
+    /// 窗口被隐藏到托盘（与最小化不同：任务栏上没有按钮，只能从托盘或再次启动唤起）。
+    hidden: Cell<bool>,
 }
 
 #[derive(Default)]
@@ -83,6 +90,17 @@ struct State {
 }
 
 impl State {
+    /// 托盘提示里的采样状态：手动暂停优先于“隐藏且没开后台采样”。
+    fn tray_sampling(&self) -> tray::Sampling {
+        if self.paused {
+            tray::Sampling::Paused
+        } else if self.sampling() {
+            tray::Sampling::Live
+        } else {
+            tray::Sampling::Hidden
+        }
+    }
+
     /// 当前是否在采样（见 `sampling::plan`）；它的变化意味着曲线上要留断点。
     fn sampling(&self) -> bool {
         crate::sampling::plan(self.visible, self.background, self.paused) != crate::sampling::Plan::Idle
@@ -178,6 +196,9 @@ impl Controller {
             log: RefCell::new(log),
             settings: RefCell::new(settings.clone()),
             store,
+            tray: RefCell::new(None),
+            tray_failed: Cell::new(false),
+            hidden: Cell::new(false),
         });
         // 恢复上次选中的资源实例；实例暂时不存在时先用 CPU，实例出现后自动切回。
         let restored = c.state.borrow_mut().resources.restore(&settings.resource);
@@ -404,8 +425,134 @@ impl Controller {
             s.gap = true;
         }
         s.report_history = visible;
+        self.update_tray_tip(&s);
         drop(s);
         self.sampler.send(Command::Visible(visible));
+    }
+
+    /// 由定时器轮询：窗口隐藏到托盘或最小化时不可见。
+    pub fn poll_visible(&self) {
+        if let Some(ui) = self.ui.upgrade() {
+            self.set_visible(!self.hidden.get() && !ui.window().is_minimized());
+        }
+    }
+
+    /// 关闭窗口：开启了“关闭时最小化到托盘”且托盘图标可用则隐藏到托盘，否则保存设置并退出。
+    pub fn close_requested(&self) -> CloseRequestResponse {
+        self.save_settings();
+        if self.settings.borrow().close_to_tray && self.tray.borrow().is_some() {
+            self.hidden.set(true);
+            self.set_visible(false);
+            self.log_hidden();
+        } else {
+            let _ = slint::quit_event_loop();
+        }
+        CloseRequestResponse::HideWindow
+    }
+
+    /// 显示并前置窗口（托盘菜单、托盘单击、再次启动 exe 都走这里）；隐藏时先重新显示。
+    pub fn show_window(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        if self.hidden.replace(false) {
+            let _ = ui.show();
+        }
+        // 立即恢复完整采样，数据随即刷新；窗口若仍最小化，下一次轮询会改回。
+        self.set_visible(true);
+        tml_core::activate_own_window();
+    }
+
+    /// 隐藏窗口到托盘；没有托盘图标时窗口将无法唤回，所以什么也不做。
+    fn hide_window(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        if self.tray.borrow().is_none() {
+            return;
+        }
+        self.track_window();
+        self.hidden.set(true);
+        let _ = ui.hide();
+        self.set_visible(false);
+        self.log_hidden();
+    }
+
+    /// 隐藏到托盘时记一行日志，带上此刻的托盘提示文字（自动化验收据此核对 CPU/内存读数）。
+    fn log_hidden(&self) {
+        let s = self.state.borrow();
+        let tip = tray::tooltip(self.tray_reading(&s), s.tray_sampling()).replace('\n', " | ");
+        self.log.borrow_mut().line(format!("隐藏到托盘 提示={tip}"));
+    }
+
+    fn toggle_window(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        if self.hidden.get() || ui.window().is_minimized() {
+            self.show_window();
+        } else {
+            self.hide_window();
+        }
+    }
+
+    /// 托盘菜单“退出”：保存设置后结束事件循环。
+    fn quit(&self) {
+        self.save_settings();
+        let _ = slint::quit_event_loop();
+    }
+
+    fn on_tray_event(&self, event: TrayEvent) {
+        match event {
+            TrayEvent::Toggle => self.toggle_window(),
+            TrayEvent::Show => self.show_window(),
+            TrayEvent::Quit => self.quit(),
+        }
+    }
+
+    /// 开启“关闭时最小化到托盘”且还没有图标时创建托盘图标。
+    fn ensure_tray(&self) {
+        if !self.settings.borrow().close_to_tray || self.tray.borrow().is_some() || self.tray_failed.get() {
+            return;
+        }
+        let tip = {
+            let s = self.state.borrow();
+            tray::tooltip(self.tray_reading(&s), s.tray_sampling())
+        };
+        let tray = Tray::new(&tip, |event| {
+            let controller = crate::CONTROLLER.with(|c| c.borrow().clone());
+            if let Some(c) = controller {
+                c.on_tray_event(event);
+            }
+        });
+        self.tray_failed.set(tray.is_none());
+        self.log.borrow_mut().line(if tray.is_some() { "托盘图标已创建" } else { "托盘图标创建失败" });
+        *self.tray.borrow_mut() = tray;
+    }
+
+    /// 设置页（#16）调用；目前只能通过设置文件的 `close_to_tray` 字段开启。
+    #[allow(dead_code)]
+    pub fn set_close_to_tray(&self, on: bool) {
+        self.settings.borrow_mut().close_to_tray = on;
+        if on {
+            self.ensure_tray();
+        } else {
+            // 先把隐藏的窗口唤回，再移除图标，否则窗口无处可找。
+            if self.hidden.get() {
+                self.show_window();
+            }
+            self.tray.borrow_mut().take();
+        }
+    }
+
+    /// 退出事件循环之后移除托盘图标，避免残留“幽灵图标”。
+    pub fn remove_tray(&self) {
+        self.tray.borrow_mut().take();
+    }
+
+    /// 托盘提示用的读数：最近一次系统指标；还没有采样时为 `None`。
+    fn tray_reading(&self, s: &State) -> Option<(f32, u64, u64)> {
+        s.first_data.then(|| (s.system.cpu_usage, s.system.memory_used, s.system.memory_total))
+    }
+
+    fn update_tray_tip(&self, s: &State) {
+        if let Some(tray) = &*self.tray.borrow() {
+            tray.set_tip(&tray::tooltip(self.tray_reading(s), s.tray_sampling()));
+        }
     }
 
     /// 后台继续采样开关（设置页 #16 调用；目前只能通过设置文件的 `background_sampling` 字段开启）。
@@ -443,6 +590,8 @@ impl Controller {
 
     pub fn on_sample(&self, sample: Sample) {
         let now = Instant::now();
+        // 只采系统指标的采样（窗口不可见）不带进程快照：保留上一份，界面也不刷新，回到前台时马上会补一次完整采样。
+        let fresh = sample.processes_fresh;
         if let Some(ui) = self.ui.upgrade() {
             ui.global::<Columns>().set_disk_accurate(sample.disk_source == tml_core::DiskSource::Etw);
         }
@@ -463,8 +612,6 @@ impl Controller {
             }
             let with_history = s.first_data;
             s.cpu.record(now, sample.cpu, with_history);
-            // 只采系统指标的采样（窗口不可见）不带进程快照：保留上一份，界面也不刷新，回到前台时马上会补一次完整采样。
-            let fresh = sample.processes_fresh;
             if fresh {
                 s.snapshot = sample.snapshot;
                 s.app_pids = sample.app_pids;
@@ -475,21 +622,25 @@ impl Controller {
                 s.memory_hardware = sample.memory_hardware;
             }
             s.first_data = true;
-            if !fresh {
-                return;
+            self.update_tray_tip(&s);
+            if fresh {
+                if std::mem::take(&mut s.report_history) {
+                    let (points, gaps, step) = s.resources.history(resources::CPU).stats();
+                    self.log.borrow_mut().line(format!(
+                        "恢复可见 后台采样={} CPU曲线 点数={points} 断点={gaps} 最大间隔={} ms",
+                        s.background,
+                        step.as_millis()
+                    ));
+                }
+                self.update_resources(&s, now);
             }
-            if std::mem::take(&mut s.report_history) {
-                let (points, gaps, step) = s.resources.history(resources::CPU).stats();
-                self.log.borrow_mut().line(format!(
-                    "恢复可见 后台采样={} CPU曲线 点数={points} 断点={gaps} 最大间隔={} ms",
-                    s.background,
-                    step.as_millis()
-                ));
-            }
-            self.update_resources(&s, now);
         }
-        self.track_icons();
-        self.refresh_rows();
+        // 托盘图标在首个快照之后才创建，不拖慢冷启动。
+        self.ensure_tray();
+        if fresh {
+            self.track_icons();
+            self.refresh_rows();
+        }
     }
 
     /// 同步图标缓存：显示缩放变化时按新尺寸重取；新进程交给后台解析路径；已退出的进程清出缓存。
