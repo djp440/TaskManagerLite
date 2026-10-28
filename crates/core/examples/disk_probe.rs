@@ -18,9 +18,7 @@ fn main() {
     let pid: Option<u32> = value("--pid").and_then(|v| v.parse().ok());
 
     let mut sampler = Sampler::default();
-    if args.iter().any(|a| a == "--no-etw") {
-        sampler.disable_etw();
-    }
+    sampler.set_accurate_disk(!args.iter().any(|a| a == "--no-etw"));
     println!("t,source,pid,name,bytes_per_sec");
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(secs) {

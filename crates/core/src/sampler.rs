@@ -54,7 +54,8 @@ pub struct Sampler {
     etw_tried: bool,
     /// 上一次采样时 ETW 已在运行：此时累计窗口与采样间隔一致，数据可用。
     etw_ready: bool,
-    etw_disabled: bool,
+    /// 是否启用 ETW 磁盘事件（设置项 `accurate_disk_io`，默认关闭）。关闭时完全不碰 ETW。
+    accurate_disk: bool,
 }
 
 impl Sampler {
@@ -63,9 +64,14 @@ impl Sampler {
         self.track_apps = on;
     }
 
-    /// 不使用 ETW 磁盘事件，始终用近似速率（对比测量用）。
-    pub fn disable_etw(&mut self) {
-        self.etw_disabled = true;
+    /// 开关 ETW 磁盘事件（默认关闭，且需要管理员权限，见 ADR-0004）。运行中可随时切换：
+    /// 开启后在下一次（非首次）采样时启动会话，关闭后立即停止会话并恢复近似速率。
+    pub fn set_accurate_disk(&mut self, on: bool) {
+        if on && !self.accurate_disk {
+            // 重新开启时允许再试一次（例如上次因为未提权或启动失败而放弃）。
+            self.etw_tried = false;
+        }
+        self.accurate_disk = on;
     }
 
     pub fn sample(&mut self) -> Sample {
@@ -151,7 +157,13 @@ impl Sampler {
     /// 有 ETW 会话时用按进程归属的磁盘字节数覆盖近似速率。会话在首次采样之后才启动，
     /// 并且需要管理员权限；未提权、启动中或失败时保持近似值。
     fn apply_etw_disk(&mut self, first: bool, snapshot: &mut ProcessSnapshot, elapsed: f64) -> DiskSource {
-        if !first && !self.etw_tried && !self.etw_disabled {
+        if !self.accurate_disk {
+            // 关闭：丢弃会话（Drop 会停止它），其余什么也不做。
+            self.etw = None;
+            self.etw_ready = false;
+            return DiskSource::Approximate;
+        }
+        if !first && !self.etw_tried {
             self.etw_tried = true;
             self.etw = DiskTrace::start().ok();
         }
@@ -164,17 +176,54 @@ impl Sampler {
                 DiskSource::Approximate
             }
             TraceState::Running => {
-                let bytes = trace.take();
+                let window = trace.take();
                 // 刚就绪的这一次，累计窗口只有半截，丢弃；下一次起窗口与采样间隔一致。
                 if !std::mem::replace(&mut self.etw_ready, true) {
                     return DiskSource::Approximate;
                 }
-                let rate = rates(&bytes, elapsed);
+                // 运行时校验：无法归属到发起线程的事件太多时，ETW 的按进程数据不可信，保持近似值。
+                if !window.trustworthy() {
+                    return DiskSource::Approximate;
+                }
+                let rate = rates(&window.bytes, elapsed);
                 for p in &mut snapshot.processes {
                     p.disk_rate = rate.get(&p.key.pid).copied().unwrap_or(0.0);
                 }
                 DiskSource::Etw
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 默认关闭：不创建任何 ETW 会话，来源恒为近似。
+    #[test]
+    fn etw_is_off_by_default() {
+        let mut s = Sampler::default();
+        for _ in 0..3 {
+            assert_eq!(s.sample().disk_source, DiskSource::Approximate);
+        }
+        assert!(s.etw.is_none() && !s.etw_tried);
+    }
+
+    /// 开启后在非首次采样才尝试；未提权时放弃并保持近似，关闭后清空状态，再次开启允许重试。
+    #[test]
+    fn toggling_at_runtime_starts_and_drops_the_trace() {
+        if crate::control::is_elevated() {
+            return; // 提权环境会真的创建会话，交给验收脚本
+        }
+        let mut s = Sampler::default();
+        s.set_accurate_disk(true);
+        assert_eq!(s.sample().disk_source, DiskSource::Approximate);
+        assert!(!s.etw_tried, "首次采样不启动会话");
+        assert_eq!(s.sample().disk_source, DiskSource::Approximate);
+        assert!(s.etw_tried && s.etw.is_none(), "未提权：放弃，不创建会话");
+        s.set_accurate_disk(false);
+        s.sample();
+        s.set_accurate_disk(true);
+        assert!(!s.etw_tried);
     }
 }

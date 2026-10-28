@@ -17,6 +17,12 @@ use crate::system::filetime;
 
 pub(crate) struct OwnedHandle(HANDLE);
 
+impl OwnedHandle {
+    pub(crate) fn raw(&self) -> HANDLE {
+        self.0
+    }
+}
+
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
         unsafe {
@@ -46,7 +52,7 @@ pub enum EndError {
 }
 
 /// 句柄指向的是否就是 `key` 这个进程，且仍在运行。
-pub(crate) fn is_alive(h: &OwnedHandle, key: ProcessKey) -> bool {
+fn is_alive(h: &OwnedHandle, key: ProcessKey) -> bool {
     const STILL_ACTIVE: u32 = 259;
     let mut code = 0u32;
     create_time(h) == Some(key.create_time)

@@ -1,6 +1,6 @@
 //! ETW 磁盘事件的解析与按进程聚合：纯函数，不接触系统接口，可用构造的事件序列单测。
 //!
-//! 事件来自内核 `DiskIo` 与 `Thread` 两类 MOF 事件（见 ADR-0003）。磁盘事件在 DPC 中完成时记录，
+//! 事件来自内核 `DiskIo` 与 `Thread` 两类 MOF 事件（见 ADR-0004）。磁盘事件在 DPC 中完成时记录，
 //! 事件头里的进程号不可靠，要用负载里的“发起线程”（`IssuingThreadId`，版本 3）经线程表还原出进程。
 
 use std::collections::{HashMap, HashSet};
@@ -57,15 +57,44 @@ pub fn parse(provider: u128, opcode: u8, version: u8, flags: u16, header_pid: u3
     }
 }
 
-/// 按进程累计磁盘字节数。
+/// 线程表容量上限（系统同时存在的线程通常不到十万）。窗口不可见时采样线程不取数，聚合器靠上限保持有界。
+const MAX_THREADS: usize = 1 << 17;
+/// 已结束线程标记的上限，超过就提前回收。
+const MAX_ENDED: usize = 1 << 14;
+/// 按进程累计表与“查不到”缓存的上限。
+const MAX_PIDS: usize = 1 << 16;
+
+/// 一个取数窗口内的累计结果。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Window {
+    /// 每个进程读 + 写的字节数。
+    pub bytes: HashMap<u32, u64>,
+    /// 窗口内的磁盘事件数，以及其中无法还原发起线程、退回事件头进程号的事件数。
+    pub events: u64,
+    pub unresolved: u64,
+}
+
+/// 窗口内事件太少时不足以判断归属质量，按可信处理。
+const MIN_EVENTS_TO_JUDGE: u64 = 20;
+
+impl Window {
+    /// “准确”的运行时校验：无法还原发起线程的事件超过 20% 时，按进程的归属不可信，调用方应回退到近似值。
+    pub fn trustworthy(&self) -> bool {
+        self.events < MIN_EVENTS_TO_JUDGE || self.unresolved * 5 <= self.events
+    }
+}
+
+/// 按进程累计磁盘字节数。所有表都有容量上限：采样暂停期间事件仍在到达，但内存不会无限增长。
 #[derive(Default)]
 pub struct DiskAggregator {
     threads: HashMap<u32, u32>,
-    /// 已结束的线程：晚到的磁盘事件仍要能还原，所以推迟到下一次 `take` 才从线程表删除。
+    /// 已结束的线程：晚到的磁盘事件仍要能还原，所以推迟到下一次 `take`（或超过上限时）才从线程表删除。
     ended: HashSet<u32>,
+    /// 向系统查询也查不到所属进程的线程（已退出），本窗口内不再重复查询。
+    missing: HashSet<u32>,
     bytes: HashMap<u32, u64>,
-    /// 无法还原发起线程、退回事件头进程号的事件数（诊断用）。
-    pub unresolved: u64,
+    events: u64,
+    unresolved: u64,
 }
 
 impl DiskAggregator {
@@ -74,8 +103,37 @@ impl DiskAggregator {
         self.threads.contains_key(&tid)
     }
 
+    /// 本窗口内已经向系统查询过且查不到。
+    pub fn is_missing(&self, tid: u32) -> bool {
+        self.missing.contains(&tid)
+    }
+
+    pub fn mark_missing(&mut self, tid: u32) {
+        if self.missing.len() >= MAX_PIDS {
+            self.missing.clear();
+        }
+        self.missing.insert(tid);
+    }
+
     pub fn learn(&mut self, tid: u32, pid: u32) {
+        self.insert_thread(tid, pid);
+    }
+
+    fn insert_thread(&mut self, tid: u32, pid: u32) {
+        if self.threads.len() >= MAX_THREADS && !self.threads.contains_key(&tid) {
+            self.prune_ended();
+            if self.threads.len() >= MAX_THREADS {
+                // 仍然满（不应发生）：丢弃线程表，之后靠系统查询重建。
+                self.threads.clear();
+            }
+        }
         self.threads.insert(tid, pid);
+    }
+
+    fn prune_ended(&mut self) {
+        for t in self.ended.drain() {
+            self.threads.remove(&t);
+        }
     }
 
     pub fn apply(&mut self, e: Event) {
@@ -83,12 +141,16 @@ impl DiskAggregator {
             Event::ThreadStart { pid, tid } => {
                 // 线程号会复用：重新启动的线程不能被上一轮的结束标记删掉。
                 self.ended.remove(&tid);
-                self.threads.insert(tid, pid);
+                self.insert_thread(tid, pid);
             }
             Event::ThreadEnd { tid } => {
                 self.ended.insert(tid);
+                if self.ended.len() >= MAX_ENDED {
+                    self.prune_ended();
+                }
             }
             Event::DiskIo { tid, header_pid, bytes } => {
+                self.events += 1;
                 let pid = match tid.and_then(|t| self.threads.get(&t)) {
                     Some(&pid) => pid,
                     None => {
@@ -96,17 +158,23 @@ impl DiskAggregator {
                         header_pid
                     }
                 };
-                *self.bytes.entry(pid).or_default() += u64::from(bytes);
+                // 表满时不再接纳新进程（只是少记，不影响已有条目）。
+                if self.bytes.len() < MAX_PIDS || self.bytes.contains_key(&pid) {
+                    *self.bytes.entry(pid).or_default() += u64::from(bytes);
+                }
             }
         }
     }
 
-    /// 取出自上次调用以来每个进程累计的字节数，并清零；顺带回收已结束的线程。
-    pub fn take(&mut self) -> HashMap<u32, u64> {
-        for t in self.ended.drain() {
-            self.threads.remove(&t);
+    /// 取出自上次调用以来的累计结果并清零；顺带回收已结束的线程。
+    pub fn take(&mut self) -> Window {
+        self.prune_ended();
+        self.missing.clear();
+        Window {
+            bytes: std::mem::take(&mut self.bytes),
+            events: std::mem::take(&mut self.events),
+            unresolved: std::mem::take(&mut self.unresolved),
         }
-        std::mem::take(&mut self.bytes)
     }
 }
 
@@ -206,13 +274,12 @@ mod tests {
         feed(&mut a, DISK_IO_GUID, OPCODE_DISK_READ, 3, 4, &disk_payload(4096, 200));
         feed(&mut a, DISK_IO_GUID, OPCODE_DISK_WRITE, 3, 4, &disk_payload(8192, 200));
         feed(&mut a, DISK_IO_GUID, OPCODE_DISK_WRITE, 3, 4, &disk_payload(1000, 400));
-        let t = a.take();
+        let t = a.take().bytes;
         assert_eq!(t.get(&100), Some(&12288));
         assert_eq!(t.get(&300), Some(&1000));
         assert_eq!(t.get(&4), None);
-        assert_eq!(a.unresolved, 0);
         // take 清零。
-        assert!(a.take().is_empty());
+        assert_eq!(a.take(), Window::default());
     }
 
     #[test]
@@ -221,13 +288,14 @@ mod tests {
         feed(&mut a, DISK_IO_GUID, OPCODE_DISK_READ, 3, 4321, &disk_payload(100, 999));
         // 版本 2 的事件没有发起线程，同样退回事件头。
         feed(&mut a, DISK_IO_GUID, OPCODE_DISK_READ, 2, 4321, &disk_payload(50, 999));
-        assert_eq!(a.take().get(&4321), Some(&150));
-        assert_eq!(a.unresolved, 2);
+        let w = a.take();
+        assert_eq!(w.bytes.get(&4321), Some(&150));
+        assert_eq!((w.events, w.unresolved), (2, 2));
         // 向系统查询到之后，同一线程不再兜底。
         assert!(!a.knows(999));
         a.learn(999, 77);
         feed(&mut a, DISK_IO_GUID, OPCODE_DISK_READ, 3, 4321, &disk_payload(10, 999));
-        assert_eq!(a.take().get(&77), Some(&10));
+        assert_eq!(a.take().bytes.get(&77), Some(&10));
     }
 
     #[test]
@@ -237,7 +305,7 @@ mod tests {
         feed(&mut a, THREAD_GUID, OPCODE_THREAD_END, 3, 0, &thread_payload(100, 200));
         // 晚到的磁盘事件仍归属原进程。
         feed(&mut a, DISK_IO_GUID, OPCODE_DISK_READ, 3, 4, &disk_payload(10, 200));
-        assert_eq!(a.take().get(&100), Some(&10));
+        assert_eq!(a.take().bytes.get(&100), Some(&10));
         assert!(!a.knows(200));
     }
 
@@ -250,7 +318,71 @@ mod tests {
         feed(&mut a, THREAD_GUID, OPCODE_THREAD_START, 3, 0, &thread_payload(500, 200));
         a.take();
         feed(&mut a, DISK_IO_GUID, OPCODE_DISK_WRITE, 3, 4, &disk_payload(7, 200));
-        assert_eq!(a.take().get(&500), Some(&7));
+        assert_eq!(a.take().bytes.get(&500), Some(&7));
+    }
+
+    #[test]
+    fn tables_stay_bounded_when_never_taken() {
+        let mut a = DiskAggregator::default();
+        // 模拟窗口长时间不可见：线程不断创建、结束，磁盘事件不断到达，但没有人取数。
+        for i in 0..(3 * MAX_THREADS as u32) {
+            a.apply(Event::ThreadStart { pid: i % 1000 + 1, tid: i });
+            if i % 2 == 0 {
+                a.apply(Event::ThreadEnd { tid: i });
+            }
+            a.apply(Event::DiskIo { tid: Some(i), header_pid: 4, bytes: 1 });
+            a.apply(Event::DiskIo { tid: None, header_pid: 1_000_000 + i, bytes: 1 });
+            a.mark_missing(i);
+        }
+        assert!(a.threads.len() <= MAX_THREADS, "threads {}", a.threads.len());
+        assert!(a.ended.len() < MAX_ENDED, "ended {}", a.ended.len());
+        assert!(a.missing.len() <= MAX_PIDS, "missing {}", a.missing.len());
+        assert!(a.bytes.len() <= MAX_PIDS, "bytes {}", a.bytes.len());
+        // 取数后仍可正常使用，并清空窗口。
+        let w = a.take();
+        assert!(w.events > 0);
+        assert_eq!(a.take(), Window::default());
+        a.apply(Event::ThreadStart { pid: 9, tid: 1 });
+        a.apply(Event::DiskIo { tid: Some(1), header_pid: 4, bytes: 5 });
+        assert_eq!(a.take().bytes.get(&9), Some(&5));
+    }
+
+    #[test]
+    fn missing_threads_are_remembered_until_next_take() {
+        let mut a = DiskAggregator::default();
+        assert!(!a.is_missing(5));
+        a.mark_missing(5);
+        assert!(a.is_missing(5));
+        a.take();
+        assert!(!a.is_missing(5));
+    }
+
+    #[test]
+    fn trustworthy_depends_on_unresolved_share() {
+        let w = |events, unresolved| Window { events, unresolved, ..Window::default() };
+        // 事件太少不判断。
+        assert!(w(0, 0).trustworthy());
+        assert!(w(19, 19).trustworthy());
+        // 恰好 20% 仍可信，超过则不可信。
+        assert!(w(100, 20).trustworthy());
+        assert!(!w(100, 21).trustworthy());
+        assert!(!w(20, 20).trustworthy());
+        assert!(w(1000, 0).trustworthy());
+    }
+
+    #[test]
+    fn window_from_events_reports_unresolved_share() {
+        let mut a = DiskAggregator::default();
+        a.apply(Event::ThreadStart { pid: 10, tid: 1 });
+        for _ in 0..50 {
+            a.apply(Event::DiskIo { tid: Some(1), header_pid: 4, bytes: 1 });
+        }
+        for _ in 0..50 {
+            a.apply(Event::DiskIo { tid: Some(999), header_pid: 4, bytes: 1 });
+        }
+        let w = a.take();
+        assert_eq!((w.events, w.unresolved), (100, 50));
+        assert!(!w.trustworthy());
     }
 
     #[test]
