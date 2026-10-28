@@ -56,6 +56,14 @@ impl History {
         (self.points.len(), gaps, step.unwrap_or_default())
     }
 
+    /// 只统计当前窗口内的有效样本，不含用于左边缘连线的过期点。
+    pub fn window_stats(&self, now: Instant) -> Option<(f64, f64, f64)> {
+        let values: Vec<_> = self.points.iter().filter(|(at,_)| now.saturating_duration_since(*at) <= WINDOW)
+            .filter_map(|(_,v)| *v).filter(|v| v.is_finite()).collect();
+        if values.is_empty() { return None; }
+        Some((values.iter().copied().fold(f64::INFINITY, f64::min), values.iter().copied().fold(0.0, f64::max), values.iter().sum::<f64>() / values.len() as f64))
+    }
+
     pub fn max(&self) -> f64 {
         self.points.iter().filter_map(|p| p.1).fold(0.0, f64::max)
     }
@@ -106,6 +114,18 @@ pub fn nice_scale(max: f64, floor: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_statistics_ignore_gaps_and_expired_edge_point() {
+        let t = Instant::now();
+        let mut h = History::default();
+        h.push(t, Some(999.0));
+        h.push(t + Duration::from_secs(2), Some(10.0));
+        h.push(t + Duration::from_secs(3), None);
+        h.push(t + Duration::from_secs(61), Some(30.0));
+        assert_eq!(h.window_stats(t + Duration::from_secs(61)), Some((10.0, 30.0, 20.0)));
+        assert_eq!(h.window_stats(t + Duration::from_secs(122)), None);
+    }
 
     #[test]
     fn formats_like_native_task_manager() {

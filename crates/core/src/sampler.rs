@@ -11,7 +11,7 @@ use crate::etw::{DiskTrace, TraceState};
 use crate::memory::{MemoryHardware, MemoryStatus, read_hardware, read_status};
 use crate::nt::ProcessQuery;
 use crate::snapshot::{Baseline, ProcessKey, ProcessSnapshot};
-use crate::system::{CpuTimes, DiskCounters, SystemMetrics, cpu_times, network_octets};
+use crate::system::{CpuTimes, DiskCounters, SystemMetrics, cpu_times};
 
 /// 一次采样的范围。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +34,9 @@ pub enum DiskSource {
 }
 
 pub struct Sample {
+    /// 卡片曲线读数，按稳定实例 id 关联；None 表示尚无有效基线。
+    pub readings: Vec<(String, Option<f64>)>,
+    pub networks: Vec<crate::NetworkAdapter>,
     pub disks: Vec<crate::PhysicalDisk>,
     /// `Scope::Metrics` 采样时为空，此时 [`Sample::processes_fresh`] 为假，调用方应保留上一份快照。
     pub snapshot: ProcessSnapshot,
@@ -57,7 +60,7 @@ pub struct Sampler {
     query: ProcessQuery,
     baseline: Baseline,
     cpu: CpuTimes,
-    net: Option<(u64, u64)>,
+    net: crate::network::NetworkProbe,
     last: Option<Instant>,
     /// 上一次进程快照的时间与当时的整机 CPU 总时间：进程占用率按两次快照之间的差计算，
     /// 中间夹着若干次只采系统指标的采样也不影响。
@@ -190,20 +193,22 @@ impl Sampler {
             .as_mut()
             .map(|p| p.sample())
             .unwrap_or_default();
-        let (mut net_recv, mut net_send) = (0.0, 0.0);
-        if let Some(cur) = network_octets() {
-            if let Some(prev) = self.net
-                && elapsed > 0.0
-            {
-                net_recv = cur.0.saturating_sub(prev.0) as f64 / elapsed;
-                net_send = cur.1.saturating_sub(prev.1) as f64 / elapsed;
-            }
-            self.net = Some(cur);
-        }
+        let networks = self.net.sample(elapsed);
+        // 汇总保持物理网卡口径，虚拟隧道与承载它的物理网卡不能重复累加。
+        let net_recv = networks.iter().filter(|n| n.hardware).filter_map(|n| n.recv).sum();
+        let net_send = networks.iter().filter(|n| n.hardware).filter_map(|n| n.send).sum();
 
         let app_pids = (full && self.track_apps).then(app_pids);
 
+        let mut readings = vec![
+            ("cpu".into(), Some(cpu_usage as f64)),
+            ("memory".into(), Some(memory_used as f64)),
+        ];
+        readings.extend(disks.iter().map(|d| (format!("disk:{}", d.number), d.active.map(f64::from))));
+        readings.extend(networks.iter().map(|n| (n.id.clone(), n.recv.zip(n.send).map(|(r,s)| r+s))));
         Sample {
+            readings,
+            networks,
             disks,
             snapshot,
             processes_fresh: full,

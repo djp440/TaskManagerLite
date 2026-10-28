@@ -1,7 +1,6 @@
 //! 系统级指标：CPU、内存、磁盘、网络。
 
 use windows::Win32::Foundation::FILETIME;
-use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_ROW2, MIB_IF_TABLE2};
 use windows::Win32::System::Performance::{
     PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PdhAddEnglishCounterW, PdhCloseQuery,
     PdhCollectQueryData, PdhGetFormattedCounterValue, PdhOpenQueryW,
@@ -42,30 +41,6 @@ pub(crate) fn cpu_times() -> CpuTimes {
     }
     // 内核时间已包含空闲时间。
     CpuTimes { idle: filetime(idle), total: filetime(kernel) + filetime(user) }
-}
-
-/// 网卡累计收发字节数。只统计物理网卡，跳过过滤层与回环，避免重复计数。
-pub(crate) fn network_octets() -> Option<(u64, u64)> {
-    const HARDWARE_INTERFACE: u8 = 0b01;
-    const FILTER_INTERFACE: u8 = 0b10;
-    let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
-    if unsafe { GetIfTable2(&mut table) }.is_err() || table.is_null() {
-        return None;
-    }
-    let (mut recv, mut send) = (0u64, 0u64);
-    unsafe {
-        let n = (*table).NumEntries as usize;
-        let rows: &[MIB_IF_ROW2] = std::slice::from_raw_parts(std::ptr::addr_of!((*table).Table).cast(), n);
-        for row in rows {
-            let flags = row.InterfaceAndOperStatusFlags._bitfield;
-            if flags & HARDWARE_INTERFACE != 0 && flags & FILTER_INTERFACE == 0 {
-                recv += row.InOctets;
-                send += row.OutOctets;
-            }
-        }
-        FreeMibTable(table.cast());
-    }
-    Some((recv, send))
 }
 
 /// 通过 PDH 英文计数器读取磁盘活动（中文系统上本地化计数器名不同，必须用英文接口）。

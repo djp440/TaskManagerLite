@@ -121,6 +121,17 @@ pub fn device_instances(disks: &[tml_core::PhysicalDisk]) -> Vec<Instance> {
     result
 }
 
+/// 实例描述只在设备名称或挂载卷变化时重建。
+pub fn network_instances(disks: &[tml_core::PhysicalDisk], networks: &[tml_core::NetworkAdapter]) -> Vec<Instance> {
+    let mut result = device_instances(disks);
+    result.retain(|i| i.id != NETWORK);
+    for n in networks {
+        result.push(Instance::new(&n.id, ResourceKind::Network, ResourceTint::Network,
+            &n.connection, "吞吐量（接收 + 发送）", &["接收", "发送"]));
+    }
+    result
+}
+
 /// 把界面模型从旧 id 序列变成新 id 序列所需的行编辑，按顺序依次执行。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edit {
@@ -168,6 +179,10 @@ pub struct ResourceSet {
     /// 想选中但当前不存在的实例 id（启动时恢复的设置，或选中项暂时消失）。
     /// 实例出现时自动选中；用户明确选中别的实例后清除。退出时优先保存它，而不是回退用的 CPU。
     pending: Option<String>,
+    network_key: Vec<(String, String, String)>,
+    disk_key: Vec<(u32, Vec<String>)>,
+    receive: HashMap<String, History>,
+    send: HashMap<String, History>,
 }
 
 impl ResourceSet {
@@ -178,6 +193,30 @@ impl ResourceSet {
         };
         set.update(instances);
         set
+    }
+
+    pub fn sync_devices(&mut self, disks: &[tml_core::PhysicalDisk], networks: &[tml_core::NetworkAdapter]) {
+        let nk: Vec<_> = networks.iter().map(|n| (n.id.clone(), n.name.clone(), n.connection.clone())).collect();
+        let dk: Vec<_> = disks.iter().map(|d| (d.number, d.volumes.iter().map(|v| v.mount.clone()).collect())).collect();
+        if nk != self.network_key || dk != self.disk_key || self.instances.iter().any(|i| i.id == NETWORK || i.id == DISK) {
+            self.update(network_instances(disks, networks));
+            self.network_key = nk;
+            self.disk_key = dk;
+            self.receive.retain(|id,_| networks.iter().any(|n| &n.id == id));
+            self.send.retain(|id,_| networks.iter().any(|n| &n.id == id));
+        }
+    }
+
+    pub fn push_network(&mut self, n: &tml_core::NetworkAdapter, now: Instant) {
+        self.receive.entry(n.id.clone()).or_default().push(now, n.recv);
+        self.send.entry(n.id.clone()).or_default().push(now, n.send);
+    }
+
+    pub fn network_stats(&self, id: &str, now: Instant) -> String {
+        let describe = |map: &HashMap<String, History>| map.get(id).and_then(|h| h.window_stats(now))
+            .map(|(min,max,mean)| format!("峰值 {} · 谷值 {} · 均值 {}", crate::format::rate(max), crate::format::rate(min), crate::format::rate(mean)))
+            .unwrap_or_else(|| "—".into());
+        format!("最近 60 秒 接收：{}\n最近 60 秒 发送：{}", describe(&self.receive), describe(&self.send))
     }
 
     pub fn instances(&self) -> &[Instance] {
@@ -254,6 +293,7 @@ impl ResourceSet {
 
     /// 采样中断：所有曲线在此断开。
     pub fn push_gap(&mut self, at: Instant) {
+        for h in self.receive.values_mut().chain(self.send.values_mut()) { h.push(at, None); }
         for h in self.histories.values_mut() {
             h.push(at, None);
         }
@@ -262,6 +302,31 @@ impl ResourceSet {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn network_hotplug_and_directional_statistics_are_independent() {
+        use super::*;
+        let now = Instant::now();
+        let a = tml_core::NetworkAdapter { id: "network:1".into(), name: "以太网".into(), recv: Some(1024.0), send: Some(2048.0), ..Default::default() };
+        let b = tml_core::NetworkAdapter { id: "network:2".into(), name: "Wi-Fi".into(), recv: Some(4096.0), send: None, ..Default::default() };
+        let mut set = ResourceSet::new(summary_instances());
+        set.sync_devices(&[], &[a.clone(), b.clone()]);
+        assert_eq!(set.ids(), ["cpu", "memory", "network:1", "network:2"]);
+        set.push_network(&a, now);
+        set.push_network(&b, now);
+        set.push(&a.id, now, a.recv.zip(a.send).map(|(r,s)| r+s));
+        set.push(&b.id, now, b.recv.zip(b.send).map(|(r,s)| r+s));
+        set.push_gap(now);
+        assert_eq!(set.history(&a.id).max(), 3072.0);
+        assert_eq!(set.receive[&a.id].window_stats(now), Some((1024.0,1024.0,1024.0)));
+        assert_eq!(set.send[&b.id].window_stats(now), None);
+        set.select(&b.id);
+        set.sync_devices(&[], &[a.clone()]);
+        assert_eq!(set.selected(), CPU);
+        assert!(!set.receive.contains_key(&b.id));
+        set.sync_devices(&[], &[a,b]);
+        assert_eq!(set.selected(), "network:2");
+        assert_eq!(set.history("network:2").max(), 0.0);
+    }
     #[test]
     fn physical_disks_replace_summary_and_hotplug_preserves_selection() {
         let a = tml_core::PhysicalDisk {
