@@ -2,7 +2,9 @@
 
 use slint::{ComponentHandle, PhysicalPosition};
 use windows::Win32::Foundation::RECT;
-use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromRect};
+use windows::Win32::Foundation::POINT;
+use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint, MonitorFromRect};
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW};
 
 use crate::AppWindow;
@@ -35,6 +37,17 @@ fn on_monitor(left: i32, top: i32, right: i32, bottom: i32) -> bool {
 pub fn reachable(x: i32, y: i32, logical_width: f32, scale: f32) -> bool {
     let w = (logical_width * scale) as i32;
     on_monitor(x.saturating_add(w / 4), y, x.saturating_add(w * 3 / 4), y.saturating_add((24.0 * scale) as i32))
+}
+
+/// 物理坐标 (x, y) 所在显示器（不在任何显示器上时取主显示器）的缩放比例。
+/// 窗口还没创建时 `Window::scale_factor()` 恒为 1，定位新窗口要用它。
+pub fn scale_at(x: i32, y: i32) -> f32 {
+    // SAFETY: 只读查询。
+    unsafe {
+        let monitor = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTOPRIMARY);
+        let (mut dx, mut dy) = (96u32, 96u32);
+        if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy).is_ok() && dx > 0 { dx as f32 / 96.0 } else { 1.0 }
+    }
 }
 
 /// 主显示器的工作区（不含任务栏）：(left, top, right, bottom)，物理像素。

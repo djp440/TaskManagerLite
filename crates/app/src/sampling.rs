@@ -86,6 +86,8 @@ pub fn spawn(
                 match plan {
                     Plan::Full => deliver(sampler.sample()),
                     Plan::MetricsOnly => deliver(sampler.sample_scope(Scope::Metrics)),
+                    // 迷你模式只显示系统指标，补采也不需要进程快照。
+                    Plan::Idle if forced && visible && mini => deliver(sampler.sample_scope(Scope::Metrics)),
                     Plan::Idle if forced && visible => deliver(sampler.sample()),
                     Plan::Idle => {}
                 }

@@ -28,6 +28,11 @@ export component MiniWindow inherits Window {
     // 指针按下后移动了一小段距离：交给系统开始拖动窗口。
     callback drag();
     callback opacity-selected(int);
+    // 置顶切换后 winit 会重写扩展样式，Rust 据此补回不透明度。
+    callback pinned-changed();
+    changed pinned => {
+        root.pinned-changed();
+    }
     callback quit();
 
     // 与性能页左栏同宽，再加四周的内边距与边框。

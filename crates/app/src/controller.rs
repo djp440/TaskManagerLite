@@ -492,6 +492,9 @@ impl Controller {
     pub fn show_window(&self) {
         if self.hidden.replace(false) {
             let _ = self.with_active(|w| w.show());
+            if self.is_mini() {
+                Self::reapply_opacity_soon();
+            }
         }
         // 立即恢复完整采样，数据随即刷新；窗口若仍最小化，下一次轮询会改回。
         self.set_visible(true);

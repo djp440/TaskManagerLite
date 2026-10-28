@@ -267,11 +267,19 @@ const STEPS: &[Step] = &[
         with_mini(|m| {
             check_mini(m);
             m.invoke_set_dark(false);
+            // 60% 不透明度之后切换置顶、隐藏再显示：winit 会重写扩展样式，下一步核对分层样式已被补回。
+            m.invoke_opacity_selected(60);
+            m.set_pinned(false);
+            let _ = m.hide();
+            let _ = m.show();
         })
     }),
     // 双击卡片回到完整模式：页签与选中的资源不变，详情大图立即补画。
     ("57-迷你模式双击返回-深色", |ui| {
+        with_controller(|c| assert_eq!(c.mini_alpha(), Some(153), "切换置顶、隐藏再显示后应仍是 60% 不透明度"));
         with_mini(|m| {
+            let checked: Vec<i32> = m.get_opacity_choices().iter().filter(|c| c.checked).map(|c| c.percent).collect();
+            assert_eq!(checked, [60], "菜单里应只有 60% 带勾");
             m.invoke_set_dark(true);
             let at = LogicalPosition::new(120.0, 30.0);
             let w = m.window();

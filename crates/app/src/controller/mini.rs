@@ -8,13 +8,13 @@ use std::time::Duration;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::platform::WindowEvent;
-use slint::{ComponentHandle, ModelRc, PhysicalPosition, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, PhysicalPosition, VecModel};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, VK_LBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetCursorPos, GetWindowLongPtrW, HTCAPTION, LWA_ALPHA, PostMessageW, SetLayeredWindowAttributes,
-    SetWindowLongPtrW, WM_NCLBUTTONDOWN, WS_EX_LAYERED,
+    GWL_EXSTYLE, GetCursorPos, GetLayeredWindowAttributes, GetWindowLongPtrW, HTCAPTION, LAYERED_WINDOW_ATTRIBUTES_FLAGS,
+    LWA_ALPHA, PostMessageW, SetLayeredWindowAttributes, SetWindowLongPtrW, WM_NCLBUTTONDOWN, WS_EX_LAYERED,
 };
 
 use super::Controller;
@@ -33,9 +33,12 @@ fn hwnd_of(window: &slint::Window) -> Option<HWND> {
     }
 }
 
-/// 设置窗口整体不透明度；100 时去掉分层样式，回到普通窗口。
+/// 设置窗口整体不透明度；100 时去掉分层样式，回到普通窗口。已是目标状态时什么也不做。
+///
+/// winit 不知道这个样式：显示/隐藏、切换置顶、最小化还原时它会整体重写扩展样式，把分层样式清掉，
+/// 所以迷你模式期间由定时器反复调用来补回（见 `capture_mini`）。
 fn set_opacity(hwnd: HWND, percent: u8) {
-    // SAFETY: hwnd 是本进程刚取得的有效窗口句柄；只改扩展样式与分层属性。
+    // SAFETY: hwnd 是本进程刚取得的有效窗口句柄；只读写扩展样式与分层属性。
     unsafe {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let layered = WS_EX_LAYERED.0 as isize;
@@ -44,11 +47,21 @@ fn set_opacity(hwnd: HWND, percent: u8) {
                 SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex & !layered);
                 let _ = InvalidateRect(Some(hwnd), None, true);
             }
+            return;
+        }
+        let alpha = (u32::from(percent) * 255 / 100) as u8;
+        if ex & layered != 0 {
+            let (mut key, mut current, mut flags) = (COLORREF(0), 0u8, LAYERED_WINDOW_ATTRIBUTES_FLAGS(0));
+            if GetLayeredWindowAttributes(hwnd, Some(&mut key), Some(&mut current), Some(&mut flags)).is_ok()
+                && flags.contains(LWA_ALPHA)
+                && current == alpha
+            {
+                return;
+            }
         } else {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | layered);
-            let alpha = (u32::from(percent) * 255 / 100) as u8;
-            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
         }
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
     }
 }
 
@@ -90,6 +103,20 @@ impl Controller {
         self.mini.get()
     }
 
+    /// 迷你窗口当前的分层不透明度（0–255）；没有分层样式时为 `None`。截图模式核对用。
+    pub fn mini_alpha(&self) -> Option<u8> {
+        let hwnd = self.mini.get().and_then(|m| hwnd_of(m.window()))?;
+        // SAFETY: 只读查询本进程的窗口。
+        unsafe {
+            if GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_LAYERED.0 as isize == 0 {
+                return None;
+            }
+            let (mut key, mut alpha, mut flags) = (COLORREF(0), 0u8, LAYERED_WINDOW_ATTRIBUTES_FLAGS(0));
+            GetLayeredWindowAttributes(hwnd, Some(&mut key), Some(&mut alpha), Some(&mut flags)).ok()?;
+            flags.contains(LWA_ALPHA).then_some(alpha)
+        }
+    }
+
     /// 是否处于迷你模式。
     pub fn is_mini(&self) -> bool {
         self.state.borrow().mini
@@ -127,6 +154,7 @@ impl Controller {
                     c.set_mini_opacity(p.clamp(0, 100) as u8);
                 }
             });
+            w.on_pinned_changed(|| Self::reapply_opacity_soon());
             let c = Rc::downgrade(self);
             w.on_quit(move || {
                 if let Some(c) = c.upgrade() {
@@ -169,16 +197,19 @@ impl Controller {
         let Some(mini) = self.mini_window() else { return false };
         let Some(ui) = self.ui.upgrade() else { return false };
         let saved = self.settings.borrow().mini.position;
-        let scale = ui.window().scale_factor();
-        let pos = saved.filter(|&(x, y)| placement::reachable(x, y, MINI_WIDTH, scale)).unwrap_or_else(|| {
+        // 缩放取目标位置所在显示器的：直接以迷你模式启动时窗口都还没创建，`scale_factor()` 恒为 1。
+        let pos = saved.filter(|&(x, y)| placement::reachable(x, y, MINI_WIDTH, placement::scale_at(x, y))).unwrap_or_else(|| {
             // 默认放在完整窗口的右上角内侧；完整窗口还没显示过（直接以迷你模式启动）时放到主显示器工作区右上角。
             let (p, s) = (ui.window().position(), ui.window().size());
+            let scale = ui.window().scale_factor();
             let margin = (16.0 * scale) as i32;
             let near = (p.x + s.width as i32 - (MINI_WIDTH * scale) as i32 - margin, p.y + (64.0 * scale) as i32);
             if s.width > 0 && placement::reachable(near.0, near.1, MINI_WIDTH, scale) {
                 near
             } else {
                 let area = placement::work_area();
+                let scale = placement::scale_at(area.0, area.1);
+                let margin = (16.0 * scale) as i32;
                 (area.2 - (MINI_WIDTH * scale) as i32 - margin, area.1 + margin)
             }
         });
@@ -222,9 +253,12 @@ impl Controller {
             && !mini.window().is_minimized()
         {
             let p = mini.window().position();
-            let mut settings = self.settings.borrow_mut();
-            settings.mini.position = Some((p.x, p.y));
-            settings.mini.on_top = mini.get_pinned();
+            {
+                let mut settings = self.settings.borrow_mut();
+                settings.mini.position = Some((p.x, p.y));
+                settings.mini.on_top = mini.get_pinned();
+            }
+            self.apply_mini_opacity();
         }
     }
 
@@ -249,10 +283,24 @@ impl Controller {
     fn set_mini_opacity(&self, percent: u8) {
         let percent = if MiniSettings::OPACITIES.contains(&percent) { percent } else { 100 };
         self.settings.borrow_mut().mini.opacity = percent;
+        // 逐行改写勾选状态，不替换正在执行菜单回调的模型。
         if let Some(mini) = self.mini.get() {
-            mini.set_opacity_choices(ModelRc::new(VecModel::from(opacity_choices(percent))));
+            let model = mini.get_opacity_choices();
+            for (i, choice) in opacity_choices(percent).into_iter().enumerate() {
+                model.set_row_data(i, choice);
+            }
         }
         self.apply_mini_opacity();
+    }
+
+    /// 稍后补回不透明度：winit 处理完显示、置顶等窗口标志变化（会清掉分层样式）之后。
+    pub(super) fn reapply_opacity_soon() {
+        slint::Timer::single_shot(Duration::from_millis(30), || {
+            let controller = crate::CONTROLLER.with(|c| c.borrow().clone());
+            if let Some(c) = controller {
+                c.apply_mini_opacity();
+            }
+        });
     }
 
     /// 按设置应用不透明度。启动时 `show()` 之后原生窗口要等事件循环开始才创建，取不到句柄就稍后重试。
