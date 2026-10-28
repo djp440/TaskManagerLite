@@ -37,6 +37,8 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Some(code) = tml_core::run_cli(&std::env::args().collect::<Vec<_>>()) {
         std::process::exit(code);
     }
+    // 函数以任何方式返回时停止本进程的 ETW 磁盘会话（崩溃与 panic 另有钩子兜底）。
+    let _trace_guard = tml_core::TraceGuard;
     // 单实例：已有实例则通知它把窗口带到前台，本进程直接退出。须在打开日志等之前完成。
     let mut instance = if std::env::args().any(|a| UNRESTRICTED_FLAGS.contains(&a.as_str())) {
         None
@@ -77,7 +79,7 @@ fn main() -> Result<(), slint::PlatformError> {
         placement::apply(&ui, &loaded);
     }
     log.line(format!("窗口组件创建 {:.1} ms", tml_core::ms_since_process_start()));
-    let sampler = sampling::spawn(loaded.view == tml_core::ViewMode::Group, |sample| {
+    let sampler = sampling::spawn(loaded.view == tml_core::ViewMode::Group, loaded.accurate_disk_io, |sample| {
         let _ = slint::invoke_from_event_loop(move || {
             CONTROLLER.with(|c| {
                 if let Some(c) = c.borrow().as_ref() {

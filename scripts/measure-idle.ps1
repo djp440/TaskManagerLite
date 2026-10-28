@@ -28,7 +28,9 @@ Start-Sleep -Seconds $Seconds
 $p.Refresh(); $cpu1 = $p.TotalProcessorTime.TotalMilliseconds
 $mem = "工作集 {0:N1} MB，提交（私有）{1:N1} MB" -f ($p.WorkingSet64 / 1MB), ($p.PrivateMemorySize64 / 1MB)
 $logText = Get-Content (Get-ChildItem $logDir -Filter *.log | Select-Object -First 1).FullName -Raw
-$p.Kill()
+# 先请求正常关闭：提权运行时 ETW 会话要靠正常退出才会立即停止（强行结束的残留会在下次启动时清理）。
+$null = $p.CloseMainWindow()
+if (-not $p.WaitForExit(3000)) { $p.Kill() }
 Remove-Item -Recurse -Force $logDir, $settingsDir
 
 $cores = [Environment]::ProcessorCount

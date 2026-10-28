@@ -6,6 +6,14 @@
 - COM 在采样线程第一次需要时用 MTA 初始化，`IVirtualDesktopManager` 存在 thread_local 里只创建一次；创建或查询失败后按 1s 起翻倍（最长 60s）的退避重试，只计连续失败、成功清零、没有永久放弃的上限（开机自启时外壳未就绪、资源管理器重启都能恢复）；线程已用别的模型初始化（`RPC_E_CHANGED_MODE`）时沿用且不反初始化。
 - `MoveWindowToDesktop` 通常只允许移动调用方进程自己的窗口：测试用自己创建的窗口，记事本只尝试一次，被拒绝就说明并跳过。
 
+## 2026-10-28 12:20 ETW 磁盘速率（#5）
+- 评审后的形态：设置项 `accurate_disk_io` 默认关闭，关闭时完全不碰 ETW（不清残留、不装钩子）；`Sampler::set_accurate_disk` 支持运行中开关。聚合器所有表有容量上限（窗口不可见时不取数也不会无限增长）；每窗口无法归属的事件超过 20% 就回报近似。崩溃路径（panic 钩子、异常过滤器）不分配内存：启动成功后预先泄漏停止用的 properties 缓冲和 UTF-16 名称。残留会话判定保守：只有 PID 不存在（`ERROR_INVALID_PARAMETER`）、创建时间对不上或确认已退出才清，拒绝访问视为存活。会话名带序号，避免旧会话收尾线程误停同名新会话。
+- 私有内核会话：`LogFileMode = REAL_TIME | SYSTEM_LOGGER_MODE`、`EnableFlags = DISK_IO | THREAD`，会话名带 PID 与创建时间，不占 “NT Kernel Logger”。磁盘事件头里的进程号不可靠，用版本 3 负载的 `IssuingThreadId` 查线程表；缓存写入由 System 的惰性写入器发出，归属 System（与资源监视器一致）。详见 ADR-0004。
+- ETW 会话属于系统：进程被 `TerminateProcess` 后会话残留。兜底是 `TraceGuard`（正常退出）、panic 钩子、未处理异常过滤器，以及下次启动按名称里的 PID + 创建时间扫残留会话（仅在开关开启且提权、启动会话时）。`measure-idle.ps1` 先 `CloseMainWindow` 再 `Kill`，避免提权测量时留下会话。
+- 开发环境未提权时只能验证回退与单测：未提权调用 `StartTraceW` 返回 5（拒绝访问），说明属性结构已通过参数校验。事件偏移（版本 3 负载、64/32 位指针）和线程枚举事件来自文档，提权下的真实数据由 `scripts/test-etw-disk.ps1` 与人工验收核对。
+- `windows` crate 的 `SetUnhandledExceptionFilter`/`EXCEPTION_POINTERS` 需要 `Win32_System_Kernel` 特性，`EVENT_TRACE_LOGFILEW` 需要 `Win32_System_Time`。
+- `command_line` 集成测试 `quoted_arguments_are_preserved` 并行时偶发失败（单独重跑通过），与本改动无关。
+
 ## 2026-10-28 11:02 窄窗口工具栏
 - 档位（提权按钮收成图标、隐藏品牌）由各部分的首选/最小宽度与 `root.width` 算出。被测量的元素如果参与窗口布局，会形成“档位 → 布局约束 → 窗口约束 → 窗口宽度 → 档位”的绑定循环。给工具栏布局和隐藏的测量 `Text` 显式设置 `x/y`，它们的约束就不再传给父元素。判断只用不随档位变化的量。
 - `Text` 在 clip、不换行时最小宽度等于首选宽度，所以“布局 min-width ≤ 窗口宽度”就等价于没有控件被裁剪。截图模式和单元测试都断言 `toolbar-min-width`。
