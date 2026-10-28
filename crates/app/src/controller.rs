@@ -943,6 +943,8 @@ impl Controller {
                         if n.addresses.is_empty() { "地址不可用" } else { &n.addresses }, s.resources.network_stats(&n.id, now))).unwrap_or_default(),
                 };
                 Resource {
+                    adapter_name: network.map(|n| n.name.clone()).unwrap_or_default().into(),
+                    adapter_description: network.map(|n| n.description.clone()).unwrap_or_default().into(),
                     disk_info: disk
                         .map(|d| {
                             let free = d.volumes.iter().map(|v| v.free).sum::<u64>();

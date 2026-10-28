@@ -194,8 +194,9 @@ impl Sampler {
             .map(|p| p.sample())
             .unwrap_or_default();
         let networks = self.net.sample(elapsed);
-        let net_recv = networks.iter().filter_map(|n| n.recv).sum();
-        let net_send = networks.iter().filter_map(|n| n.send).sum();
+        // 汇总保持物理网卡口径，虚拟隧道与承载它的物理网卡不能重复累加。
+        let net_recv = networks.iter().filter(|n| n.hardware).filter_map(|n| n.recv).sum();
+        let net_send = networks.iter().filter(|n| n.hardware).filter_map(|n| n.send).sum();
 
         let app_pids = (full && self.track_apps).then(app_pids);
 

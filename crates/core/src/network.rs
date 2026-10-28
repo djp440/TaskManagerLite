@@ -1,4 +1,4 @@
-//! 活动物理网卡：以 LUID 为稳定标识，独立维护累计字节基线。
+//! 活动网卡（含虚拟网卡）：以 LUID 为稳定标识，独立维护累计字节基线。
 use std::collections::HashMap;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::NetworkManagement::{IpHelper::*, WiFi::*};
@@ -7,6 +7,8 @@ use windows::Win32::NetworkManagement::{IpHelper::*, WiFi::*};
 pub struct NetworkAdapter {
     pub id: String,
     pub name: String,
+    pub description: String,
+    pub hardware: bool,
     pub connection: String,
     pub link_speed: u64,
     pub addresses: String,
@@ -32,6 +34,16 @@ fn delta(
         ),
         _ => (None, None),
     }
+}
+
+fn visible(flags: u8, kind: u32, status: i32, has_addresses: bool) -> bool {
+    // 排除过滤层、回环与未连接接口；虚拟隧道只展示实际绑定了 IP 的接口，
+    // 避免把底层 WAN miniport 等传输设备重复列成资源卡片。
+    status == 1 && flags & 2 == 0 && kind != 24 && (flags & 1 != 0 || has_addresses)
+}
+
+fn wide(value: &[u16]) -> String {
+    String::from_utf16_lossy(&value[..value.iter().position(|&c| c == 0).unwrap_or(value.len())])
 }
 
 impl NetworkProbe {
@@ -91,10 +103,11 @@ impl NetworkProbe {
                 std::ptr::addr_of!((*table).Table).cast::<MIB_IF_ROW2>(),
                 (*table).NumEntries as usize,
             ) {
-                if r.InterfaceAndOperStatusFlags._bitfield & 3 != 1 || r.OperStatus.0 != 1 {
+                let key = r.InterfaceLuid.Value;
+                if !visible(r.InterfaceAndOperStatusFlags._bitfield, r.Type, r.OperStatus.0,
+                    addresses.get(&key).is_some_and(|s| !s.is_empty())) {
                     continue;
                 }
-                let key = r.InterfaceLuid.Value;
                 let current = (r.InOctets, r.OutOctets);
                 let (recv, send) = delta(self.previous.get(&key).copied(), current, elapsed);
                 next.insert(key, current);
@@ -127,16 +140,13 @@ impl NetworkProbe {
                 }
                 result.push(NetworkAdapter {
                     id: format!("network:{key}"),
-                    name: String::from_utf16_lossy(
-                        &r.Alias[..r
-                            .Alias
-                            .iter()
-                            .position(|&c| c == 0)
-                            .unwrap_or(r.Alias.len())],
-                    ),
+                    name: wide(&r.Alias),
+                    description: wide(&r.Description),
+                    hardware: r.InterfaceAndOperStatusFlags._bitfield & 1 != 0,
                     connection: match r.Type {
                         71 => "Wi-Fi",
                         6 => "以太网",
+                        53 | 131 => "以太网",
                         _ => "其他",
                     }
                     .into(),
@@ -161,6 +171,16 @@ impl NetworkProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn includes_virtual_adapters_but_excludes_transport_duplicates() {
+        assert!(visible(1, 71, 1, true));
+        assert!(visible(0, 53, 1, true)); // Tailscale / Meta 隧道
+        assert!(!visible(0, 53, 1, false)); // 未绑定 IP 的传输设备
+        assert!(!visible(2, 6, 1, true)); // 过滤层
+        assert!(!visible(0, 24, 1, true)); // 回环
+        assert!(!visible(1, 6, 2, true)); // 断开
+        assert_eq!(wide(&[65, 66, 0, 67]), "AB");
+    }
     #[test]
     fn live_enumeration_has_unique_ids_and_independent_baselines() {
         let mut probe = NetworkProbe::default();
