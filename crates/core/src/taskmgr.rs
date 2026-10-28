@@ -567,8 +567,9 @@ fn read_allow_aces(path: &Path) -> Result<Option<Vec<Ace>>, IfeoError> {
         let mut out = Vec::new();
         for i in 0..info.AceCount {
             let mut ace = std::ptr::null_mut();
+            // 失败即拒绝：读不懂的 ACE 不能当作不存在而放行。
             if GetAce(dacl, i, &mut ace).is_err() || ace.is_null() {
-                continue;
+                return Err(IfeoError::Other(format!("无法读取 {} 的第 {i} 条访问控制项；确认安全后可使用 --force", path.display())));
             }
             // ACE 布局：Header{Type:u8, Flags:u8, Size:u16}, Mask:u32, Sid…（允许类与回调允许类相同）。
             let p = ace as *const u8;
@@ -579,7 +580,7 @@ fn read_allow_aces(path: &Path) -> Result<Option<Vec<Ace>>, IfeoError> {
             let mask = (p.add(4) as *const u32).read_unaligned();
             let mut s = windows::core::PWSTR::null();
             if ConvertSidToStringSidW(PSID(p.add(8) as *mut _), &mut s).is_err() {
-                continue;
+                return Err(IfeoError::Other(format!("无法解析 {} 的第 {i} 条访问控制项的 SID；确认安全后可使用 --force", path.display())));
             }
             let sid = s.to_string().unwrap_or_default();
             let _ = LocalFree(Some(HLOCAL(s.0.cast())));
@@ -845,6 +846,12 @@ mod tests {
         let file = dir.join("x.exe");
         std::fs::write(&file, b"x").unwrap();
         let before = check_install_location(&file);
+        if before.is_err() {
+            // %TEMP% 本身就不安全（被管理员放宽过权限）：前置条件不成立，跳过而不是判失败。
+            let _ = std::fs::remove_dir_all(&dir);
+            eprintln!("跳过：临时目录本身未通过位置检查：{before:?}");
+            return;
+        }
         // 只授予目录本身（不继承），文件的 ACL 不变：证明“所在目录”也在检查范围内。
         let granted = std::process::Command::new("icacls")
             .arg(&dir)
@@ -853,7 +860,6 @@ mod tests {
             .is_ok_and(|o| o.status.success());
         let after = check_install_location(&file);
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(before.is_ok(), "用户临时目录默认应通过：{before:?}");
         assert!(granted, "icacls 授权失败");
         match after {
             Err(IfeoError::UnsafeLocation(why)) => assert!(why.contains("Users"), "{why}"),

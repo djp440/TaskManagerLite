@@ -57,14 +57,18 @@
 
 - 只要存在“允许”类 ACE，把写类权限授予 **Everyone（S-1-1-0）**、**Authenticated Users（S-1-5-11）** 或 **BUILTIN\Users（S-1-5-32-545）**，就拒绝，返回退出码 `5`（`UnsafeLocation`），提示“exe 所在位置可被其他用户改写，请移到 Program Files 等受保护目录，或用 --force”。
 - 写类权限指：`FILE_WRITE_DATA`（目录上即创建文件）、`FILE_APPEND_DATA`（目录上即创建子目录）、`FILE_DELETE_CHILD`、`DELETE`、`WRITE_DAC`、`WRITE_OWNER`、`GENERIC_WRITE`、`GENERIC_ALL`。只对子对象生效的继承项（`INHERIT_ONLY_ACE`）不计。拒绝类 ACE 不参与判定（保守：只看授予了什么）。
-- 空 DACL（任何人完全访问）拒绝；读不到 ACL 时报错而不是放行。
+- 空 DACL（任何人完全访问）拒绝；读不到 ACL、或读不懂其中任何一条 ACE（取 ACE、转换 SID 失败）时报错而不是放行（失败即拒绝）。
 - 用户自己 profile 下的目录通常不向这三个组授予写权限，所以不会被拒绝；`C:\` 根下新建的目录通常会向 Authenticated Users 授予修改权限，会被拒绝。
 - `--force` 可绕过。判定本身是纯函数 `broad_write_grantee(&[Ace])`，另有用 `icacls` 在临时目录上显式授权的测试。
-- 只检查 exe 和它的直接目录，不检查更上层目录的 ACL 可否被改写（上层目录的写权限通常已经体现在继承到该目录的 ACE 里）。
+已知限制（位置检查是“登记时的一次性防误操作”，不是持续的安全保证）：
+
+- **TOCTOU，只在登记那一刻检查一次**：之后 ACL 被放宽、或 exe 被替换，都不会被发现，登记后没有复检。检查与注册表写入之间有时间窗口；父进程的检查与提权子进程启动之间也有时间窗口（子进程会再检查一次，但仍有同样的窗口）。提权子进程是按路径启动的，所以 UAC 提示里用户只能看到发布者信息，看不到、也无法确认被执行的具体文件内容。
+- **不检查祖先目录**：只检查 exe 和它的直接目录。祖先目录上的 `DELETE`，或其父目录上的 `FILE_DELETE_CHILD`，都不会继承到下层对象的 ACE 里，因此重命名或替换整个祖先目录就能绕过检查，把 exe 换成别的内容。
+- **黑名单只覆盖三个主体**：只有 Everyone、Authenticated Users、BUILTIN\Users 被授予写权限才会被拒绝。INTERACTIVE、Power Users、Domain Users、某个具体的非管理员用户 SID 被授予写权限时不会被拒绝。更严格的白名单做法（只允许 SYSTEM、Administrators、TrustedInstaller 可写）留作后续。
 
 ### 已知副作用与风险
 
-- **丢失自动提权**：`Taskmgr.exe` 自带 `requireAdministrator` 清单，系统任务管理器总是以管理员运行；经 IFEO 重定向后，本程序以**调用者的令牌**运行（标准用户或未提权的管理员都不会自动提权）。需要结束受保护进程时仍要用界面里的“以管理员身份重启”。设置页应提前提示这一点。
+- **丢失自动提权**：`Taskmgr.exe` 的清单是 `highestAvailable`：管理员用户打开系统任务管理器时会得到提权（UAC），标准用户本来就不提权。经 IFEO 重定向后，本程序以**调用者的令牌**运行，所以管理员用户登记后不再自动获得提权；标准用户不受影响。需要结束受保护进程时仍要用界面里的“以管理员身份重启”。设置页应提前提示这一点。
 - **安全软件告警**：IFEO `Debugger` 劫持是常见的持久化手法（MITRE ATT&CK T1546.012），部分安全软件会对写入该键的行为报警或拦截。用户需要知道这是预期的，并可能要在安全软件里放行。
 - **exe 存在但启动即崩溃**：只要 exe 文件存在却启动失败，系统自带任务管理器也打不开（`Debugger` 进程崩溃就是启动失败）。兜底办法，任选其一：
   1. 运行 `TaskManagerLite.exe --unregister-taskmgr`（若本程序仍能启动该开关；它不创建窗口，只写注册表，通常比界面更不容易崩溃）。
