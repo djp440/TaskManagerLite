@@ -15,6 +15,7 @@ mod sampler;
 mod shellops;
 mod snapshot;
 mod system;
+mod taskmgr;
 mod view;
 
 pub use apps::app_pids;
@@ -30,6 +31,10 @@ pub use sampler::{DiskSource, Sample, Sampler};
 pub use shellops::{ShellError, reveal_in_explorer, search_online, search_url, show_properties};
 pub use snapshot::{Process, ProcessKey, ProcessSnapshot};
 pub use system::SystemMetrics;
+pub use taskmgr::{
+    Ifeo, IfeoError, Registration, TEST_KEY_ENV, TEST_KEY_PREFIX, check_install_location, debugger_value,
+    launched_as_taskmgr_debugger, run_cli, set_replace_taskmgr,
+};
 pub use view::{
     Group, GroupHeader, HEADER_INDEX, SortKey, Totals, ViewMode, ViewOptions, ViewRow, build_group_view, build_view, tree_from,
 };
