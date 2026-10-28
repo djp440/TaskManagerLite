@@ -31,6 +31,7 @@ component Graph inherits Rectangle {
         viewbox-width: self.width / 1px;
         viewbox-height: self.height / 1px;
         commands: root.area;
+        fit: fill;
         fill: root.tint.with-alpha(0.16);
     }
 
@@ -40,6 +41,8 @@ component Graph inherits Rectangle {
         viewbox-width: self.width / 1px;
         viewbox-height: self.height / 1px;
         commands: root.line;
+        // 避免描边占用高度后，等比适配把矮图的横轴也一起压缩。
+        fit: fill;
         stroke: root.tint;
         stroke-width: 1.5px;
     }
@@ -262,11 +265,21 @@ export component PerformancePage inherits Rectangle {
                             font-size: 12px;
                         }
                         Rectangle {
-                            min-height: 64px;
-                            max-height: 64px;
+                            // 路径使用 64px 高的绘图区；外框另占上下各 1px。
+                            min-height: 66px;
+                            max-height: 66px;
                             border-width: 1px;
                             border-color: root.tint.with-alpha(0.55);
-                            Graph { line: line; area: root.data.gpu-areas[i]; tint: root.tint; grid: true; }
+                            Graph {
+                                x: detail-graph.x;
+                                y: 1px;
+                                width: detail-graph.width;
+                                height: 64px;
+                                line: line;
+                                area: root.data.gpu-areas[i];
+                                tint: root.tint;
+                                grid: true;
+                            }
                         }
                     }
                 }

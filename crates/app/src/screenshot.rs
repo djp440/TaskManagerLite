@@ -61,7 +61,7 @@ const STEPS: &[Step] = &[
     ("05d-性能磁盘-恢复窗口", |ui| resize(ui, 1080.0, 700.0)),
     ("05e-性能GPU-深色", |ui| {
         let resources = ui.get_resources();
-        for i in (0..resources.row_count()).rev() {
+        for i in 0..resources.row_count() {
             let row = resources.row_data(i).unwrap();
             if row.kind == crate::ResourceKind::Gpu {
                 ui.invoke_resource_selected(row.id);
