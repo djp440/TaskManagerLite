@@ -110,6 +110,55 @@ component ShieldIcon inherits Rectangle {
     }
 }
 
+// 图钉图标：窗口置顶。未置顶时描边，置顶时实心。
+component PinIcon inherits Rectangle {
+    in property <brush> tint;
+    in property <bool> filled;
+    width: 16px;
+    height: 16px;
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        fill: root.filled ? root.tint : transparent;
+        stroke: root.tint;
+        stroke-width: 1.3px;
+        commands: "M 4.6 1.8 L 11.4 1.8 L 11.4 3.2 L 10.4 4 L 10.4 7.2 L 13 9.8 L 3 9.8 L 5.6 7.2 L 5.6 4 L 4.6 3.2 Z";
+    }
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        stroke: root.tint;
+        stroke-width: 1.3px;
+        commands: "M 8 9.8 L 8 14.8";
+    }
+}
+
+// 图标按钮的悬停提示内容。
+component TipBox inherits Rectangle {
+    in property <string> text;
+    background: Theme.surface-raised;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: Theme.dark ? #ffffff24 : #0000001f;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 4px;
+        padding-bottom: 5px;
+        Text {
+            text: root.text;
+            font-size: 12px;
+            color: Palette.foreground;
+        }
+    }
+}
+
 // 需要用户确认的操作：1 = 结束关键进程，2 = 结束进程树。
 component ConfirmDialog inherits Rectangle {
     in property <int> kind;
@@ -190,6 +239,7 @@ export component AppWindow inherits Window {
     preferred-height: root.initial-height;
     min-width: 760px;
     min-height: 480px;
+    always-on-top: root.pinned;
     default-font-family: "Microsoft YaHei UI";
     default-font-size: 13px;
     background: Theme.surface;
@@ -204,6 +254,8 @@ export component AppWindow inherits Window {
     in-out property <int> page: 0;
     in-out property <int> interval-index: 1;
     in property <bool> elevated;
+    // 窗口置顶，由 Rust 按设置恢复，退出时保存。
+    in-out property <bool> pinned;
     in property <[Resource]> resources;
     in property <MemoryView> memory-view;
     in property <int> process-count;
@@ -241,11 +293,11 @@ export component AppWindow inherits Window {
     // 1. 搜索框从 220px 缩到“舒适宽度”，即恰好放下完整的占位文字（由布局完成）；
     // 2. 仍放不下时，“以管理员身份重启”收成盾牌图标按钮（悬停显示提示）；
     // 3. 还放不下时隐藏品牌字样（窗口标题栏仍显示应用名）。
-    // 档位按搜索框的舒适宽度判断，常规字体下最窄的 760 也放得下；搜索框另可再缩到只放下简短占位文字，
-    // 作为字体偏宽时的余量。判断只用不随档位变化的量（各部分的首选/最小宽度），避免绑定循环。
+    // 档位按搜索框的舒适宽度判断；最窄时（约 800 以下）搜索框再缩到只放下简短占位文字。判断只用不随档位变化的量（各部分的首选/最小宽度），避免绑定循环。
     private property <string> search-hint: @tr("搜索名称或 PID（Ctrl+F）");
     private property <string> search-hint-short: @tr("搜索名称或 PID");
     private property <string> elevate-text: @tr("以管理员身份重启");
+    private property <string> pin-text: root.pinned ? @tr("取消置顶") : @tr("窗口置顶");
     // Fluent 输入框左右内边距各 12px，另留 4px 光标余量。
     private property <length> search-comfort: min(220px, search-measure.preferred-width + 28px);
     private property <length> search-floor: min(root.search-comfort, max(140px, search-short-measure.preferred-width + 28px));
@@ -472,6 +524,36 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+
+                        // 置顶开关：图钉图标，置顶时换成强调色的实心图钉（按钮本身保持普通样式，避免整块强调色过于醒目）。
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 32px;
+                                height: 32px;
+                                Button {
+                                    width: 100%;
+                                    height: 100%;
+                                    accessible-label: root.pin-text;
+                                    clicked => {
+                                        root.pinned = !root.pinned;
+                                        keys.focus();
+                                    }
+                                    Tooltip {
+                                        TipBox {
+                                            text: root.pin-text;
+                                        }
+                                    }
+                                }
+
+                                PinIcon {
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    tint: root.pinned ? Palette.accent-background : Palette.foreground;
+                                    filled: root.pinned;
+                                }
+                            }
+                        }
                     }
 
                     if !root.elevated && !root.toolbar-elevate-compact: VerticalLayout {
@@ -498,22 +580,8 @@ export component AppWindow inherits Window {
                                     root.elevate();
                                 }
                                 Tooltip {
-                                    Rectangle {
-                                        background: Theme.surface-raised;
-                                        border-radius: 4px;
-                                        border-width: 1px;
-                                        border-color: Theme.dark ? #ffffff24 : #0000001f;
-                                        HorizontalLayout {
-                                            padding-left: 8px;
-                                            padding-right: 8px;
-                                            padding-top: 4px;
-                                            padding-bottom: 5px;
-                                            Text {
-                                                text: root.elevate-text;
-                                                font-size: 12px;
-                                                color: Palette.foreground;
-                                            }
-                                        }
+                                    TipBox {
+                                        text: root.elevate-text;
                                     }
                                 }
                             }
