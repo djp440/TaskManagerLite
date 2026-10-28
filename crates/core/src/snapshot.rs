@@ -1,6 +1,9 @@
 //! 进程快照：把两次原始采样做差，得到 CPU 占用率与磁盘速率。
 
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::details::{Counters, StaticInfo};
 
 use crate::nt::RawProcess;
 
@@ -22,6 +25,10 @@ pub struct Process {
     /// 字节/秒。
     pub disk_rate: f64,
     pub critical: bool,
+    /// “详细信息”列的计数，随采样更新。
+    pub counters: Counters,
+    /// “详细信息”列的静态信息。采样线程不读取，始终为 `None`；界面线程在后台读到后填入，用于显示和排序。
+    pub info: Option<Arc<StaticInfo>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -66,6 +73,17 @@ impl Baseline {
             };
             next.insert(key, (r.cpu_time, r.io_bytes));
             let critical = is_critical(&r);
+            let counters = Counters {
+                session_id: r.session_id,
+                base_priority: r.base_priority,
+                handles: r.handles,
+                threads: r.threads,
+                working_set: r.working_set,
+                peak_working_set: r.peak_working_set,
+                commit: r.commit,
+                cpu_time: r.cpu_time,
+                suspended: r.suspended,
+            };
             processes.push(Process {
                 key,
                 parent_pid: r.parent_pid,
@@ -74,6 +92,8 @@ impl Baseline {
                 private_working_set: r.private_working_set,
                 disk_rate,
                 critical,
+                counters,
+                info: None,
             });
         }
         self.counters = next;
@@ -95,6 +115,13 @@ mod tests {
             private_working_set: 0,
             io_bytes,
             session_id: 1,
+            base_priority: 8,
+            handles: 0,
+            threads: 1,
+            working_set: 0,
+            peak_working_set: 0,
+            commit: 0,
+            suspended: false,
         }
     }
 

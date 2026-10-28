@@ -790,6 +790,8 @@ mod tests {
             private_working_set: 0,
             disk_rate: 0.0,
             critical: false,
+            counters: Default::default(),
+            info: None,
         }
     }
 
