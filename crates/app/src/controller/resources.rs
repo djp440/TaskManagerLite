@@ -229,10 +229,12 @@ impl ResourceSet {
         }
     }
 
-    pub fn gpu_memory_paths(&self, id: &str, now: Instant, size: (f64, f64)) -> Vec<(String, String)> {
-        self.gpu_memory.get(id).map(|h| h.iter().map(|h| {
-            let scale = crate::format::nice_scale(h.max(), 256.0 * 1024.0 * 1024.0);
-            (h.paths(now, scale, size).0, crate::format::gigabytes(scale as u64))
+    pub fn gpu_memory_paths(&self, gpu: &tml_core::Gpu, now: Instant, size: (f64, f64)) -> Vec<(String, String)> {
+        self.gpu_memory.get(&gpu.id).map(|h| h.iter().enumerate().map(|(index,h)| {
+            let total = if index == 0 { gpu.dedicated_total } else { gpu.shared_total };
+            let scale = if total > 0 { total as f64 } else { h.max().max(1.0) };
+            let label = if total > 0 { crate::format::gigabytes(total) } else { "容量不可用".into() };
+            (h.paths(now, scale, size).0, label)
         }).collect()).unwrap_or_default()
     }
 

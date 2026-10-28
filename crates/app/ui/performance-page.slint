@@ -105,7 +105,7 @@ export component ResourceCard inherits Rectangle {
                 overflow: elide;
             }
 
-            if root.data.kind == ResourceKind.network: Text {
+            if root.data.kind == ResourceKind.network || root.data.kind == ResourceKind.gpu: Text {
                 text: root.data.adapter-name;
                 font-size: 12px;
                 color: Palette.foreground;
@@ -261,7 +261,13 @@ export component PerformancePage inherits Rectangle {
                             color: Theme.subtle-text;
                             font-size: 12px;
                         }
-                        Graph { height: 64px; line: line; tint: root.tint; grid: true; }
+                        Rectangle {
+                            min-height: 64px;
+                            max-height: 64px;
+                            border-width: 1px;
+                            border-color: root.tint.with-alpha(0.55);
+                            Graph { line: line; tint: root.tint; grid: true; }
+                        }
                     }
                 }
                 // 详情区目前对所有类型通用；需要按类型定制时（CPU、内存等），

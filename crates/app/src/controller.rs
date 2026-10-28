@@ -923,10 +923,15 @@ impl Controller {
                     ),
                     ResourceKind::Gpu => {
                         let g = gpu.unwrap();
+                        let memory_ratio = |used: Option<f64>, total: u64| {
+                            let used = used.map(|v| format::gigabytes(v as u64)).unwrap_or_else(|| "—".into());
+                            if total > 0 { format!("{used} / {}", format::gigabytes(total)) }
+                            else { format!("{used} / —") }
+                        };
                         (100.0, g.usage.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "—".into()), "100%".into(),
                          vec![g.usage.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "—".into()),
-                              g.dedicated.map(|v| format::gigabytes(v as u64)).unwrap_or_else(|| "—".into()),
-                              g.shared.map(|v| format::gigabytes(v as u64)).unwrap_or_else(|| "—".into())])
+                              memory_ratio(g.dedicated, g.dedicated_total),
+                              memory_ratio(g.shared, g.shared_total)])
                     }
                     ResourceKind::Network => {
                         let scale = format::nice_scale(history.max(), 100.0 * 1024.0);
@@ -949,9 +954,10 @@ impl Controller {
                     history.paths(now, scale, detail)
                 };
                 let (mini_line, mini_area) = history.paths(now, scale, Self::MINI);
-                let memory_graphs = s.resources.gpu_memory_paths(&inst.id, now, (detail.0, 64.0));
+                let memory_graphs = gpu.map(|g| s.resources.gpu_memory_paths(g, now, (detail.0, 64.0))).unwrap_or_default();
                 let detail = match (&mem_text, inst.kind) {
                     (Some(t), ResourceKind::Memory) => t.header.clone(),
+                    (_, ResourceKind::Gpu) => gpu.map(|g| g.name.clone()).unwrap_or_default(),
                     _ => network.map(|n| format!("{} · 链路 {:.0} Mbps{}\n{}\n{}", n.connection, n.link_speed as f64 / 1e6,
                         if n.ssid.is_empty() { String::new() } else { format!(" · SSID {}", n.ssid) },
                         if n.addresses.is_empty() { "地址不可用" } else { &n.addresses }, s.resources.network_stats(&n.id, now))).unwrap_or_default(),
@@ -960,7 +966,7 @@ impl Controller {
                 Resource {
                     gpu_lines: ModelRc::new(VecModel::from(memory_graphs.iter().map(|p| SharedString::from(p.0.clone())).collect::<Vec<_>>())),
                     gpu_scales: ModelRc::new(VecModel::from(memory_graphs.iter().map(|p| SharedString::from(p.1.clone())).collect::<Vec<_>>())),
-                    adapter_name: network.map(|n| n.name.clone()).unwrap_or_default().into(),
+                    adapter_name: gpu.map(|g| g.name.clone()).or_else(|| network.map(|n| n.name.clone())).unwrap_or_default().into(),
                     adapter_description: network.map(|n| n.description.clone()).unwrap_or_default().into(),
                     disk_info: disk
                         .map(|d| {

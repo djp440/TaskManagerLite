@@ -2,14 +2,52 @@
 use std::collections::BTreeMap;
 use windows::core::PCWSTR;
 use windows::Win32::System::Performance::*;
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE};
 
 #[derive(Clone, Debug, Default)]
 pub struct Gpu {
     pub id: String,
+    pub name: String,
+    pub dedicated_total: u64,
+    pub shared_total: u64,
     pub usage: Option<f64>,
     pub dedicated: Option<f64>,
     pub shared: Option<f64>,
     pub engines: Vec<(String, f64)>,
+}
+
+// DXGI 是设备清单的来源；PDH 还可能包含软件渲染器等实例，不能直接拿来生成卡片。
+fn adapters() -> Option<Vec<Gpu>> {
+    unsafe {
+        let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
+        let mut result = Vec::new();
+        for i in 0.. {
+            let Ok(adapter) = factory.EnumAdapters1(i) else { break; };
+            let Ok(desc) = adapter.GetDesc1() else { continue; };
+            if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 { continue; }
+            let end = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+            result.push(Gpu {
+                id: format!("gpu:luid_0x{:08X}_0x{:08X}:0", desc.AdapterLuid.HighPart as u32, desc.AdapterLuid.LowPart),
+                name: String::from_utf16_lossy(&desc.Description[..end]),
+                dedicated_total: desc.DedicatedVideoMemory as u64,
+                shared_total: desc.SharedSystemMemory as u64,
+                ..Default::default()
+            });
+        }
+        Some(result)
+    }
+}
+
+fn attach_readings(adapters: &[Gpu], readings: Vec<Gpu>) -> Vec<Gpu> {
+    // 取交集：排除软件 PDH 实例，以及 DXGI 中没有活动 PDH 实例的重复/失效适配器。
+    // 不能按名称去重，同型号的多张物理显卡应当各自显示。
+    adapters.iter().filter_map(|adapter| {
+        let mut g = readings.iter().find(|g| g.id == adapter.id).cloned()?;
+        g.name = adapter.name.clone();
+        g.dedicated_total = adapter.dedicated_total;
+        g.shared_total = adapter.shared_total;
+        Some(g)
+    }).collect()
 }
 
 fn identity(name: &str) -> Option<(&str, &str)> {
@@ -23,6 +61,8 @@ pub(crate) struct GpuProbe {
     query: PDH_HQUERY,
     counters: [PDH_HCOUNTER; 3],
     ready: bool,
+    adapters: Vec<Gpu>,
+    refreshed: std::time::Instant,
 }
 unsafe impl Send for GpuProbe {}
 impl Drop for GpuProbe {
@@ -33,7 +73,8 @@ impl GpuProbe {
         unsafe {
             let mut query = PDH_HQUERY::default();
             if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != 0 { return None; }
-            let mut this = Self { query, counters: Default::default(), ready: false };
+            let mut this = Self { query, counters: Default::default(), ready: false,
+                adapters: adapters().unwrap_or_default(), refreshed: std::time::Instant::now() };
             for (c, path) in this.counters.iter_mut().zip([
                 r"\GPU Engine(*)\Utilization Percentage",
                 r"\GPU Adapter Memory(*)\Dedicated Usage",
@@ -47,8 +88,12 @@ impl GpuProbe {
         }
     }
     pub fn sample(&mut self) -> Vec<Gpu> {
+        if self.refreshed.elapsed().as_secs() >= 5 {
+            if let Some(adapters) = adapters() { self.adapters = adapters; }
+            self.refreshed = std::time::Instant::now();
+        }
         unsafe {
-            if PdhCollectQueryData(self.query) != 0 { return vec![]; }
+            if PdhCollectQueryData(self.query) != 0 { return attach_readings(&self.adapters, vec![]); }
             let ready = std::mem::replace(&mut self.ready, true);
             let arrays: Vec<_> = self.counters.iter().map(|c| {
                 let (mut bytes, mut count) = (0, 0);
@@ -63,7 +108,7 @@ impl GpuProbe {
                             .then(|| v.szName.to_string().ok().map(|n| (n, value))).flatten()
                     }).collect()
             }).collect();
-            aggregate(&arrays, ready)
+            attach_readings(&self.adapters, aggregate(&arrays, ready))
         }
     }
 }
@@ -101,6 +146,22 @@ fn aggregate(arrays: &[Vec<(String, f64)>], ready: bool) -> Vec<Gpu> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hardware_inventory_filters_extra_pdh_instances_and_preserves_capacity() {
+        let adapters = vec![Gpu { id: "integrated".into(), name: "核显".into(), shared_total: 24 << 30, ..Default::default() },
+            Gpu { id: "discrete".into(), name: "独显".into(), dedicated_total: 8 << 30, ..Default::default() },
+            Gpu { id: "stale".into(), name: "独显".into(), ..Default::default() }];
+        let readings = vec![Gpu { id: "software".into(), usage: Some(1.0), ..Default::default() },
+            Gpu { id: "integrated".into(), ..Default::default() },
+            Gpu { id: "discrete".into(), usage: Some(60.0), dedicated: Some(4e9), ..Default::default() }];
+        let result = attach_readings(&adapters, readings);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "核显");
+        assert_eq!(result[0].shared_total, 24 << 30);
+        assert_eq!(result[0].usage, None);
+        assert_eq!(result[1].dedicated_total, 8 << 30);
+        assert_eq!(result[1].usage, Some(60.0));
+    }
     #[test]
     fn sums_processes_per_engine_but_does_not_sum_independent_engines() {
         let rows = vec![
