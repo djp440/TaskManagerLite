@@ -5,10 +5,14 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use slint::{CloseRequestResponse, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
+use slint::{
+    CloseRequestResponse, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer,
+    SharedString, VecModel,
+};
 use tml_core::{
-    EndError, Group, GroupHeader, MemoryHardware, MemoryStatus, Process, ProcessKey, ProcessSnapshot, Sample, SortKey,
-    SystemMetrics, ViewMode, ViewOptions, ViewRow, build_group_view, build_view, end_process, tree_from,
+    EndError, Group, GroupHeader, MemoryHardware, MemoryStatus, Process, ProcessKey,
+    ProcessSnapshot, Sample, SortKey, SystemMetrics, ViewMode, ViewOptions, ViewRow,
+    build_group_view, build_view, end_process, tree_from,
 };
 
 mod columns;
@@ -29,7 +33,8 @@ use crate::sampling::{Command, SamplerHandle};
 use crate::settings::{self, ColumnWidths, Settings, Store};
 use crate::tray::{self, Event as TrayEvent, Tray};
 use crate::{
-    AppWindow, ColumnLayout, Columns, CpuData, DetailChoice, DetailHeader, ProcRow, Resource, ResourceKind, placement,
+    AppWindow, ColumnLayout, Columns, CpuData, DetailChoice, DetailHeader, ProcRow, Resource,
+    ResourceKind, placement,
 };
 use cpu::CpuState;
 use resources::{Edit, Instance, ResourceSet};
@@ -93,6 +98,7 @@ struct State {
     /// CPU 详情：每个逻辑处理器的历史与基本信息。
     cpu: CpuState,
     system: SystemMetrics,
+    disks: Vec<tml_core::PhysicalDisk>,
     memory: MemoryStatus,
     /// 内存硬件信息只读取一次，首个快照之后才有。
     memory_hardware: Option<MemoryHardware>,
@@ -130,7 +136,8 @@ impl State {
 
     /// 当前是否在采样（见 `sampling::plan`）；它的变化意味着曲线上要留断点。
     fn sampling(&self) -> bool {
-        crate::sampling::plan(self.visible, self.mini, self.background, self.paused) != crate::sampling::Plan::Idle
+        crate::sampling::plan(self.visible, self.mini, self.background, self.paused)
+            != crate::sampling::Plan::Idle
     }
 }
 
@@ -180,21 +187,40 @@ fn sort_index(k: SortKey) -> i32 {
 }
 
 impl Controller {
-    pub fn new(ui: &AppWindow, sampler: SamplerHandle, log: Log, settings: Settings, store: Option<Store>) -> Rc<Self> {
+    pub fn new(
+        ui: &AppWindow,
+        sampler: SamplerHandle,
+        log: Log,
+        settings: Settings,
+        store: Option<Store>,
+    ) -> Rc<Self> {
         let rows = Rc::new(VecModel::default());
         let set = ResourceSet::new(resources::summary_instances());
-        let resources = Rc::new(VecModel::from(set.instances().iter().map(Self::resource_row).collect::<Vec<_>>()));
+        let resources = Rc::new(VecModel::from(
+            set.instances()
+                .iter()
+                .map(Self::resource_row)
+                .collect::<Vec<_>>(),
+        ));
         ui.set_rows(ModelRc::from(rows.clone()));
         ui.set_resources(ModelRc::from(resources.clone()));
         ui.set_elevated(tml_core::is_elevated());
-        let mut state =
-            State { visible: true, background: settings.background_sampling, resources: set, ..Default::default() };
+        let mut state = State {
+            visible: true,
+            background: settings.background_sampling,
+            resources: set,
+            ..Default::default()
+        };
         state.opts.sort_key = settings.sort_key;
         state.opts.descending = settings.descending;
         state.opts.mode = settings.view;
         state.details = settings.details.clone();
         // 排序列已不在显示中（例如设置文件被手动改过）时回到默认排序。
-        columns::fix_sort(&mut state.opts.sort_key, &mut state.opts.descending, &state.details);
+        columns::fix_sort(
+            &mut state.opts.sort_key,
+            &mut state.opts.descending,
+            &state.details,
+        );
         ui.set_view_mode(view_mode_index(settings.view));
         ui.set_page(settings.page);
         let cols = ui.global::<Columns>();
@@ -204,8 +230,19 @@ impl Controller {
         cols.set_disk(settings.columns.disk);
         // 列宽总和超出可用宽度时的有效列宽（保存值不变，窗口放大后自然恢复）。
         cols.on_fit(|available, name_min, pid, cpu, memory, disk| {
-            let w = ColumnWidths { pid, cpu, memory, disk }.fit(available, name_min);
-            ColumnLayout { pid: w.pid, cpu: w.cpu, memory: w.memory, disk: w.disk }
+            let w = ColumnWidths {
+                pid,
+                cpu,
+                memory,
+                disk,
+            }
+            .fit(available, name_min);
+            ColumnLayout {
+                pid: w.pid,
+                cpu: w.cpu,
+                memory: w.memory,
+                disk: w.disk,
+            }
         });
         let c = Rc::new(Self {
             ui: ui.as_weak(),
@@ -242,7 +279,10 @@ impl Controller {
         c.sync_selection(&c.state.borrow());
         c.state.borrow().cpu.attach(ui);
         if !restored {
-            c.log.borrow_mut().line(format!("设置中的资源 {} 暂不存在，待其出现后恢复", settings.resource));
+            c.log.borrow_mut().line(format!(
+                "设置中的资源 {} 暂不存在，待其出现后恢复",
+                settings.resource
+            ));
         }
         c.bind(ui);
         c.bind_process_menu(ui);
@@ -267,7 +307,10 @@ impl Controller {
             title: i.title.as_str().into(),
             caption: i.caption.as_str().into(),
             stat_labels: ModelRc::new(VecModel::from(
-                i.stat_labels.iter().map(|l| SharedString::from(l.as_str())).collect::<Vec<_>>(),
+                i.stat_labels
+                    .iter()
+                    .map(|l| SharedString::from(l.as_str()))
+                    .collect::<Vec<_>>(),
             )),
             ..Default::default()
         }
@@ -307,7 +350,8 @@ impl Controller {
         ui.on_confirm_accepted(with(Controller::confirm));
         ui.on_elevate(with(Controller::elevate));
         ui.on_graph_resized(with(Controller::redraw_graphs));
-        ui.global::<CpuData>().on_grid_resized(with(Controller::redraw_graphs));
+        ui.global::<CpuData>()
+            .on_grid_resized(with(Controller::redraw_graphs));
         let c = Rc::downgrade(self);
         ui.on_resource_selected(move |id| {
             if let Some(c) = c.upgrade() {
@@ -349,7 +393,11 @@ impl Controller {
                     let mut s = c.state.borrow_mut();
                     if let Some(key) = process_key_at(&s.view, &s.snapshot.processes, i as usize) {
                         // 树形默认展开，记录折叠项；分组默认折叠，记录展开项。
-                        let set = if s.opts.mode == ViewMode::Group { &mut s.opts.expanded } else { &mut s.opts.collapsed };
+                        let set = if s.opts.mode == ViewMode::Group {
+                            &mut s.opts.expanded
+                        } else {
+                            &mut s.opts.collapsed
+                        };
                         if !set.remove(&key) {
                             set.insert(key);
                         }
@@ -425,7 +473,9 @@ impl Controller {
 
     /// 收集当前状态并写入设置文件（退出前、以管理员身份重启前调用）。
     pub fn save_settings(&self) {
-        let (Some(store), Some(ui)) = (&self.store, self.ui.upgrade()) else { return };
+        let (Some(store), Some(ui)) = (&self.store, self.ui.upgrade()) else {
+            return;
+        };
         self.track_window();
         let mut settings = self.settings.borrow_mut();
         {
@@ -532,7 +582,9 @@ impl Controller {
     }
 
     fn toggle_window(&self) {
-        let Some(minimized) = self.with_active(|w| w.is_minimized()) else { return };
+        let Some(minimized) = self.with_active(|w| w.is_minimized()) else {
+            return;
+        };
         if self.hidden.get() || minimized {
             self.show_window();
         } else {
@@ -556,7 +608,10 @@ impl Controller {
 
     /// 开启“关闭时最小化到托盘”且还没有图标时创建托盘图标。
     fn ensure_tray(&self) {
-        if !self.settings.borrow().close_to_tray || self.tray.borrow().is_some() || self.tray_failed.get() {
+        if !self.settings.borrow().close_to_tray
+            || self.tray.borrow().is_some()
+            || self.tray_failed.get()
+        {
             return;
         }
         let tip = {
@@ -570,7 +625,11 @@ impl Controller {
             }
         });
         self.tray_failed.set(tray.is_none());
-        self.log.borrow_mut().line(if tray.is_some() { "托盘图标已创建" } else { "托盘图标创建失败" });
+        self.log.borrow_mut().line(if tray.is_some() {
+            "托盘图标已创建"
+        } else {
+            "托盘图标创建失败"
+        });
         let failed = tray.is_none();
         *self.tray.borrow_mut() = tray;
         if failed && self.hidden.get() {
@@ -612,7 +671,13 @@ impl Controller {
 
     /// 托盘提示用的读数：最近一次系统指标；还没有采样时为 `None`。
     fn tray_reading(&self, s: &State) -> Option<(f32, u64, u64)> {
-        s.first_data.then(|| (s.system.cpu_usage, s.system.memory_used, s.system.memory_total))
+        s.first_data.then(|| {
+            (
+                s.system.cpu_usage,
+                s.system.memory_used,
+                s.system.memory_total,
+            )
+        })
     }
 
     fn update_tray_tip(&self, s: &State) {
@@ -644,9 +709,12 @@ impl Controller {
 
     /// 截图模式：核对逻辑处理器网格的曲线路径尺寸是否是最新的（见 `CpuState::check_paths_current`）。
     pub fn check_cpu_paths(&self) -> Result<(), String> {
-        let Some(ui) = self.ui.upgrade() else { return Ok(()) };
+        let Some(ui) = self.ui.upgrade() else {
+            return Ok(());
+        };
         let s = self.state.borrow();
-        s.cpu.check_paths_current(&ui, s.resources.selected() == resources::CPU)
+        s.cpu
+            .check_paths_current(&ui, s.resources.selected() == resources::CPU)
     }
 
     pub fn has_first_data(&self) -> bool {
@@ -660,22 +728,33 @@ impl Controller {
         if let Some(ui) = self.ui.upgrade() {
             let etw = sample.disk_source == tml_core::DiskSource::Etw;
             ui.global::<Columns>().set_disk_accurate(etw);
-            ui.global::<crate::SettingsData>().set_accurate_disk_active(etw);
+            ui.global::<crate::SettingsData>()
+                .set_accurate_disk_active(etw);
         }
         {
             let mut s = self.state.borrow_mut();
             let m = sample.system;
-            s.resources.update(resources::summary_instances());
+            s.resources
+                .update(resources::device_instances(&sample.disks));
             if std::mem::take(&mut s.gap) {
                 s.resources.push_gap(now);
                 s.cpu.push_gap(now);
             }
             // 首次采样没有基线，CPU、磁盘、网络都是 0，不画进曲线。
             if s.first_data {
-                s.resources.push(resources::CPU, now, Some(m.cpu_usage as f64));
-                s.resources.push(resources::MEMORY, now, Some(m.memory_used as f64));
-                s.resources.push(resources::DISK, now, Some(m.disk_active as f64));
-                s.resources.push(resources::NETWORK, now, Some(m.net_recv + m.net_send));
+                s.resources
+                    .push(resources::CPU, now, Some(m.cpu_usage as f64));
+                s.resources
+                    .push(resources::MEMORY, now, Some(m.memory_used as f64));
+                for disk in &sample.disks {
+                    s.resources.push(
+                        &resources::disk_id(disk.number),
+                        now,
+                        disk.active.map(f64::from),
+                    );
+                }
+                s.resources
+                    .push(resources::NETWORK, now, Some(m.net_recv + m.net_send));
             }
             let with_history = s.first_data;
             s.cpu.record(now, sample.cpu, with_history);
@@ -684,6 +763,7 @@ impl Controller {
                 s.app_pids = sample.app_pids;
             }
             s.system = m;
+            s.disks = sample.disks;
             s.memory = sample.memory;
             if sample.memory_hardware.is_some() {
                 s.memory_hardware = sample.memory_hardware;
@@ -718,7 +798,10 @@ impl Controller {
         let mut guard = self.state.borrow_mut();
         let s = &mut *guard;
         if px != self.icon_px.replace(px) {
-            self.log.borrow_mut().line(format!("图标尺寸 {px}px 缩放={}", ui.window().scale_factor()));
+            self.log.borrow_mut().line(format!(
+                "图标尺寸 {px}px 缩放={}",
+                ui.window().scale_factor()
+            ));
             s.icons.reset();
             self.icon_worker.extract(vec![None], px);
         }
@@ -763,7 +846,11 @@ impl Controller {
         let s = self.state.borrow();
         for (i, key) in icon_rows(&s.view, &s.snapshot.processes, |key| affected(&s, key)) {
             if let Some(mut row) = self.rows.row_data(i) {
-                row.icon = s.icons.icon(key).cloned().unwrap_or_else(|| self.blank_icon.clone());
+                row.icon = s
+                    .icons
+                    .icon(key)
+                    .cloned()
+                    .unwrap_or_else(|| self.blank_icon.clone());
                 self.rows.set_row_data(i, row);
             }
         }
@@ -779,7 +866,11 @@ impl Controller {
             (w, h) if w > 1.0 && h > 1.0 => (w, h),
             _ => (600.0, 300.0),
         };
-        let mem_pct = if m.memory_total > 0 { m.memory_used as f64 / m.memory_total as f64 * 100.0 } else { 0.0 };
+        let mem_pct = if m.memory_total > 0 {
+            m.memory_used as f64 / m.memory_total as f64 * 100.0
+        } else {
+            0.0
+        };
         let cpu = format::percent(m.cpu_usage);
         let gib = |b: u64| b as f64 / 1024.0 / 1024.0 / 1024.0;
         let mem = format!("{:.1}/{:.1} GB", gib(m.memory_used), gib(m.memory_total));
@@ -791,11 +882,17 @@ impl Controller {
             .instances()
             .iter()
             .map(|inst| {
+                let disk = s
+                    .disks
+                    .iter()
+                    .find(|d| resources::disk_id(d.number) == inst.id);
                 let history = s.resources.history(&inst.id);
                 // (纵轴顶端取值, 卡片摘要, 纵轴标注, 统计项取值)
                 let (scale, value, scale_label, stats) = match inst.kind {
                     // CPU、内存详情页的统计项在各自的数据里（CpuData / MemoryView），卡片只需要摘要。
-                    ResourceKind::Cpu => (100.0, s.cpu.card_value(&cpu), "100%".to_string(), vec![]),
+                    ResourceKind::Cpu => {
+                        (100.0, s.cpu.card_value(&cpu), "100%".to_string(), vec![])
+                    }
                     ResourceKind::Memory => (
                         m.memory_total.max(1) as f64,
                         format!("{mem} ({mem_pct:.0}%)"),
@@ -804,36 +901,108 @@ impl Controller {
                     ),
                     ResourceKind::Disk => (
                         100.0,
-                        format::percent(m.disk_active),
+                        disk.and_then(|d| d.active)
+                            .map(format::percent)
+                            .unwrap_or_else(|| "—".into()),
                         "100%".to_string(),
-                        vec![format::percent(m.disk_active), format::rate(m.disk_read), format::rate(m.disk_write)],
+                        disk.map(|d| {
+                            vec![
+                                d.active.map(format::percent).unwrap_or_else(|| "—".into()),
+                                d.response_ms
+                                    .map(|v| format!("{v:.1} ms"))
+                                    .unwrap_or_else(|| "—".into()),
+                                d.read.map(format::rate).unwrap_or_else(|| "—".into()),
+                                d.write.map(format::rate).unwrap_or_else(|| "—".into()),
+                            ]
+                        })
+                        .unwrap_or_default(),
                     ),
                     ResourceKind::Network => {
                         let scale = format::nice_scale(history.max(), 100.0 * 1024.0);
                         (
                             scale,
-                            format!("↓ {}  ↑ {}", format::rate(m.net_recv), format::rate(m.net_send)),
+                            format!(
+                                "↓ {}  ↑ {}",
+                                format::rate(m.net_recv),
+                                format::rate(m.net_send)
+                            ),
                             format::rate(scale),
                             vec![format::rate(m.net_recv), format::rate(m.net_send)],
                         )
                     }
                 };
                 // 迷你模式下完整窗口隐藏，详情大图不画；回到完整模式时 redraw_graphs 立即补画。
-                let (line, area) = if s.mini { Default::default() } else { history.paths(now, scale, detail) };
+                let (line, area) = if s.mini {
+                    Default::default()
+                } else {
+                    history.paths(now, scale, detail)
+                };
                 let (mini_line, mini_area) = history.paths(now, scale, Self::MINI);
                 let detail = match (&mem_text, inst.kind) {
                     (Some(t), ResourceKind::Memory) => t.header.clone(),
                     _ => String::new(),
                 };
                 Resource {
-                    detail: if inst.kind == ResourceKind::Cpu { s.cpu.model_name() } else { detail }.into(),
+                    disk_info: disk
+                        .map(|d| {
+                            let free = d.volumes.iter().map(|v| v.free).sum::<u64>();
+                            let used = d
+                                .volumes
+                                .iter()
+                                .map(|v| v.capacity.saturating_sub(v.free))
+                                .sum::<u64>();
+                            format!(
+                                "{} · {} · 容量 {} · {}\n已挂载卷合计：已用 {} · 可用 {}",
+                                d.model,
+                                d.media_type,
+                                format::gigabytes(d.capacity),
+                                if d.system {
+                                    "系统盘"
+                                } else {
+                                    "非系统盘"
+                                },
+                                format::gigabytes(used),
+                                format::gigabytes(free)
+                            )
+                        })
+                        .unwrap_or_default()
+                        .into(),
+                    volumes: ModelRc::new(VecModel::from(
+                        disk.map(|d| {
+                            d.volumes
+                                .iter()
+                                .map(|v| {
+                                    SharedString::from(format!(
+                                        "{}  {}    容量 {}    已用 {}    可用 {}",
+                                        v.mount,
+                                        v.filesystem,
+                                        format::gigabytes(v.capacity),
+                                        format::gigabytes(v.capacity.saturating_sub(v.free)),
+                                        format::gigabytes(v.free)
+                                    ))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                    )),
+                    detail: if inst.kind == ResourceKind::Cpu {
+                        s.cpu.model_name()
+                    } else {
+                        detail
+                    }
+                    .into(),
                     value: value.into(),
                     line: line.into(),
                     area: area.into(),
                     mini_line: mini_line.into(),
                     mini_area: mini_area.into(),
                     scale: scale_label.into(),
-                    stats: ModelRc::new(VecModel::from(stats.into_iter().map(SharedString::from).collect::<Vec<_>>())),
+                    stats: ModelRc::new(VecModel::from(
+                        stats
+                            .into_iter()
+                            .map(SharedString::from)
+                            .collect::<Vec<_>>(),
+                    )),
                     ..Self::resource_row(inst)
                 }
             })
@@ -842,7 +1011,13 @@ impl Controller {
         if s.mini {
             return;
         }
-        s.cpu.refresh(&ui, now, s.snapshot.processes.len(), &cpu, s.resources.selected() == resources::CPU);
+        s.cpu.refresh(
+            &ui,
+            now,
+            s.snapshot.processes.len(),
+            &cpu,
+            s.resources.selected() == resources::CPU,
+        );
         if let Some(t) = mem_text {
             ui.set_memory_view(memory::view(t));
         }
@@ -934,7 +1109,11 @@ impl Controller {
                     has_children: r.has_children,
                     expanded: r.expanded,
                     critical: p.critical,
-                    icon: s.icons.icon(p.key).cloned().unwrap_or_else(|| self.blank_icon.clone()),
+                    icon: s
+                        .icons
+                        .icon(p.key)
+                        .cloned()
+                        .unwrap_or_else(|| self.blank_icon.clone()),
                     header: false,
                     extra: Self::detail_cells(s, p),
                 }
@@ -974,7 +1153,9 @@ impl Controller {
     }
 
     fn request_end(&self) {
-        let Some((key, name, critical)) = self.selected_process() else { return };
+        let Some((key, name, critical)) = self.selected_process() else {
+            return;
+        };
         if critical {
             self.ask(CONFIRM_CRITICAL, vec![key], name, 0, true);
         } else {
@@ -983,18 +1164,31 @@ impl Controller {
     }
 
     fn request_end_tree(&self) {
-        let Some((key, name, _)) = self.selected_process() else { return };
+        let Some((key, name, _)) = self.selected_process() else {
+            return;
+        };
         let (keys, critical) = {
             let s = self.state.borrow();
             let keys = tree_from(&s.snapshot, key);
-            let critical = s.snapshot.processes.iter().any(|p| p.critical && keys.contains(&p.key));
+            let critical = s
+                .snapshot
+                .processes
+                .iter()
+                .any(|p| p.critical && keys.contains(&p.key));
             (keys, critical)
         };
         let descendants = keys.len().saturating_sub(1) as i32;
         self.ask(CONFIRM_TREE, keys, name, descendants, critical);
     }
 
-    fn ask(&self, kind: i32, keys: Vec<ProcessKey>, name: String, descendants: i32, critical: bool) {
+    fn ask(
+        &self,
+        kind: i32,
+        keys: Vec<ProcessKey>,
+        name: String,
+        descendants: i32,
+        critical: bool,
+    ) {
         let Some(ui) = self.ui.upgrade() else { return };
         self.state.borrow_mut().pending = keys;
         ui.set_confirm_name(name.into());
@@ -1017,7 +1211,9 @@ impl Controller {
         let mut worst: Option<EndError> = None;
         for key in keys {
             if let Err(e) = end_process(key) {
-                self.log.borrow_mut().line(format!("结束进程失败 pid={} {e:?}", key.pid));
+                self.log
+                    .borrow_mut()
+                    .line(format!("结束进程失败 pid={} {e:?}", key.pid));
                 let rank = |e: &EndError| match e {
                     EndError::Gone => 0,
                     EndError::AccessDenied => 1,
@@ -1055,7 +1251,10 @@ impl Controller {
 fn same_row(a: &ProcRow, b: &ProcRow) -> bool {
     a.extra.row_count() == b.extra.row_count()
         && a.extra.iter().zip(b.extra.iter()).all(|(x, y)| x == y)
-        && ProcRow { extra: b.extra.clone(), ..a.clone() } == *b
+        && ProcRow {
+            extra: b.extra.clone(),
+            ..a.clone()
+        } == *b
 }
 
 /// 列表第 `row` 行对应的进程；分组视图的标题行（`index == HEADER_INDEX`）和越界行没有进程。
@@ -1065,8 +1264,15 @@ fn process_key_at(view: &[ViewRow], procs: &[Process], row: usize) -> Option<Pro
 }
 
 /// 满足 `affected` 的进程所在的行（行下标与进程身份）；标题行没有进程，直接跳过。
-fn icon_rows(view: &[ViewRow], procs: &[Process], affected: impl Fn(ProcessKey) -> bool) -> Vec<(usize, ProcessKey)> {
-    (0..view.len()).filter_map(|i| process_key_at(view, procs, i).map(|k| (i, k))).filter(|&(_, k)| affected(k)).collect()
+fn icon_rows(
+    view: &[ViewRow],
+    procs: &[Process],
+    affected: impl Fn(ProcessKey) -> bool,
+) -> Vec<(usize, ProcessKey)> {
+    (0..view.len())
+        .filter_map(|i| process_key_at(view, procs, i).map(|k| (i, k)))
+        .filter(|&(_, k)| affected(k))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1076,7 +1282,10 @@ mod tests {
 
     fn p(pid: u32, parent: u32, name: &str) -> Process {
         Process {
-            key: ProcessKey { pid, create_time: pid as u64 },
+            key: ProcessKey {
+                pid,
+                create_time: pid as u64,
+            },
             parent_pid: parent,
             name: name.into(),
             cpu_usage: 0.0,
@@ -1091,10 +1300,21 @@ mod tests {
     /// 应用 chrome(10)（子进程 11 折叠不显示）+ 应用 notepad(20) + 后台进程 svc(30)：
     /// 视图是 [标题, chrome, notepad, 标题, svc]，标题行的 index 是 HEADER_INDEX。
     fn group() -> (ProcessSnapshot, Vec<ViewRow>) {
-        let snapshot =
-            ProcessSnapshot { processes: vec![p(10, 1, "chrome"), p(11, 10, "gpu"), p(20, 1, "notepad"), p(30, 1, "svc")] };
+        let snapshot = ProcessSnapshot {
+            processes: vec![
+                p(10, 1, "chrome"),
+                p(11, 10, "gpu"),
+                p(20, 1, "notepad"),
+                p(30, 1, "svc"),
+            ],
+        };
         let apps: HashSet<u32> = [10, 20].into();
-        let opts = ViewOptions { mode: ViewMode::Group, sort_key: SortKey::Pid, descending: false, ..Default::default() };
+        let opts = ViewOptions {
+            mode: ViewMode::Group,
+            sort_key: SortKey::Pid,
+            descending: false,
+            ..Default::default()
+        };
         let view = build_group_view(&snapshot, &apps, &opts);
         (snapshot, view)
     }

@@ -1,4 +1,4 @@
-import { Palette } from "std-widgets.slint";
+import { Palette, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Resource } from "types.slint";
 import { ResourceCard } from "performance-page.slint";
@@ -37,7 +37,7 @@ export component MiniWindow inherits Window {
 
     // 与性能页左栏同宽，再加四周的内边距与边框。
     width: 240px + 2 * 4px + 2px;
-    height: cards.preferred-height + 2px;
+    height: min(600px, cards.preferred-height + 2px);
 
     // 供截图模式切换深浅色。
     public function set-dark(dark: bool) {
@@ -116,10 +116,13 @@ export component MiniWindow inherits Window {
             }
         }
 
-        cards := VerticalLayout {
+        ScrollView {
             x: 1px;
             y: 1px;
             width: parent.width - 2px;
+            height: parent.height - 2px;
+            content-width: self.visible-width;
+        cards := VerticalLayout {
             padding: 4px;
             spacing: 2px;
             alignment: start;
@@ -137,6 +140,7 @@ export component MiniWindow inherits Window {
                     menu.show({ x: x, y: y });
                 }
             }
+        }
         }
     }
 

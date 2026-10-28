@@ -34,6 +34,7 @@ pub enum DiskSource {
 }
 
 pub struct Sample {
+    pub disks: Vec<crate::PhysicalDisk>,
     /// `Scope::Metrics` 采样时为空，此时 [`Sample::processes_fresh`] 为假，调用方应保留上一份快照。
     pub snapshot: ProcessSnapshot,
     /// 本次采样是否带有新的进程快照。
@@ -52,6 +53,7 @@ pub struct Sample {
 
 #[derive(Default)]
 pub struct Sampler {
+    physical: Option<crate::disks::PhysicalCounters>,
     query: ProcessQuery,
     baseline: Baseline,
     cpu: CpuTimes,
@@ -103,33 +105,53 @@ impl Sampler {
 
     pub fn sample_scope(&mut self, scope: Scope) -> Sample {
         let now = Instant::now();
-        let elapsed = self.last.map_or(0.0, |t| now.duration_since(t).as_secs_f64());
+        let elapsed = self
+            .last
+            .map_or(0.0, |t| now.duration_since(t).as_secs_f64());
         self.last = Some(now);
 
         let cpu = cpu_times();
         let first = self.cpu.total == 0;
-        let total_delta = if first { 0 } else { cpu.total.saturating_sub(self.cpu.total) };
+        let total_delta = if first {
+            0
+        } else {
+            cpu.total.saturating_sub(self.cpu.total)
+        };
         let idle_delta = cpu.idle.saturating_sub(self.cpu.idle);
         self.cpu = cpu;
-        let cpu_usage =
-            if total_delta > 0 { (100.0 * (1.0 - idle_delta as f64 / total_delta as f64)).clamp(0.0, 100.0) as f32 } else { 0.0 };
+        let cpu_usage = if total_delta > 0 {
+            (100.0 * (1.0 - idle_delta as f64 / total_delta as f64)).clamp(0.0, 100.0) as f32
+        } else {
+            0.0
+        };
 
         let full = scope == Scope::Full;
         let mut snapshot = if full {
             // 进程基线与系统基线分开：上一次进程快照之后可能已有多次只采指标的采样。
-            let proc_elapsed = self.last_processes.map_or(0.0, |t| now.duration_since(t).as_secs_f64());
-            let proc_total_delta = if self.last_processes.is_some() { cpu.total.saturating_sub(self.processes_cpu_total) } else { 0 };
+            let proc_elapsed = self
+                .last_processes
+                .map_or(0.0, |t| now.duration_since(t).as_secs_f64());
+            let proc_total_delta = if self.last_processes.is_some() {
+                cpu.total.saturating_sub(self.processes_cpu_total)
+            } else {
+                0
+            };
             self.last_processes = Some(now);
             self.processes_cpu_total = cpu.total;
             let raw = self.query.query().unwrap_or_default();
             let mut seen = HashMap::with_capacity(raw.len());
             let cache = &mut self.critical;
-            let snapshot = self.baseline.advance(raw, proc_total_delta, proc_elapsed, &mut |r| {
-                let key = ProcessKey { pid: r.pid, create_time: r.create_time };
-                let c = *cache.entry(key).or_insert_with(|| is_critical(r));
-                seen.insert(key, c);
-                c
-            });
+            let snapshot = self
+                .baseline
+                .advance(raw, proc_total_delta, proc_elapsed, &mut |r| {
+                    let key = ProcessKey {
+                        pid: r.pid,
+                        create_time: r.create_time,
+                    };
+                    let c = *cache.entry(key).or_insert_with(|| is_critical(r));
+                    seen.insert(key, c);
+                    c
+                });
             // 只保留仍在运行的进程，避免缓存无限增长。
             self.critical = seen;
             snapshot
@@ -145,7 +167,8 @@ impl Sampler {
         let memory_status = read_status(self.query.compressed_working_set);
         let (memory_used, memory_total) = (memory_status.in_use(), memory_status.total);
         // SMBIOS 解析稍慢，放在首次采样之后，避免拖慢第一个快照。
-        let memory_hardware = (!first && !std::mem::replace(&mut self.hardware_tried, true)).then(read_hardware);
+        let memory_hardware =
+            (!first && !std::mem::replace(&mut self.hardware_tried, true)).then(read_hardware);
 
         // PDH 初始化稍慢，放在首次采样之后，避免拖慢第一个快照。
         let (disk_active, disk_read, disk_write) = match &mut self.disk {
@@ -159,6 +182,14 @@ impl Sampler {
             }
         };
 
+        if !first && self.physical.is_none() {
+            self.physical = crate::disks::PhysicalCounters::open();
+        }
+        let disks = self
+            .physical
+            .as_mut()
+            .map(|p| p.sample())
+            .unwrap_or_default();
         let (mut net_recv, mut net_send) = (0.0, 0.0);
         if let Some(cur) = network_octets() {
             if let Some(prev) = self.net
@@ -173,6 +204,7 @@ impl Sampler {
         let app_pids = (full && self.track_apps).then(app_pids);
 
         Sample {
+            disks,
             snapshot,
             processes_fresh: full,
             app_pids,
@@ -195,7 +227,12 @@ impl Sampler {
 
     /// 有 ETW 会话时用按进程归属的磁盘字节数覆盖近似速率。会话在首次采样之后才启动，
     /// 并且需要管理员权限；未提权、启动中或失败时保持近似值。
-    fn apply_etw_disk(&mut self, first: bool, snapshot: &mut ProcessSnapshot, elapsed: f64) -> DiskSource {
+    fn apply_etw_disk(
+        &mut self,
+        first: bool,
+        snapshot: &mut ProcessSnapshot,
+        elapsed: f64,
+    ) -> DiskSource {
         if !self.accurate_disk {
             // 关闭：丢弃会话（Drop 会停止它），其余什么也不做。
             self.etw = None;
@@ -206,7 +243,9 @@ impl Sampler {
             self.etw_tried = true;
             self.etw = DiskTrace::start().ok();
         }
-        let Some(trace) = &self.etw else { return DiskSource::Approximate };
+        let Some(trace) = &self.etw else {
+            return DiskSource::Approximate;
+        };
         match trace.state() {
             TraceState::Starting => DiskSource::Approximate,
             TraceState::Failed(_) => {

@@ -1,4 +1,4 @@
-import { Palette } from "std-widgets.slint";
+import { Palette, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Resource, ResourceKind, ResourceTint } from "types.slint";
 import { MemoryDetail, MemoryView } from "memory-detail.slint";
@@ -144,8 +144,10 @@ export component PerformancePage inherits Rectangle {
         padding: 12px;
         spacing: 12px;
 
-        VerticalLayout {
+        ScrollView {
             width: 240px;
+            content-width: self.visible-width;
+            VerticalLayout {
             spacing: 4px;
             alignment: start;
             for r in root.resources: ResourceCard {
@@ -159,6 +161,7 @@ export component PerformancePage inherits Rectangle {
                     root.mini-mode();
                 }
             }
+        }
         }
 
         Rectangle {
@@ -252,7 +255,7 @@ export component PerformancePage inherits Rectangle {
 
                 if root.data.kind != ResourceKind.memory && root.data.kind != ResourceKind.cpu: HorizontalLayout {
                     padding-top: 8px;
-                    spacing: 40px;
+                    spacing: 20px;
                     alignment: start;
                     for value[i] in root.data.stats: VerticalLayout {
                         spacing: 2px;
@@ -264,9 +267,28 @@ export component PerformancePage inherits Rectangle {
 
                         Text {
                             text: value;
-                            font-size: 20px;
+                            font-size: 18px;
                             font-weight: 600;
                             color: Palette.foreground;
+                        }
+                    }
+                }
+                if root.data.kind == ResourceKind.disk: Text {
+                    text: root.data.disk-info;
+                    wrap: word-wrap;
+                    color: Theme.subtle-text;
+                    font-size: 12px;
+                }
+                if root.data.kind == ResourceKind.disk: ScrollView {
+                    max-height: 112px;
+                    content-width: self.visible-width;
+                    VerticalLayout {
+                        spacing: 6px;
+                        for volume in root.data.volumes: Text {
+                            text: volume;
+                            wrap: word-wrap;
+                            color: Palette.foreground;
+                            font-size: 12px;
                         }
                     }
                 }

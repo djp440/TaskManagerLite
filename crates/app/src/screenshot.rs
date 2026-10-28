@@ -6,7 +6,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use slint::platform::{Key, PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, LogicalSize, Model, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
+use slint::{
+    ComponentHandle, LogicalPosition, LogicalSize, Model, PhysicalPosition, Rgba8Pixel,
+    SharedPixelBuffer, Timer,
+};
 
 use crate::{AppWindow, Columns, CpuData, MiniWindow, ProcessMenu, SettingsData};
 
@@ -28,9 +31,27 @@ const STEPS: &[Step] = &[
         ui.set_page(1);
         ui.invoke_resource_selected("cpu".into());
     }),
-    ("03b-性能CPU逻辑处理器-深色", |ui| use_demo_cores(ui, 0)),
-    ("04-性能内存-深色", |ui| ui.invoke_resource_selected("memory".into())),
-    ("05-性能网络-深色", |ui| ui.invoke_resource_selected("network".into())),
+    ("03b-性能CPU逻辑处理器-深色", |ui| {
+        use_demo_cores(ui, 0)
+    }),
+    ("04-性能内存-深色", |ui| {
+        ui.invoke_resource_selected("memory".into())
+    }),
+    ("05-性能网络-深色", |ui| {
+        ui.invoke_resource_selected("network".into())
+    }),
+    ("05b-性能磁盘-深色", |ui| {
+        let resources = ui.get_resources();
+        for i in 0..resources.row_count() {
+            let row = resources.row_data(i).unwrap();
+            if row.kind == crate::ResourceKind::Disk {
+                ui.invoke_resource_selected(row.id);
+                break;
+            }
+        }
+    }),
+    ("05c-性能磁盘-窄窗口", |ui| resize(ui, 760.0, 600.0)),
+    ("05d-性能磁盘-恢复窗口", |ui| resize(ui, 1080.0, 700.0)),
     ("06-结束进程树确认-深色", |ui| {
         ui.set_page(0);
         ui.set_confirm_name("chrome.exe".into());
@@ -47,18 +68,26 @@ const STEPS: &[Step] = &[
         ui.set_page(1);
         ui.invoke_resource_selected("cpu".into());
     }),
-    ("08b-性能CPU逻辑处理器-浅色", |ui| ui.global::<CpuData>().set_per_core(true)),
+    ("08b-性能CPU逻辑处理器-浅色", |ui| {
+        ui.global::<CpuData>().set_per_core(true)
+    }),
     // 用真实的指针事件拖动表头：“内存”列左边缘向左 60 像素，“PID”列向左 30 像素。
     ("09-列宽拖动-深色", |ui| {
         ui.invoke_set_dark(true);
         ui.set_page(0);
         let cols = ui.global::<Columns>();
-        let right = ui.window().size().to_logical(ui.window().scale_factor()).width - 10.0;
+        let right = ui
+            .window()
+            .size()
+            .to_logical(ui.window().scale_factor())
+            .width
+            - 10.0;
         let left_of = |widths: f32| right - widths;
         // 列从右向左排列：磁盘、内存、CPU、PID。
         let memory_left = left_of(cols.get_disk() + cols.get_memory());
         drag(ui, memory_left, -60.0);
-        let pid_left = left_of(cols.get_disk() + cols.get_memory() + cols.get_cpu() + cols.get_pid());
+        let pid_left =
+            left_of(cols.get_disk() + cols.get_memory() + cols.get_cpu() + cols.get_pid());
         drag(ui, pid_left, -30.0);
     }),
     // 窗口缩到接近最小宽度、四列都是最大宽度（例如最大化时拉宽后又缩小窗口）：
@@ -86,8 +115,12 @@ const STEPS: &[Step] = &[
         ui.invoke_set_dark(true);
         resize(ui, 760.0, 480.0);
     }),
-    ("14-性能内存-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
-    ("15-性能内存-深色-默认尺寸", |ui| resize(ui, 1080.0, 700.0)),
+    ("14-性能内存-深色-900x600", |ui| {
+        resize(ui, 900.0, 600.0)
+    }),
+    ("15-性能内存-深色-默认尺寸", |ui| {
+        resize(ui, 1080.0, 700.0)
+    }),
     // 进程图标：浏览器（有自己的图标）。依赖本机正在运行 chrome，没有时列表为空。
     ("16-进程图标-chrome-深色", |ui| {
         resize(ui, 1080.0, 700.0);
@@ -119,16 +152,26 @@ const STEPS: &[Step] = &[
         ui.global::<CpuData>().set_per_core(false);
         resize(ui, 760.0, 480.0);
     }),
-    ("21-性能CPU整体-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
-    ("22-性能CPU逻辑处理器-深色-最小尺寸760x480", |ui| {
-        use_demo_cores(ui, 0);
-        resize(ui, 760.0, 480.0);
+    ("21-性能CPU整体-深色-900x600", |ui| {
+        resize(ui, 900.0, 600.0)
     }),
-    ("23-性能CPU逻辑处理器-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
-    ("24-性能CPU逻辑处理器-浅色-最小尺寸760x480", |ui| {
-        ui.invoke_set_dark(false);
-        resize(ui, 760.0, 480.0);
+    (
+        "22-性能CPU逻辑处理器-深色-最小尺寸760x480",
+        |ui| {
+            use_demo_cores(ui, 0);
+            resize(ui, 760.0, 480.0);
+        },
+    ),
+    ("23-性能CPU逻辑处理器-深色-900x600", |ui| {
+        resize(ui, 900.0, 600.0)
     }),
+    (
+        "24-性能CPU逻辑处理器-浅色-最小尺寸760x480",
+        |ui| {
+            ui.invoke_set_dark(false);
+            resize(ui, 760.0, 480.0);
+        },
+    ),
     ("25-性能CPU整体-浅色-900x600", |ui| {
         ui.global::<CpuData>().set_per_core(false);
         resize(ui, 900.0, 600.0);
@@ -139,7 +182,9 @@ const STEPS: &[Step] = &[
         use_demo_cores(ui, 64);
         resize(ui, 760.0, 480.0);
     }),
-    ("27-性能CPU64核-深色-1080x700", |ui| resize(ui, 1080.0, 700.0)),
+    ("27-性能CPU64核-深色-1080x700", |ui| {
+        resize(ui, 1080.0, 700.0)
+    }),
     // 分组视图：应用 / 后台进程两组，各有标题行与数量；应用行与后台行各自显示图标，标题行没有图标。
     ("28-分组视图-深色", |ui| {
         ui.window().set_size(LogicalSize::new(1080.0, 700.0));
@@ -182,22 +227,44 @@ const STEPS: &[Step] = &[
         press(ui, Key::UpArrow);
     }),
     // 工具栏在窄窗口下的收缩。提权状态显式设置，不依赖运行者的权限（未提权才有“以管理员身份重启”）。
-    ("33-工具栏-进程-未提权-深色-760x600", |ui| toolbar(ui, 0, false, true, 760.0)),
-    ("34-工具栏-进程-未提权-深色-900x600", |ui| toolbar(ui, 0, false, true, 900.0)),
-    ("35-工具栏-进程-未提权-深色-1000x600", |ui| toolbar(ui, 0, false, true, 1000.0)),
-    ("36-工具栏-进程-未提权-深色-1080x600", |ui| toolbar(ui, 0, false, true, 1080.0)),
-    ("37-工具栏-进程-已提权-深色-760x600", |ui| toolbar(ui, 0, true, true, 760.0)),
-    ("38-工具栏-进程-已提权-深色-1000x600", |ui| toolbar(ui, 0, true, true, 1000.0)),
-    ("39-工具栏-性能-未提权-深色-760x600", |ui| toolbar(ui, 1, false, true, 760.0)),
-    ("40-工具栏-进程-未提权-浅色-760x600", |ui| toolbar(ui, 0, false, false, 760.0)),
-    ("41-工具栏-进程-未提权-浅色-900x600", |ui| toolbar(ui, 0, false, false, 900.0)),
+    ("33-工具栏-进程-未提权-深色-760x600", |ui| {
+        toolbar(ui, 0, false, true, 760.0)
+    }),
+    ("34-工具栏-进程-未提权-深色-900x600", |ui| {
+        toolbar(ui, 0, false, true, 900.0)
+    }),
+    ("35-工具栏-进程-未提权-深色-1000x600", |ui| {
+        toolbar(ui, 0, false, true, 1000.0)
+    }),
+    ("36-工具栏-进程-未提权-深色-1080x600", |ui| {
+        toolbar(ui, 0, false, true, 1080.0)
+    }),
+    ("37-工具栏-进程-已提权-深色-760x600", |ui| {
+        toolbar(ui, 0, true, true, 760.0)
+    }),
+    ("38-工具栏-进程-已提权-深色-1000x600", |ui| {
+        toolbar(ui, 0, true, true, 1000.0)
+    }),
+    ("39-工具栏-性能-未提权-深色-760x600", |ui| {
+        toolbar(ui, 1, false, true, 760.0)
+    }),
+    ("40-工具栏-进程-未提权-浅色-760x600", |ui| {
+        toolbar(ui, 0, false, false, 760.0)
+    }),
+    ("41-工具栏-进程-未提权-浅色-900x600", |ui| {
+        toolbar(ui, 0, false, false, 900.0)
+    }),
     // 置顶开关：按下态与实心图钉。
     ("42-工具栏-已置顶-深色-1080x600", |ui| {
         toolbar(ui, 0, false, true, 1080.0);
         ui.set_pinned(true);
     }),
-    ("43-工具栏-已置顶-浅色-760x600", |ui| toolbar(ui, 0, false, false, 760.0)),
-    ("44-工具栏-已置顶-性能-深色-760x600", |ui| toolbar(ui, 1, true, true, 760.0)),
+    ("43-工具栏-已置顶-浅色-760x600", |ui| {
+        toolbar(ui, 0, false, false, 760.0)
+    }),
+    ("44-工具栏-已置顶-性能-深色-760x600", |ui| {
+        toolbar(ui, 1, true, true, 760.0)
+    }),
     // 指针停在收起后的提权按钮上：先是悬停态，约 0.5 秒后出现完整文字的提示（下一步截图）。放在最后，免得悬停影响其他步骤。
     ("45-工具栏-提权图标悬停-深色-900x600", |ui| {
         toolbar(ui, 0, false, true, 900.0);
@@ -207,9 +274,14 @@ const STEPS: &[Step] = &[
     ("46-工具栏-提权图标提示-深色-900x600", |_| {}),
     // 指针移到置顶按钮上（提权图标左侧 32 + 8，提权图标右边是设置按钮）：约 0.5 秒后出现提示。
     ("47-工具栏-置顶按钮悬停-深色-900x600", |ui| {
-        let width = ui.window().size().to_logical(ui.window().scale_factor()).width;
+        let width = ui
+            .window()
+            .size()
+            .to_logical(ui.window().scale_factor())
+            .width;
         let at = LogicalPosition::new(width - 12.0 - 40.0 - 40.0 - 16.0, 28.0);
-        ui.window().dispatch_event(WindowEvent::PointerMoved { position: at });
+        ui.window()
+            .dispatch_event(WindowEvent::PointerMoved { position: at });
     }),
     ("48-工具栏-置顶按钮提示-深色-900x600", |_| {}),
     // 详细信息列：依次勾选状态、用户名、句柄、线程、描述、映像路径、命令行（按勾选顺序追加在最右），
@@ -228,24 +300,38 @@ const STEPS: &[Step] = &[
     // 横向滚动到最右：表头与行一起滚动，名称列保持最小宽度。
     ("51-详细信息列-滚到最右-深色", |ui| {
         let at = LogicalPosition::new(500.0, 400.0);
-        ui.window().dispatch_event(WindowEvent::PointerMoved { position: at });
-        ui.window().dispatch_event(WindowEvent::PointerScrolled { position: at, delta_x: -5000.0, delta_y: 0.0 });
+        ui.window()
+            .dispatch_event(WindowEvent::PointerMoved { position: at });
+        ui.window().dispatch_event(WindowEvent::PointerScrolled {
+            position: at,
+            delta_x: -5000.0,
+            delta_y: 0.0,
+        });
     }),
     // 滚到最右时拖宽最后一列（命令行）的左边缘 80 像素：列跟随指针变宽，右侧内容不动。
     ("52-详细信息列-滚动时拖宽-深色", |ui| {
-        let width = ui.window().size().to_logical(ui.window().scale_factor()).width;
+        let width = ui
+            .window()
+            .size()
+            .to_logical(ui.window().scale_factor())
+            .width;
         let cols = ui.global::<Columns>();
         let last = cols.get_extra().row_count() - 1;
         let before = cols.get_extra().row_data(last).unwrap().width;
         drag(ui, width - 10.0 - before, -80.0);
         let after = cols.get_extra().row_data(last).unwrap().width;
-        assert!((after - before - 80.0).abs() < 1.0, "命令行列应变宽 80：{before} → {after}");
+        assert!(
+            (after - before - 80.0).abs() < 1.0,
+            "命令行列应变宽 80：{before} → {after}"
+        );
         eprintln!("滚动时拖宽详细信息列：{before} → {after}");
     }),
     ("53-详细信息列-按线程排序-浅色-760x480", |ui| {
         ui.invoke_set_dark(false);
         resize(ui, 760.0, 480.0);
-        ui.invoke_sort_by(crate::controller::detail_sort_index(tml_core::DetailColumn::Threads));
+        ui.invoke_sort_by(crate::controller::detail_sort_index(
+            tml_core::DetailColumn::Threads,
+        ));
     }),
     // 恢复默认列：回到只有基本列、名称列伸缩的布局，排序回到 CPU。
     ("54-详细信息列-恢复默认-深色", |ui| {
@@ -276,22 +362,43 @@ const STEPS: &[Step] = &[
     }),
     // 双击卡片回到完整模式：页签与选中的资源不变，详情大图立即补画。
     ("57-迷你模式双击返回-深色", |ui| {
-        with_controller(|c| assert_eq!(c.mini_alpha(), Some(153), "切换置顶、隐藏再显示后应仍是 60% 不透明度"));
+        with_controller(|c| {
+            assert_eq!(
+                c.mini_alpha(),
+                Some(153),
+                "切换置顶、隐藏再显示后应仍是 60% 不透明度"
+            )
+        });
         with_mini(|m| {
-            let checked: Vec<i32> = m.get_opacity_choices().iter().filter(|c| c.checked).map(|c| c.percent).collect();
+            let checked: Vec<i32> = m
+                .get_opacity_choices()
+                .iter()
+                .filter(|c| c.checked)
+                .map(|c| c.percent)
+                .collect();
             assert_eq!(checked, [60], "菜单里应只有 60% 带勾");
             m.invoke_set_dark(true);
             let at = LogicalPosition::new(120.0, 30.0);
             let w = m.window();
             w.dispatch_event(WindowEvent::PointerMoved { position: at });
             for _ in 0..2 {
-                w.dispatch_event(WindowEvent::PointerPressed { position: at, button: PointerEventButton::Left });
-                w.dispatch_event(WindowEvent::PointerReleased { position: at, button: PointerEventButton::Left });
+                w.dispatch_event(WindowEvent::PointerPressed {
+                    position: at,
+                    button: PointerEventButton::Left,
+                });
+                w.dispatch_event(WindowEvent::PointerReleased {
+                    position: at,
+                    button: PointerEventButton::Left,
+                });
             }
         });
         with_controller(|c| assert!(!c.is_mini(), "双击迷你窗口应回到完整模式"));
         assert_eq!(ui.get_page(), 1, "回到完整模式后应仍在性能页");
-        assert_eq!(ui.get_selected_resource(), "memory", "回到完整模式后选中的资源应不变");
+        assert_eq!(
+            ui.get_selected_resource(),
+            "memory",
+            "回到完整模式后选中的资源应不变"
+        );
         assert!(ui.window().is_visible(), "完整窗口应重新显示");
         let r = ui.get_resources().row_data(1).expect("内存卡片");
         assert!(!r.line.is_empty(), "回到完整模式后详情大图应立即补画");
@@ -308,7 +415,11 @@ const STEPS: &[Step] = &[
         click_settings(ui);
         assert_eq!(ui.get_page(), 2, "点设置按钮应进入设置页");
         // 在设置页里保存设置时记录的是这个页面。
-        assert_eq!(ui.get_page_before_settings(), 1, "应记下进入设置页之前的性能页");
+        assert_eq!(
+            ui.get_page_before_settings(),
+            1,
+            "应记下进入设置页之前的性能页"
+        );
         let d = ui.global::<SettingsData>();
         // 截图模式不读写设置文件，填一个示例路径展示页脚。
         d.set_settings_path(r"C:\Users\demo\AppData\Roaming\TaskManagerLite\settings.json".into());
@@ -347,18 +458,28 @@ const STEPS: &[Step] = &[
                 d.get_taskmgr_note(),
                 d.get_taskmgr_error()
             );
-            assert!(d.get_replace_taskmgr() != d.get_taskmgr_error(), "登记失败时开关应回到关闭并显示错误");
+            assert!(
+                d.get_replace_taskmgr() != d.get_taskmgr_error(),
+                "登记失败时开关应回到关闭并显示错误"
+            );
         }
     }),
     // 滚到底：接管任务管理器的状态说明与设置文件路径。
     ("61b-设置页底部-深色-760x600", |ui| {
         let at = LogicalPosition::new(380.0, 300.0);
-        ui.window().dispatch_event(WindowEvent::PointerScrolled { position: at, delta_x: 0.0, delta_y: -3000.0 });
+        ui.window().dispatch_event(WindowEvent::PointerScrolled {
+            position: at,
+            delta_x: 0.0,
+            delta_y: -3000.0,
+        });
     }),
     // 再点一次设置按钮回到进入之前的页面（性能页）。
     ("62-设置页返回-深色", |ui| {
         let need = ui.get_toolbar_min_width();
-        assert!(need <= 760.5, "760 宽设置页的工具栏最小宽度 {need} 超出窗口");
+        assert!(
+            need <= 760.5,
+            "760 宽设置页的工具栏最小宽度 {need} 超出窗口"
+        );
         resize(ui, 1080.0, 700.0);
         click_settings(ui);
         assert_eq!(ui.get_page(), 1, "再点设置按钮应回到性能页");
@@ -367,12 +488,22 @@ const STEPS: &[Step] = &[
 
 /// 点工具栏最右侧的设置按钮：右内边距 12，按钮 32×32，顶栏高 56。
 fn click_settings(ui: &AppWindow) {
-    let width = ui.window().size().to_logical(ui.window().scale_factor()).width;
+    let width = ui
+        .window()
+        .size()
+        .to_logical(ui.window().scale_factor())
+        .width;
     let at = LogicalPosition::new(width - 12.0 - 16.0, 28.0);
     let w = ui.window();
     w.dispatch_event(WindowEvent::PointerMoved { position: at });
-    w.dispatch_event(WindowEvent::PointerPressed { position: at, button: PointerEventButton::Left });
-    w.dispatch_event(WindowEvent::PointerReleased { position: at, button: PointerEventButton::Left });
+    w.dispatch_event(WindowEvent::PointerPressed {
+        position: at,
+        button: PointerEventButton::Left,
+    });
+    w.dispatch_event(WindowEvent::PointerReleased {
+        position: at,
+        button: PointerEventButton::Left,
+    });
     w.dispatch_event(WindowEvent::PointerExited);
 }
 
@@ -388,10 +519,16 @@ fn with_mini(f: impl FnOnce(&MiniWindow)) {
 /// 迷你窗口：宽 250，恰好容纳四张卡片；迷你模式下只画卡片迷你图，不画详情大图。
 fn check_mini(m: &MiniWindow) {
     let size = m.window().size().to_logical(m.window().scale_factor());
-    assert!((size.width - 250.0).abs() < 1.0, "迷你窗口宽应为 250：{size:?}");
+    assert!(
+        (size.width - 250.0).abs() < 1.0,
+        "迷你窗口宽应为 250：{size:?}"
+    );
     let rows = m.get_resources();
-    assert_eq!(rows.row_count(), 4, "迷你窗口应显示 4 张资源卡片");
-    assert!((180.0..400.0).contains(&size.height), "迷你窗口高度异常：{size:?}");
+    assert!(rows.row_count() >= 3, "迷你窗口应显示基础资源及全部物理磁盘卡片");
+    assert!(
+        (180.0..=600.0).contains(&size.height),
+        "迷你窗口高度异常：{size:?}"
+    );
     for r in rows.iter() {
         assert!(!r.mini_line.is_empty(), "{} 卡片应有迷你曲线", r.title);
         assert!(r.line.is_empty(), "迷你模式下不应画 {} 的详情大图", r.title);
@@ -423,24 +560,41 @@ fn toolbar(ui: &AppWindow, page: i32, elevated: bool, dark: bool, width: f32) {
 
 /// 把指针移到收起后的提权按钮中心：顶栏高 56，右内边距 12，按钮 32×32，右边还有设置按钮（32 + 间距 8）。
 fn hover_compact_elevate(ui: &AppWindow) {
-    assert!(ui.get_toolbar_elevate_compact(), "900 宽时提权按钮应已收成图标");
-    let width = ui.window().size().to_logical(ui.window().scale_factor()).width;
+    assert!(
+        ui.get_toolbar_elevate_compact(),
+        "900 宽时提权按钮应已收成图标"
+    );
+    let width = ui
+        .window()
+        .size()
+        .to_logical(ui.window().scale_factor())
+        .width;
     let at = LogicalPosition::new(width - 12.0 - 40.0 - 16.0, 28.0);
-    ui.window().dispatch_event(WindowEvent::PointerMoved { position: at });
+    ui.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: at });
 }
 
 /// 在第一个标题行上右键：不能选中任何行，也不能弹出进程菜单（弹出会阻塞，截图流程会卡住）。
 fn right_click_header_does_not_select(ui: &AppWindow) {
     let rows = ui.get_rows();
-    assert!(rows.row_data(0).is_some_and(|r| r.header), "第一行应是“应用”标题行");
+    assert!(
+        rows.row_data(0).is_some_and(|r| r.header),
+        "第一行应是“应用”标题行"
+    );
     let before = ui.get_selected();
     let w = ui.window();
     // 顶栏 56 + 表头 34 + 半行 15；在名称列和展开箭头位置各右键一次。
     for x in [120.0, 15.0] {
         let at = LogicalPosition::new(x, 56.0 + 34.0 + 15.0);
         w.dispatch_event(WindowEvent::PointerMoved { position: at });
-        w.dispatch_event(WindowEvent::PointerPressed { position: at, button: PointerEventButton::Right });
-        w.dispatch_event(WindowEvent::PointerReleased { position: at, button: PointerEventButton::Right });
+        w.dispatch_event(WindowEvent::PointerPressed {
+            position: at,
+            button: PointerEventButton::Right,
+        });
+        w.dispatch_event(WindowEvent::PointerReleased {
+            position: at,
+            button: PointerEventButton::Right,
+        });
     }
     assert_eq!(ui.get_selected(), before, "右键标题行不应改变选中项");
     eprintln!("右键标题行：未选中、未弹出菜单");
@@ -449,7 +603,9 @@ fn right_click_header_does_not_select(ui: &AppWindow) {
 /// 第二个标题行（“后台进程”）在列表中的下标。
 fn group_boundary(ui: &AppWindow) -> usize {
     let rows = ui.get_rows();
-    (1..rows.row_count()).find(|&i| rows.row_data(i).is_some_and(|r| r.header)).unwrap_or(1)
+    (1..rows.row_count())
+        .find(|&i| rows.row_data(i).is_some_and(|r| r.header))
+        .unwrap_or(1)
 }
 
 /// 向窗口发送一次按键。
@@ -472,12 +628,12 @@ fn use_demo_cores(ui: &AppWindow, cores: usize) {
     ui.global::<CpuData>().set_per_core(true);
 }
 
-
 /// `--menu-shot <过滤>[:pid][:header]:<dark|light>`：切换主题、过滤并（`:pid` 时按 PID 升序，PID 4 排第一）
 /// 在第一行右键，弹出原生右键菜单；`:header` 时先显示用户名、线程两列，再在“名称”列标题上右键弹出列选择菜单。原生菜单是系统窗口，`take_snapshot` 截不到，
 /// 由 `scripts/menu-screenshots.ps1` 从外部抓取，所以这里不退出，菜单会一直阻塞到被脚本结束进程。
 pub fn run_menu(ui: &AppWindow, spec: &str, warmup: Duration) {
-    ui.window().set_position(PhysicalPosition::new(-6000, -6000));
+    ui.window()
+        .set_position(PhysicalPosition::new(-6000, -6000));
     let parts: Vec<&str> = spec.split(':').collect();
     let filter = parts.first().copied().unwrap_or("").to_string();
     let by_pid = parts.contains(&"pid");
@@ -503,11 +659,24 @@ pub fn run_menu(ui: &AppWindow, spec: &str, warmup: Duration) {
         // 等列表布局完成后，在第一行名称列上右键（顶栏 56 + 表头 34 + 半行 15）。
         Timer::single_shot(Duration::from_millis(500), move || {
             let Some(ui) = weak.upgrade() else { return };
-            let at = LogicalPosition::new(120.0, if header { 56.0 + 17.0 } else { 56.0 + 34.0 + 15.0 });
+            let at = LogicalPosition::new(
+                120.0,
+                if header {
+                    56.0 + 17.0
+                } else {
+                    56.0 + 34.0 + 15.0
+                },
+            );
             let w = ui.window();
             w.dispatch_event(WindowEvent::PointerMoved { position: at });
-            w.dispatch_event(WindowEvent::PointerPressed { position: at, button: PointerEventButton::Right });
-            w.dispatch_event(WindowEvent::PointerReleased { position: at, button: PointerEventButton::Right });
+            w.dispatch_event(WindowEvent::PointerPressed {
+                position: at,
+                button: PointerEventButton::Right,
+            });
+            w.dispatch_event(WindowEvent::PointerReleased {
+                position: at,
+                button: PointerEventButton::Right,
+            });
         });
     });
 }
@@ -517,10 +686,14 @@ pub fn run_menu(ui: &AppWindow, spec: &str, warmup: Duration) {
 /// 自动验收，免去点击原生菜单。末尾可加 `:group` 先切到分组视图（验证分组视图里选中的是正确的进程）。
 /// 动作执行后不退出，由脚本检查结果并结束进程。
 pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
-    ui.window().set_position(PhysicalPosition::new(-6000, -6000));
+    ui.window()
+        .set_position(PhysicalPosition::new(-6000, -6000));
     let parts: Vec<&str> = spec.split(':').collect();
     let action = parts.first().copied().unwrap_or("").to_string();
-    let pid = parts.get(1).and_then(|p| p.parse::<i32>().ok()).unwrap_or(0);
+    let pid = parts
+        .get(1)
+        .and_then(|p| p.parse::<i32>().ok())
+        .unwrap_or(0);
     let group = parts.contains(&"group");
     let weak = ui.as_weak();
     Timer::single_shot(warmup, move || {
@@ -536,7 +709,9 @@ pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
         Timer::single_shot(Duration::from_millis(settle), move || {
             let Some(ui) = weak.upgrade() else { return };
             let rows = ui.get_rows();
-            let Some(i) = (0..rows.row_count()).find(|&i| rows.row_data(i).is_some_and(|r| r.pid == pid)) else {
+            let Some(i) =
+                (0..rows.row_count()).find(|&i| rows.row_data(i).is_some_and(|r| r.pid == pid))
+            else {
                 eprintln!("列表中没有 pid {pid}");
                 return;
             };
@@ -560,12 +735,22 @@ fn drag(ui: &AppWindow, x: f32, dx: f32) {
     let at = |x: f32| LogicalPosition::new(x, y);
     // 抓在列边缘右侧 2 像素处，落在 8 像素宽的拖动区内。
     let start = x + 2.0;
-    w.dispatch_event(WindowEvent::PointerMoved { position: at(start) });
-    w.dispatch_event(WindowEvent::PointerPressed { position: at(start), button: PointerEventButton::Left });
+    w.dispatch_event(WindowEvent::PointerMoved {
+        position: at(start),
+    });
+    w.dispatch_event(WindowEvent::PointerPressed {
+        position: at(start),
+        button: PointerEventButton::Left,
+    });
     for i in 1..=6 {
-        w.dispatch_event(WindowEvent::PointerMoved { position: at(start + dx * i as f32 / 6.0) });
+        w.dispatch_event(WindowEvent::PointerMoved {
+            position: at(start + dx * i as f32 / 6.0),
+        });
     }
-    w.dispatch_event(WindowEvent::PointerReleased { position: at(start + dx), button: PointerEventButton::Left });
+    w.dispatch_event(WindowEvent::PointerReleased {
+        position: at(start + dx),
+        button: PointerEventButton::Left,
+    });
 }
 
 fn resize(ui: &AppWindow, width: f32, height: f32) {
@@ -574,7 +759,8 @@ fn resize(ui: &AppWindow, width: f32, height: f32) {
 
 /// 先采样一段时间让曲线有内容，再逐步截图，最后退出。
 pub fn run(ui: &AppWindow, dir: PathBuf, warmup: Duration) {
-    ui.window().set_position(PhysicalPosition::new(-6000, -6000));
+    ui.window()
+        .set_position(PhysicalPosition::new(-6000, -6000));
     ui.invoke_set_dark(true);
     ui.set_interval_index(0);
     ui.invoke_interval_changed(0);
@@ -602,18 +788,29 @@ fn step(weak: slint::Weak<AppWindow>, dir: Rc<PathBuf>, i: usize) {
             }
         });
         // 工具栏的最小宽度超过窗口宽度时，右侧控件会被窗口裁掉。
-        let width = ui.window().size().to_logical(ui.window().scale_factor()).width;
+        let width = ui
+            .window()
+            .size()
+            .to_logical(ui.window().scale_factor())
+            .width;
         let need = ui.get_toolbar_min_width();
         if need > width + 0.5 {
             crate::CONTROLLER.with(|c| {
                 if let Some(c) = c.borrow().as_ref() {
-                    c.log.borrow_mut().line(format!("截图步骤 {name}：工具栏最小宽度 {need} 超出窗口宽度 {width}"));
+                    c.log.borrow_mut().line(format!(
+                        "截图步骤 {name}：工具栏最小宽度 {need} 超出窗口宽度 {width}"
+                    ));
                 }
             });
             panic!("截图步骤 {name}：工具栏最小宽度 {need} 超出窗口宽度 {width}");
         }
         // 迷你模式下截迷你窗口。
-        let mini = crate::CONTROLLER.with(|c| c.borrow().as_ref().filter(|c| c.is_mini()).and_then(|c| c.mini().map(|m| m.as_weak())));
+        let mini = crate::CONTROLLER.with(|c| {
+            c.borrow()
+                .as_ref()
+                .filter(|c| c.is_mini())
+                .and_then(|c| c.mini().map(|m| m.as_weak()))
+        });
         let snapshot = match mini.and_then(|m| m.upgrade()) {
             Some(m) => m.window().take_snapshot(),
             None => ui.window().take_snapshot(),

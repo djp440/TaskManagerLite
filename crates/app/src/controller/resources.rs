@@ -29,7 +29,14 @@ pub struct Instance {
 }
 
 impl Instance {
-    fn new(id: &str, kind: ResourceKind, tint: ResourceTint, title: &str, caption: &str, labels: &[&str]) -> Self {
+    fn new(
+        id: &str,
+        kind: ResourceKind,
+        tint: ResourceTint,
+        title: &str,
+        caption: &str,
+        labels: &[&str],
+    ) -> Self {
         Self {
             id: id.into(),
             kind,
@@ -45,17 +52,73 @@ impl Instance {
 /// 后续按物理磁盘、网卡、GPU 拆分时，在这里按设备枚举结果生成。
 pub fn summary_instances() -> Vec<Instance> {
     vec![
-        Instance::new(CPU, ResourceKind::Cpu, ResourceTint::Cpu, "CPU", "% 利用率", &[]),
-        Instance::new(MEMORY, ResourceKind::Memory, ResourceTint::Memory, "内存", "内存使用量", &[]),
-        Instance::new(DISK, ResourceKind::Disk, ResourceTint::Disk, "磁盘", "% 活动时间", &[
-            "活动时间",
-            "读取速度",
-            "写入速度",
-        ]),
-        Instance::new(NETWORK, ResourceKind::Network, ResourceTint::Network, "网络", "吞吐量（接收 + 发送）", &[
-            "接收", "发送",
-        ]),
+        Instance::new(
+            CPU,
+            ResourceKind::Cpu,
+            ResourceTint::Cpu,
+            "CPU",
+            "% 利用率",
+            &[],
+        ),
+        Instance::new(
+            MEMORY,
+            ResourceKind::Memory,
+            ResourceTint::Memory,
+            "内存",
+            "内存使用量",
+            &[],
+        ),
+        Instance::new(
+            DISK,
+            ResourceKind::Disk,
+            ResourceTint::Disk,
+            "磁盘",
+            "% 活动时间",
+            &["活动时间", "读取速度", "写入速度"],
+        ),
+        Instance::new(
+            NETWORK,
+            ResourceKind::Network,
+            ResourceTint::Network,
+            "网络",
+            "吞吐量（接收 + 发送）",
+            &["接收", "发送"],
+        ),
     ]
+}
+
+pub fn disk_id(number: u32) -> String {
+    format!("disk:{number}")
+}
+
+pub fn device_instances(disks: &[tml_core::PhysicalDisk]) -> Vec<Instance> {
+    let mut result = summary_instances();
+    result.retain(|i| i.id != DISK);
+    for (offset, disk) in disks.iter().enumerate() {
+        let mounts = disk
+            .volumes
+            .iter()
+            .map(|v| v.mount.trim_end_matches('\\'))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let title = if mounts.is_empty() {
+            format!("磁盘 {}", disk.number)
+        } else {
+            format!("磁盘 {} ({mounts})", disk.number)
+        };
+        result.insert(
+            2 + offset,
+            Instance::new(
+                &disk_id(disk.number),
+                ResourceKind::Disk,
+                ResourceTint::Disk,
+                &title,
+                "% 活动时间",
+                &["活动时间", "平均响应时间", "读取速度", "写入速度"],
+            ),
+        );
+    }
+    result
 }
 
 /// 把界面模型从旧 id 序列变成新 id 序列所需的行编辑，按顺序依次执行。
@@ -109,7 +172,10 @@ pub struct ResourceSet {
 
 impl ResourceSet {
     pub fn new(instances: Vec<Instance>) -> Self {
-        let mut set = Self { selected: CPU.into(), ..Default::default() };
+        let mut set = Self {
+            selected: CPU.into(),
+            ..Default::default()
+        };
         set.update(instances);
         set
     }
@@ -159,7 +225,10 @@ impl ResourceSet {
 
     /// 选中项在当前列表中的下标；列表里没有时为 0。
     pub fn selected_index(&self) -> usize {
-        self.instances.iter().position(|i| i.id == self.selected).unwrap_or(0)
+        self.instances
+            .iter()
+            .position(|i| i.id == self.selected)
+            .unwrap_or(0)
     }
 
     /// 选中指定实例。实例不存在时保持原选中项并返回 false。
@@ -193,6 +262,25 @@ impl ResourceSet {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn physical_disks_replace_summary_and_hotplug_preserves_selection() {
+        let a = tml_core::PhysicalDisk {
+            number: 0,
+            ..Default::default()
+        };
+        let b = tml_core::PhysicalDisk {
+            number: 2,
+            ..Default::default()
+        };
+        let mut set = super::ResourceSet::new(super::device_instances(&[a.clone(), b.clone()]));
+        assert_eq!(set.ids(), ["cpu", "memory", "disk:0", "disk:2", "network"]);
+        assert!(set.select("disk:2"));
+        set.update(super::device_instances(&[a.clone()]));
+        assert_eq!(set.selected(), "cpu");
+        set.update(super::device_instances(&[a, b]));
+        assert_eq!(set.selected(), "disk:2");
+        assert_eq!(super::device_instances(&[]).len(), 3);
+    }
     use super::*;
 
     fn inst(id: &str) -> Instance {
@@ -228,14 +316,26 @@ mod tests {
 
     #[test]
     fn diff_append_and_insert() {
-        assert_eq!(diff_ids(&ids(&["cpu"]), &ids(&["cpu", "disk0"])), vec![Edit::Insert(1)]);
-        assert_eq!(diff_ids(&ids(&["cpu", "net"]), &ids(&["cpu", "disk0", "net"])), vec![Edit::Insert(1)]);
+        assert_eq!(
+            diff_ids(&ids(&["cpu"]), &ids(&["cpu", "disk0"])),
+            vec![Edit::Insert(1)]
+        );
+        assert_eq!(
+            diff_ids(&ids(&["cpu", "net"]), &ids(&["cpu", "disk0", "net"])),
+            vec![Edit::Insert(1)]
+        );
     }
 
     #[test]
     fn diff_remove_keeps_other_rows() {
-        assert_eq!(diff_ids(&ids(&["cpu", "disk0", "net"]), &ids(&["cpu", "net"])), vec![Edit::Remove(1)]);
-        assert_eq!(diff_ids(&ids(&["cpu", "disk0"]), &ids(&["cpu"])), vec![Edit::Remove(1)]);
+        assert_eq!(
+            diff_ids(&ids(&["cpu", "disk0", "net"]), &ids(&["cpu", "net"])),
+            vec![Edit::Remove(1)]
+        );
+        assert_eq!(
+            diff_ids(&ids(&["cpu", "disk0"]), &ids(&["cpu"])),
+            vec![Edit::Remove(1)]
+        );
     }
 
     #[test]
