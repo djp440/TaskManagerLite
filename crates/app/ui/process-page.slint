@@ -23,6 +23,20 @@ export global Columns {
     out property <ColumnLayout> eff: self.fit(self.available, self.name-min, self.pid, self.cpu, self.memory, self.disk);
 }
 
+// 右键菜单的状态与动作：菜单弹出前由 Rust 读取所选进程的路径与命令行，决定各项是否可用。
+export global ProcessMenu {
+    in-out property <bool> can-open-location;
+    in-out property <bool> can-copy-path;
+    in-out property <bool> can-copy-command-line;
+    in-out property <bool> can-show-properties;
+    callback opening();
+    callback open-location();
+    callback copy-path();
+    callback copy-command-line();
+    callback show-properties();
+    callback search-online();
+}
+
 component HeaderCell inherits Rectangle {
     in property <string> text;
     in property <bool> active;
@@ -116,7 +130,7 @@ component ProcRowView inherits Rectangle {
     height: Theme.row-height;
     background: root.selected ? Theme.selected : touch.has-hover ? Theme.hover : transparent;
 
-    ContextMenuArea {
+    menu := ContextMenuArea {
         width: 100%;
         height: 100%;
         Menu {
@@ -135,9 +149,60 @@ component ProcRowView inherits Rectangle {
                     root.end-tree();
                 }
             }
+
+            MenuSeparator {}
+
+            MenuItem {
+                title: @tr("打开文件位置");
+                enabled: ProcessMenu.can-open-location;
+                activated => {
+                    ProcessMenu.open-location();
+                }
+            }
+
+            MenuItem {
+                title: @tr("复制路径");
+                enabled: ProcessMenu.can-copy-path;
+                activated => {
+                    ProcessMenu.copy-path();
+                }
+            }
+
+            MenuItem {
+                title: @tr("复制命令行");
+                enabled: ProcessMenu.can-copy-command-line;
+                activated => {
+                    ProcessMenu.copy-command-line();
+                }
+            }
+
+            MenuItem {
+                title: @tr("属性");
+                enabled: ProcessMenu.can-show-properties;
+                activated => {
+                    ProcessMenu.show-properties();
+                }
+            }
+
+            MenuSeparator {}
+
+            MenuItem {
+                title: @tr("在线搜索进程名");
+                activated => {
+                    ProcessMenu.search-online();
+                }
+            }
         }
 
         touch := TouchArea {
+            // TouchArea 会吞掉右键，所以由它在右键按下时选中该行、读取菜单状态并弹出菜单。
+            pointer-event(e) => {
+                if e.button == PointerEventButton.right && e.kind == PointerEventKind.down {
+                    root.select();
+                    ProcessMenu.opening();
+                    menu.show({ x: self.mouse-x, y: self.mouse-y });
+                }
+            }
             clicked => {
                 root.select();
             }
@@ -160,6 +225,17 @@ component ProcRowView inherits Rectangle {
                 width: 18px;
                 expander := TouchArea {
                     enabled: root.data.has-children;
+                    // 箭头区域叠在整行的 TouchArea 之上，会吞掉右键，这里同样弹出菜单（坐标换算到整行）。
+                    pointer-event(e) => {
+                        if e.button == PointerEventButton.right && e.kind == PointerEventKind.down {
+                            root.select();
+                            ProcessMenu.opening();
+                            menu.show({
+                                x: self.absolute-position.x - touch.absolute-position.x + self.mouse-x,
+                                y: self.absolute-position.y - touch.absolute-position.y + self.mouse-y,
+                            });
+                        }
+                    }
                     clicked => {
                         root.select();
                         root.toggle();
@@ -170,6 +246,14 @@ component ProcRowView inherits Rectangle {
                     direction: root.data.expanded ? 0 : 2;
                     stroke: expander.has-hover ? Palette.foreground : Theme.subtle-text;
                 }
+            }
+
+            Image {
+                y: (parent.height - self.height) / 2;
+                width: 16px;
+                height: 16px;
+                source: root.data.icon;
+                image-fit: contain;
             }
 
             Text {

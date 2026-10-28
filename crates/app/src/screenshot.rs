@@ -6,9 +6,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use slint::platform::{PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, LogicalSize, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
+use slint::{ComponentHandle, LogicalPosition, Model, LogicalSize, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
 
-use crate::{AppWindow, Columns, CpuData};
+use crate::{AppWindow, Columns, CpuData, ProcessMenu};
 
 type Step = (&'static str, fn(&AppWindow));
 
@@ -88,36 +88,60 @@ const STEPS: &[Step] = &[
     }),
     ("14-性能内存-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
     ("15-性能内存-深色-默认尺寸", |ui| resize(ui, 1040.0, 700.0)),
-    // CPU 页：整体曲线与逻辑处理器网格在最小尺寸、中等尺寸下的表现（逐核曲线用演示数据，便于核对形态）。
-    ("16-性能CPU整体-深色-最小尺寸760x480", |ui| {
+    // 进程图标：浏览器（有自己的图标）。依赖本机正在运行 chrome，没有时列表为空。
+    ("16-进程图标-chrome-深色", |ui| {
+        resize(ui, 1040.0, 700.0);
         ui.invoke_set_dark(true);
+        ui.set_page(0);
+        ui.set_filter("chrome".into());
+        ui.invoke_filter_edited("chrome".into());
+    }),
+    // 通用图标：没有图标资源（svchost、RuntimeBroker）或拿不到路径（System）的进程都显示同一个默认图标。
+    ("17-进程图标-默认图标-svchost-深色", |ui| {
+        ui.set_filter("svchost".into());
+        ui.invoke_filter_edited("svchost".into());
+    }),
+    ("18-进程图标-默认图标-RuntimeBroker-深色", |ui| {
+        ui.set_filter("RuntimeBroker".into());
+        ui.invoke_filter_edited("RuntimeBroker".into());
+    }),
+    ("19-进程图标-默认图标-System-深色", |ui| {
+        ui.set_filter("System".into());
+        ui.invoke_filter_edited("System".into());
+    }),
+    // CPU 页（编号接在进程图标步骤之后）：整体曲线与逻辑处理器网格在最小尺寸、中等尺寸下的表现（逐核曲线用演示数据，便于核对形态）。
+    ("20-性能CPU整体-深色-最小尺寸760x480", |ui| {
+        ui.invoke_set_dark(true);
+        ui.set_filter("".into());
+        ui.invoke_filter_edited("".into());
         ui.set_page(1);
         ui.invoke_resource_selected("cpu".into());
         ui.global::<CpuData>().set_per_core(false);
         resize(ui, 760.0, 480.0);
     }),
-    ("17-性能CPU整体-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
-    ("18-性能CPU逻辑处理器-深色-最小尺寸760x480", |ui| {
+    ("21-性能CPU整体-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
+    ("22-性能CPU逻辑处理器-深色-最小尺寸760x480", |ui| {
         use_demo_cores(ui, 0);
         resize(ui, 760.0, 480.0);
     }),
-    ("19-性能CPU逻辑处理器-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
-    ("20-性能CPU逻辑处理器-浅色-最小尺寸760x480", |ui| {
+    ("23-性能CPU逻辑处理器-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
+    ("24-性能CPU逻辑处理器-浅色-最小尺寸760x480", |ui| {
         ui.invoke_set_dark(false);
         resize(ui, 760.0, 480.0);
     }),
-    ("21-性能CPU整体-浅色-900x600", |ui| {
+    ("25-性能CPU整体-浅色-900x600", |ui| {
         ui.global::<CpuData>().set_per_core(false);
         resize(ui, 900.0, 600.0);
     }),
     // 核数很多（假装 64 个逻辑处理器）：小窗口里小图保持最小高度、网格区滚动；大窗口里放得下就不滚动。
-    ("22-性能CPU64核-深色-最小尺寸760x480", |ui| {
+    ("26-性能CPU64核-深色-最小尺寸760x480", |ui| {
         ui.invoke_set_dark(true);
         use_demo_cores(ui, 64);
         resize(ui, 760.0, 480.0);
     }),
-    ("23-性能CPU64核-深色-1040x700", |ui| resize(ui, 1040.0, 700.0)),
+    ("27-性能CPU64核-深色-1040x700", |ui| resize(ui, 1040.0, 700.0)),
 ];
+
 
 /// 切到逻辑处理器网格，并让各核显示演示曲线：核 0 恒 100%（贴顶边的横线）、核 1 从 0 升到 100%
 /// （左下到右上的斜线）、核 2 方波、核 3 恒 50%、核 4 正弦……用来核对曲线是否按格子实际尺寸铺满。
@@ -129,6 +153,72 @@ fn use_demo_cores(ui: &AppWindow, cores: usize) {
         }
     });
     ui.global::<CpuData>().set_per_core(true);
+}
+
+
+/// `--menu-shot <过滤>[:pid]:<dark|light>`：切换主题、过滤并（`:pid` 时按 PID 升序，PID 4 排第一）
+/// 在第一行右键，弹出原生右键菜单。原生菜单是系统窗口，`take_snapshot` 截不到，
+/// 由 `scripts/menu-screenshots.ps1` 从外部抓取，所以这里不退出，菜单会一直阻塞到被脚本结束进程。
+pub fn run_menu(ui: &AppWindow, spec: &str, warmup: Duration) {
+    ui.window().set_position(PhysicalPosition::new(-6000, -6000));
+    let parts: Vec<&str> = spec.split(':').collect();
+    let filter = parts.first().copied().unwrap_or("").to_string();
+    let by_pid = parts.contains(&"pid");
+    let dark = !parts.contains(&"light");
+    let weak = ui.as_weak();
+    Timer::single_shot(warmup, move || {
+        let Some(ui) = weak.upgrade() else { return };
+        // 暂停采样，列表不再重排。
+        ui.set_interval_index(3);
+        ui.invoke_interval_changed(3);
+        ui.invoke_set_dark(dark);
+        ui.set_filter(filter.as_str().into());
+        ui.invoke_filter_edited(filter.as_str().into());
+        if by_pid {
+            ui.invoke_sort_by(1);
+        }
+        // 等列表布局完成后，在第一行名称列上右键（顶栏 56 + 表头 34 + 半行 15）。
+        Timer::single_shot(Duration::from_millis(500), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let at = LogicalPosition::new(120.0, 56.0 + 34.0 + 15.0);
+            let w = ui.window();
+            w.dispatch_event(WindowEvent::PointerMoved { position: at });
+            w.dispatch_event(WindowEvent::PointerPressed { position: at, button: PointerEventButton::Right });
+            w.dispatch_event(WindowEvent::PointerReleased { position: at, button: PointerEventButton::Right });
+        });
+    });
+}
+
+/// `--menu-action <动作>:<pid>`：选中指定 PID 的进程并直接触发一个右键菜单动作
+/// （`open-location`、`properties`、`copy-path`、`copy-command-line`），用于 `scripts/test-menu-actions.ps1`
+/// 自动验收，免去点击原生菜单。动作执行后不退出，由脚本检查结果并结束进程。
+pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
+    ui.window().set_position(PhysicalPosition::new(-6000, -6000));
+    let (action, pid) = spec.split_once(':').unwrap_or((spec, "0"));
+    let (action, pid) = (action.to_string(), pid.parse::<i32>().unwrap_or(0));
+    let weak = ui.as_weak();
+    Timer::single_shot(warmup, move || {
+        let Some(ui) = weak.upgrade() else { return };
+        ui.set_filter(pid.to_string().as_str().into());
+        ui.invoke_filter_edited(pid.to_string().as_str().into());
+        Timer::single_shot(Duration::from_millis(500), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let rows = ui.get_rows();
+            let Some(i) = (0..rows.row_count()).find(|&i| rows.row_data(i).is_some_and(|r| r.pid == pid)) else {
+                eprintln!("列表中没有 pid {pid}");
+                return;
+            };
+            ui.invoke_select(i as i32);
+            let menu = ui.global::<ProcessMenu>();
+            match action.as_str() {
+                "open-location" => menu.invoke_open_location(),
+                "properties" => menu.invoke_show_properties(),
+                "copy-path" => menu.invoke_copy_path(),
+                "copy-command-line" => menu.invoke_copy_command_line(),
+                other => eprintln!("未知动作 {other}"),
+            }
+        });
+    });
 }
 
 /// 在表头（y = 56 + 17）的 `x` 处按下并水平拖动 `dx` 逻辑像素。
