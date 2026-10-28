@@ -32,6 +32,10 @@ const UNRESTRICTED_FLAGS: [&str; 5] =
     ["--measure-startup", "--screenshot", "--menu-shot", "--menu-action", "--allow-multiple"];
 
 fn main() -> Result<(), slint::PlatformError> {
+    // 接管 Ctrl+Shift+Esc 的命令行开关（含提权子进程）：执行完直接退出，不创建窗口、不占单实例锁。
+    if let Some(code) = tml_core::run_cli(&std::env::args().collect::<Vec<_>>()) {
+        std::process::exit(code);
+    }
     // 单实例：已有实例则通知它把窗口带到前台，本进程直接退出。须在打开日志等之前完成。
     let mut instance = if std::env::args().any(|a| UNRESTRICTED_FLAGS.contains(&a.as_str())) {
         None
@@ -56,6 +60,16 @@ fn main() -> Result<(), slint::PlatformError> {
         (settings, Some(outcome))
     });
     log.line(format!("设置 {outcome:?} 窗口={:?}", loaded.window));
+    // 被 IFEO 重定向启动时，第一个参数是 taskmgr.exe 的路径（其余页签参数同理），本程序不使用它们。
+    if tml_core::launched_as_taskmgr_debugger(&std::env::args().collect::<Vec<_>>()) {
+        log.line("由 Taskmgr.exe 的 IFEO 重定向启动");
+    }
+    // 意愿为开启时核对登记是否仍指向本 exe（只读一个注册表值）；失效的处理入口在设置页。
+    if loaded.replace_taskmgr
+        && let Ok(exe) = std::env::current_exe()
+    {
+        log.line(format!("接管任务管理器 意愿=开 登记={:?}", tml_core::Ifeo::system().status(&exe)));
+    }
 
     let ui = AppWindow::new()?;
     if store.is_some() {
