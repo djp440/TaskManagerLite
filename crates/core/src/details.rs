@@ -170,6 +170,9 @@ pub struct StaticInfo {
     pub company: Option<String>,
 }
 
+/// 版本信息缓存的路径数上限。
+const VERSION_CACHE_CAP: usize = 2048;
+
 /// 后台读取 [`StaticInfo`]，并缓存跨进程共用的结果（账户名按 SID、版本信息按文件路径）。
 #[derive(Default)]
 pub struct StaticReader {
@@ -190,7 +193,13 @@ impl StaticReader {
         }
         let path = query_image_path(&h);
         let (description, company) = match &path {
-            Some(p) => self.versions.entry(p.clone()).or_insert_with(|| version_strings(p)).clone(),
+            Some(p) => {
+                // 按路径缓存，数量封顶：长期运行时不同路径的 exe 不会让缓存无限增长，清空后按需重读即可。
+                if self.versions.len() >= VERSION_CACHE_CAP && !self.versions.contains_key(p) {
+                    self.versions.clear();
+                }
+                self.versions.entry(p.clone()).or_insert_with(|| version_strings(p)).clone()
+            }
             None => (None, None),
         };
         let token = Token::open(&h);

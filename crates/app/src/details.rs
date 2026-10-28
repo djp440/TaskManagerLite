@@ -198,8 +198,12 @@ impl InfoCache {
     }
 }
 
-/// 后台读取线程。结果成批送回：一批请求读完后一次投递，界面只重建一次列表。
+/// 后台读取结果每读完这么多个进程投递一次。
+const CHUNK: usize = 32;
+
+/// 后台读取线程。结果分块送回：每读完 [`CHUNK`] 个进程投递一次，界面每块只重建一次列表。
 #[derive(Clone)]
+
 pub struct InfoWorker {
     tx: Sender<Vec<ProcessKey>>,
 }
@@ -213,8 +217,11 @@ impl InfoWorker {
             .spawn(move || {
                 let mut reader = StaticReader::default();
                 while let Ok(keys) = rx.recv() {
-                    let batch = keys.into_iter().map(|k| (k, reader.read(k))).collect();
-                    deliver(batch);
+                    // 分块投递：首次显示静态列时要读几百个进程，个别读取（网络路径上的版本资源、
+                    // 域账户名）可能很慢，不让它们拖住全部结果。
+                    for chunk in keys.chunks(CHUNK) {
+                        deliver(chunk.iter().map(|&k| (k, reader.read(k))).collect());
+                    }
                 }
             })
             .expect("无法创建详细信息线程");
