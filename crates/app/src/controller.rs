@@ -409,6 +409,9 @@ impl Controller {
 
     pub fn on_sample(&self, sample: Sample) {
         let now = Instant::now();
+        if let Some(ui) = self.ui.upgrade() {
+            ui.global::<Columns>().set_disk_accurate(sample.disk_source == tml_core::DiskSource::Etw);
+        }
         {
             let mut s = self.state.borrow_mut();
             let m = sample.system;

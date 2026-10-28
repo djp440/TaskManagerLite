@@ -8,6 +8,8 @@ export global Columns {
     in-out property <length> cpu: 76px;
     in-out property <length> memory: 108px;
     in-out property <length> disk: 108px;
+    // 进程磁盘速率是否来自 ETW 磁盘事件（准确）；否则是近似值，列头显示“≈”。
+    in-out property <bool> disk-accurate: false;
     out property <length> default-pid: 76px;
     out property <length> default-cpu: 76px;
     out property <length> default-memory: 108px;
@@ -476,7 +478,7 @@ export component ProcessPage inherits Rectangle {
                     reset => {
                         root.reset-column(4);
                     }
-                    text: @tr("磁盘");
+                    text: Columns.disk-accurate ? @tr("磁盘") : @tr("磁盘 ≈");
                     active: root.sort-key == 4;
                     descending: root.sort-descending;
                     clicked => {
