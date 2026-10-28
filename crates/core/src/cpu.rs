@@ -2,19 +2,27 @@
 
 use std::sync::Arc;
 
-use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessorPerformanceInformation};
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use std::ffi::c_void;
+use std::sync::OnceLock;
+
+use windows::Wdk::System::SystemInformation::{
+    NtQuerySystemInformation, SYSTEM_INFORMATION_CLASS, SystemProcessorPerformanceInformation,
+};
+use windows::Win32::Foundation::{ERROR_SUCCESS, NTSTATUS};
 use windows::Win32::System::Performance::{
     PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PdhAddEnglishCounterW, PdhCloseQuery,
     PdhCollectQueryData, PdhGetFormattedCounterValue, PdhOpenQueryW,
 };
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Power::{CallNtPowerInformation, PROCESSOR_POWER_INFORMATION, ProcessorInformation};
 use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW};
 use windows::Win32::System::SystemInformation::{
     GetLogicalProcessorInformationEx, GetTickCount64, RelationAll, RelationCache, RelationProcessorCore,
     RelationProcessorPackage, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
 };
-use windows::Win32::System::Threading::{GetActiveProcessorCount, IsProcessorFeaturePresent, PF_VIRT_FIRMWARE_ENABLED};
+use windows::Win32::System::Threading::{
+    GetActiveProcessorCount, GetActiveProcessorGroupCount, IsProcessorFeaturePresent, PF_VIRT_FIRMWARE_ENABLED,
+};
 use windows::core::{PCWSTR, w};
 
 const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
@@ -209,13 +217,57 @@ struct ProcessorPerformance {
     interrupt_count: u32,
 }
 
-/// 各逻辑处理器的累计时间 (空闲, 总计)，100ns 单位。
-fn core_times(buf: &mut Vec<ProcessorPerformance>) -> Vec<(u64, u64)> {
+/// `NtQuerySystemInformationEx` 的签名：`ntdll` 导出，`windows` crate 没有绑定，只在多处理器组机器上才解析。
+type NtQuerySystemInformationEx = unsafe extern "system" fn(
+    class: SYSTEM_INFORMATION_CLASS,
+    input: *const c_void,
+    input_len: u32,
+    output: *mut c_void,
+    output_len: u32,
+    returned: *mut u32,
+) -> NTSTATUS;
+
+fn nt_query_ex() -> Option<NtQuerySystemInformationEx> {
+    static F: OnceLock<Option<NtQuerySystemInformationEx>> = OnceLock::new();
+    *F.get_or_init(|| unsafe {
+        let ntdll = GetModuleHandleW(w!("ntdll.dll")).ok()?;
+        let f = GetProcAddress(ntdll, windows::core::s!("NtQuerySystemInformationEx"))?;
+        // SAFETY: 导出函数的签名即上面的类型。
+        Some(std::mem::transmute::<unsafe extern "system" fn() -> isize, NtQuerySystemInformationEx>(f))
+    })
+}
+
+/// 把各组各自读到的数据按组号顺序拼成逐核序列。
+///
+/// `group_cores[g]` 是第 g 组的逻辑处理器数；`read_group(g)` 返回该组读到的数据。
+/// 某组多返回的丢弃、少返回（读取失败）的用默认值补齐，使后面各组的核序号不错位。
+fn collect_groups<T: Clone + Default>(group_cores: &[u32], mut read_group: impl FnMut(u16) -> Vec<T>) -> Vec<T> {
+    let mut all = Vec::with_capacity(group_cores.iter().map(|&n| n as usize).sum());
+    for (g, &cores) in group_cores.iter().enumerate() {
+        let mut data = read_group(g as u16);
+        data.resize(cores as usize, T::default());
+        all.extend(data);
+    }
+    all
+}
+
+/// 读取一次 `SystemProcessorPerformanceInformation`。`group` 为 `None` 时用普通接口（只含调用线程所在组），
+/// 否则用 `Ex` 接口读取指定组。
+fn query_performance(buf: &mut Vec<ProcessorPerformance>, group: Option<u16>) -> Vec<(u64, u64)> {
+    let query_ex = group.and_then(|g| nt_query_ex().map(|f| (f, g)));
+    if group.is_some() && query_ex.is_none() {
+        return Vec::new();
+    }
     loop {
         let byte_len = (buf.len() * size_of::<ProcessorPerformance>()) as u32;
         let mut returned = 0u32;
         let status = unsafe {
-            NtQuerySystemInformation(SystemProcessorPerformanceInformation, buf.as_mut_ptr().cast(), byte_len, &mut returned)
+            match query_ex {
+                Some((f, g)) => {
+                    f(SystemProcessorPerformanceInformation, (&g as *const u16).cast(), 2, buf.as_mut_ptr().cast(), byte_len, &mut returned)
+                }
+                None => NtQuerySystemInformation(SystemProcessorPerformanceInformation, buf.as_mut_ptr().cast(), byte_len, &mut returned),
+            }
         };
         if status.0 == STATUS_INFO_LENGTH_MISMATCH || (buf.is_empty() && status.is_ok()) {
             let want = (returned as usize).div_ceil(size_of::<ProcessorPerformance>()).max(buf.len() * 2).max(16);
@@ -231,6 +283,18 @@ fn core_times(buf: &mut Vec<ProcessorPerformance>) -> Vec<(u64, u64)> {
             .map(|p| (p.idle_time.max(0) as u64, (p.kernel_time + p.user_time).max(0) as u64))
             .collect();
     }
+}
+
+/// 各逻辑处理器的累计时间 (空闲, 总计)，100ns 单位。
+///
+/// 只有一个处理器组时走原来的单次调用；超过 64 个逻辑处理器（多个组）时按组读取后拼接。
+fn core_times(buf: &mut Vec<ProcessorPerformance>) -> Vec<(u64, u64)> {
+    let groups = unsafe { GetActiveProcessorGroupCount() };
+    if groups <= 1 {
+        return query_performance(buf, None);
+    }
+    let group_cores: Vec<u32> = (0..groups).map(|g| unsafe { GetActiveProcessorCount(g) }).collect();
+    collect_groups(&group_cores, |g| query_performance(buf, Some(g)))
 }
 
 /// 两次累计时间做差得到各核占用（0–100）。核数变化（热插拔）时按新核数重算，缺基线的核记 0。
@@ -364,6 +428,52 @@ mod tests {
         assert!(usage_between(&[(0, 0)], &[]).is_empty());
     }
 
+    /// 模拟按组读取：第 g 组每个核的数据 = (组号 * 1000 + 组内序号)。
+    fn fake_group(g: u16, n: usize) -> Vec<u32> {
+        (0..n as u32).map(|i| u32::from(g) * 1000 + i).collect()
+    }
+
+    #[test]
+    fn collect_groups_single_group_is_passthrough() {
+        let all = collect_groups(&[12], |g| fake_group(g, 12));
+        assert_eq!(all, fake_group(0, 12));
+    }
+
+    #[test]
+    fn collect_groups_concatenates_uneven_groups_in_order() {
+        // 2 组核数不等（如 64 + 40）：先第 0 组再第 1 组，序号连续。
+        let counts = [64, 40];
+        let all = collect_groups(&counts, |g| fake_group(g, counts[g as usize] as usize));
+        assert_eq!(all.len(), 104);
+        assert_eq!(all[63], 63);
+        assert_eq!(all[64], 1000);
+        assert_eq!(all[103], 1039);
+        // 三组、含空组也不错位。
+        let all = collect_groups(&[2, 0, 3], |g| fake_group(g, [2, 0, 3][g as usize]));
+        assert_eq!(all, vec![0, 1, 2000, 2001, 2002]);
+    }
+
+    #[test]
+    fn collect_groups_pads_failed_group_and_truncates_extra() {
+        // 第 0 组读取失败（空）：补默认值，第 1 组仍在 3.. 位置；第 1 组多返回的丢弃。
+        let all = collect_groups(&[3, 2], |g| if g == 0 { Vec::new() } else { fake_group(g, 5) });
+        assert_eq!(all, vec![0, 0, 0, 1000, 1001]);
+        // 少返回也补齐。
+        let all = collect_groups(&[4, 2], |g| fake_group(g, if g == 0 { 1 } else { 2 }));
+        assert_eq!(all, vec![0, 0, 0, 0, 1000, 1001]);
+        assert!(collect_groups::<u32>(&[], |_| vec![1]).is_empty());
+    }
+
+    #[test]
+    fn collect_groups_queries_each_group_once_in_order() {
+        let mut seen = Vec::new();
+        collect_groups(&[1, 1, 1], |g| {
+            seen.push(g);
+            vec![0u8]
+        });
+        assert_eq!(seen, vec![0, 1, 2]);
+    }
+
     #[test]
     fn real_core_times_match_logical_count() {
         let mut buf = Vec::new();
@@ -371,6 +481,18 @@ mod tests {
         let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
         assert_eq!(times.len(), logical);
         assert!(times.iter().all(|&(idle, total)| total >= idle && total > 0));
+    }
+
+    #[test]
+    fn ex_query_for_group_zero_matches_plain_query() {
+        // 单组机器上，Ex 接口读第 0 组应与普通接口返回同样数量的核（验证动态解析的调用约定）。
+        let mut buf = Vec::new();
+        let plain = query_performance(&mut buf, None);
+        let ex = query_performance(&mut buf, Some(0));
+        assert_eq!(ex.len(), plain.len());
+        assert!(ex.iter().all(|&(idle, total)| total >= idle && total > 0));
+        // 不存在的组读不到数据，返回空而不是 panic。
+        assert!(query_performance(&mut buf, Some(60)).is_empty());
     }
 
     #[test]
