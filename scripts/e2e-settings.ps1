@@ -1,5 +1,5 @@
 # 设置持久化端到端验收：用临时 TML_SETTINGS_DIR 写入非默认设置，启动 exe，检查窗口位置/大小被应用，
-# 再用 WM_CLOSE 优雅关闭，检查设置文件被写回；另测损坏文件、显示器之外的位置、开发模式不碰设置文件。
+# 再用 WM_CLOSE 优雅关闭，检查设置文件被写回；另测损坏文件、显示器之外的位置、窗口置顶、开发模式不碰设置文件。
 # 只结束自己启动的进程。用法：pwsh scripts/e2e-settings.ps1 [-Exe target/release/TaskManagerLite.exe]
 param([string]$Exe = "$PSScriptRoot/../target/release/TaskManagerLite.exe")
 
@@ -18,6 +18,7 @@ public static class Win {
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int index);
 }
 '@
 [void][Win]::SetProcessDPIAware()
@@ -207,6 +208,31 @@ try {
     Close-App $app
     Check ((Get-Item $settingsFile).Length -lt 4096) '退出后已写回正常大小的设置'
     Check (@(Get-ChildItem $dir -Filter *.tmp).Count -eq 0) '没有残留临时文件'
+
+    '== 5g. 窗口置顶：按设置恢复，点击图钉切换，退出时写回 =='
+    $dir = New-Dir 'pin'
+    $settingsFile = Join-Path $dir 'settings.json'
+    # 进程页、800 宽：工具栏处于最窄档，提权按钮（未提权时）收成 32px 图标，图钉在它左侧。
+    '{ "window": { "x": 140, "y": 110, "width": 800, "height": 560, "maximized": false }, "page": 0, "always_on_top": true }' | Set-Content -Encoding utf8 $settingsFile
+    $topmost = { param($a) ([Win]::GetWindowLong($a.Handle, -20) -band 0x8) -ne 0 } # GWL_EXSTYLE, WS_EX_TOPMOST
+    $app = Start-App $dir
+    Check (& $topmost $app) '设置 always_on_top = true 时窗口置顶'
+    $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $s = Scale $app
+    $w = Window-State $app
+    $px = [int]($w.W - ($(if ($elevated) { 12 + 16 } else { 12 + 32 + 8 + 16 }) * $s))
+    $py = [int](28 * $s)
+    $lp = [IntPtr](($py -shl 16) -bor $px)
+    [void][Win]::PostMessage($app.Handle, 0x0200, [IntPtr]::Zero, $lp) # WM_MOUSEMOVE
+    [void][Win]::PostMessage($app.Handle, 0x0201, [IntPtr]1, $lp)      # WM_LBUTTONDOWN
+    [void][Win]::PostMessage($app.Handle, 0x0202, [IntPtr]::Zero, $lp) # WM_LBUTTONUP
+    Start-Sleep -Milliseconds 500
+    Check (-not (& $topmost $app)) '点击图钉后取消置顶'
+    Close-App $app
+    Check ((Get-Content $settingsFile -Raw | ConvertFrom-Json).always_on_top -eq $false) '退出时写回 always_on_top = false'
+    $app = Start-App $dir
+    Check (-not (& $topmost $app)) '再次启动时不置顶'
+    Close-App $app
 
     '== 6. 开发模式（--measure-startup）不读写设置文件 =='
     $dir = New-Dir 'dev'
