@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::apps::app_pids;
 use crate::control::is_critical;
+use crate::cpu::{CpuProbe, CpuSample};
 use crate::memory::{MemoryHardware, MemoryStatus, read_hardware, read_status};
 use crate::nt::ProcessQuery;
 use crate::snapshot::{Baseline, ProcessKey, ProcessSnapshot};
@@ -15,6 +16,7 @@ pub struct Sample {
     pub system: SystemMetrics,
     /// 应用进程的 PID（见 [`crate::apps`]）；未开启 [`Sampler::track_apps`] 时为 `None`。
     pub app_pids: Option<HashSet<u32>>,
+    pub cpu: CpuSample,
     /// 内存详情（组成、提交、内核池）。
     pub memory: MemoryStatus,
     /// 内存硬件信息（SMBIOS），只在读取完成的那次采样里出现一次。
@@ -33,6 +35,7 @@ pub struct Sampler {
     hardware_tried: bool,
     critical: HashMap<ProcessKey, bool>,
     track_apps: bool,
+    cpu_probe: CpuProbe,
 }
 
 impl Sampler {
@@ -65,6 +68,8 @@ impl Sampler {
         });
         // 只保留仍在运行的进程，避免缓存无限增长。
         self.critical = seen;
+
+        let cpu_detail = self.cpu_probe.sample(first, self.query.totals);
 
         // 内存只读一次，SystemMetrics 与 MemoryStatus 共用同一份数据。
         let memory_status = read_status(self.query.compressed_working_set);
@@ -110,6 +115,7 @@ impl Sampler {
                 net_recv,
                 net_send,
             },
+            cpu: cpu_detail,
             memory: memory_status,
             memory_hardware,
         }
