@@ -15,7 +15,7 @@ use crate::nt::RawProcess;
 use crate::snapshot::ProcessKey;
 use crate::system::filetime;
 
-struct OwnedHandle(HANDLE);
+pub(crate) struct OwnedHandle(HANDLE);
 
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
@@ -25,11 +25,11 @@ impl Drop for OwnedHandle {
     }
 }
 
-fn open(pid: u32, access: PROCESS_ACCESS_RIGHTS) -> windows::core::Result<OwnedHandle> {
+pub(crate) fn open(pid: u32, access: PROCESS_ACCESS_RIGHTS) -> windows::core::Result<OwnedHandle> {
     unsafe { OpenProcess(access, false, pid) }.map(OwnedHandle)
 }
 
-fn create_time(h: &OwnedHandle) -> Option<u64> {
+pub(crate) fn create_time(h: &OwnedHandle) -> Option<u64> {
     let mut t = [FILETIME::default(); 4];
     let [c, e, k, u] = &mut t;
     unsafe { GetProcessTimes(h.0, c, e, k, u) }.ok()?;
@@ -46,7 +46,7 @@ pub enum EndError {
 }
 
 /// 句柄指向的是否就是 `key` 这个进程，且仍在运行。
-fn is_alive(h: &OwnedHandle, key: ProcessKey) -> bool {
+pub(crate) fn is_alive(h: &OwnedHandle, key: ProcessKey) -> bool {
     const STILL_ACTIVE: u32 = 259;
     let mut code = 0u32;
     create_time(h) == Some(key.create_time)

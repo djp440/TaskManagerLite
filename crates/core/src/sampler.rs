@@ -6,10 +6,22 @@ use std::time::Instant;
 use crate::apps::app_pids;
 use crate::control::is_critical;
 use crate::cpu::{CpuProbe, CpuSample};
+use crate::diskio::rates;
+use crate::etw::{DiskTrace, TraceState};
 use crate::memory::{MemoryHardware, MemoryStatus, read_hardware, read_status};
 use crate::nt::ProcessQuery;
 use crate::snapshot::{Baseline, ProcessKey, ProcessSnapshot};
 use crate::system::{CpuTimes, DiskCounters, SystemMetrics, cpu_times, network_octets};
+
+/// 进程磁盘速率的来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiskSource {
+    /// 进程全部 I/O 字节数的差值（含管道、网络等非磁盘 I/O），偏高。
+    #[default]
+    Approximate,
+    /// ETW 磁盘事件按发起进程累计，与原生任务管理器同源。
+    Etw,
+}
 
 pub struct Sample {
     pub snapshot: ProcessSnapshot,
@@ -21,6 +33,8 @@ pub struct Sample {
     pub memory: MemoryStatus,
     /// 内存硬件信息（SMBIOS），只在读取完成的那次采样里出现一次。
     pub memory_hardware: Option<MemoryHardware>,
+    /// 本次 `snapshot` 里 `disk_rate` 的来源。
+    pub disk_source: DiskSource,
 }
 
 #[derive(Default)]
@@ -36,12 +50,22 @@ pub struct Sampler {
     critical: HashMap<ProcessKey, bool>,
     track_apps: bool,
     cpu_probe: CpuProbe,
+    etw: Option<DiskTrace>,
+    etw_tried: bool,
+    /// 上一次采样时 ETW 已在运行：此时累计窗口与采样间隔一致，数据可用。
+    etw_ready: bool,
+    etw_disabled: bool,
 }
 
 impl Sampler {
     /// 开启后每次采样都枚举窗口，找出应用进程（仅分组视图需要）。
     pub fn track_apps(&mut self, on: bool) {
         self.track_apps = on;
+    }
+
+    /// 不使用 ETW 磁盘事件，始终用近似速率（对比测量用）。
+    pub fn disable_etw(&mut self) {
+        self.etw_disabled = true;
     }
 
     pub fn sample(&mut self) -> Sample {
@@ -60,7 +84,7 @@ impl Sampler {
         let raw = self.query.query().unwrap_or_default();
         let mut seen = HashMap::with_capacity(raw.len());
         let cache = &mut self.critical;
-        let snapshot = self.baseline.advance(raw, total_delta, elapsed, &mut |r| {
+        let mut snapshot = self.baseline.advance(raw, total_delta, elapsed, &mut |r| {
             let key = ProcessKey { pid: r.pid, create_time: r.create_time };
             let c = *cache.entry(key).or_insert_with(|| is_critical(r));
             seen.insert(key, c);
@@ -68,6 +92,8 @@ impl Sampler {
         });
         // 只保留仍在运行的进程，避免缓存无限增长。
         self.critical = seen;
+
+        let disk_source = self.apply_etw_disk(first, &mut snapshot, elapsed);
 
         let cpu_detail = self.cpu_probe.sample(first, self.query.totals);
 
@@ -118,6 +144,37 @@ impl Sampler {
             cpu: cpu_detail,
             memory: memory_status,
             memory_hardware,
+            disk_source,
+        }
+    }
+
+    /// 有 ETW 会话时用按进程归属的磁盘字节数覆盖近似速率。会话在首次采样之后才启动，
+    /// 并且需要管理员权限；未提权、启动中或失败时保持近似值。
+    fn apply_etw_disk(&mut self, first: bool, snapshot: &mut ProcessSnapshot, elapsed: f64) -> DiskSource {
+        if !first && !self.etw_tried && !self.etw_disabled {
+            self.etw_tried = true;
+            self.etw = DiskTrace::start().ok();
+        }
+        let Some(trace) = &self.etw else { return DiskSource::Approximate };
+        match trace.state() {
+            TraceState::Starting => DiskSource::Approximate,
+            TraceState::Failed(_) => {
+                self.etw = None;
+                self.etw_ready = false;
+                DiskSource::Approximate
+            }
+            TraceState::Running => {
+                let bytes = trace.take();
+                // 刚就绪的这一次，累计窗口只有半截，丢弃；下一次起窗口与采样间隔一致。
+                if !std::mem::replace(&mut self.etw_ready, true) {
+                    return DiskSource::Approximate;
+                }
+                let rate = rates(&bytes, elapsed);
+                for p in &mut snapshot.processes {
+                    p.disk_rate = rate.get(&p.key.pid).copied().unwrap_or(0.0);
+                }
+                DiskSource::Etw
+            }
         }
     }
 }

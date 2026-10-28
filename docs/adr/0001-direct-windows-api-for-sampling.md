@@ -23,4 +23,4 @@ UI 只依赖 `core` 暴露的快照类型，不直接接触 Win32。
 
 ## 已知近似
 
-进程列表的“磁盘速率”取自 `SYSTEM_PROCESS_INFORMATION` 的 `ReadTransferCount + WriteTransferCount`。这是进程全部 I/O 字节数，也包括命名管道、部分网络等非磁盘 I/O，因此会比原生任务管理器（基于 ETW 磁盘事件）偏高。要精确统计需要 ETW 内核会话（需管理员权限）；这一项与“单进程网络”一起推迟到后续版本。
+进程列表的“磁盘速率”取自 `SYSTEM_PROCESS_INFORMATION` 的 `ReadTransferCount + WriteTransferCount`。这是进程全部 I/O 字节数，也包括命名管道、部分网络等非磁盘 I/O，因此会比原生任务管理器（基于 ETW 磁盘事件）偏高。要精确统计需要 ETW 内核会话（需管理员权限）。提权运行时已改用 ETW 磁盘事件，见 [ADR-0003](0003-etw-disk-io.md)；未提权时仍是这个近似值，列头显示“磁盘 ≈”。“单进程网络”仍推迟到后续版本。

@@ -32,6 +32,8 @@ const UNRESTRICTED_FLAGS: [&str; 5] =
     ["--measure-startup", "--screenshot", "--menu-shot", "--menu-action", "--allow-multiple"];
 
 fn main() -> Result<(), slint::PlatformError> {
+    // 函数以任何方式返回时停止本进程的 ETW 磁盘会话（崩溃与 panic 另有钩子兜底）。
+    let _trace_guard = tml_core::TraceGuard;
     // 单实例：已有实例则通知它把窗口带到前台，本进程直接退出。须在打开日志等之前完成。
     let mut instance = if std::env::args().any(|a| UNRESTRICTED_FLAGS.contains(&a.as_str())) {
         None
