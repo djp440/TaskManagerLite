@@ -18,7 +18,7 @@ impl Platform for Headless {
 }
 
 /// 两种页面、两种提权状态下，从最小宽度 760 到 1600 逐像素检查：工具栏最小宽度不超过窗口宽度
-/// （即没有控件被裁剪）；窗口变宽时档位只会放宽；1100 及以上完整显示品牌字样与提权按钮文字。
+/// （即没有控件被裁剪）；窗口变宽时档位只会放宽；默认宽度 1040 及以上完整显示品牌字样与提权按钮文字。
 #[test]
 fn toolbar_fits_every_width() {
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
@@ -45,7 +45,7 @@ fn toolbar_fits_every_width() {
                     }
                     None => stages.push((w, stage)),
                 }
-                if w >= 1100 {
+                if w >= 1040 {
                     assert_eq!(stage, (true, true), "页面 {page} 提权 {elevated} 宽 {w}：应完整显示");
                 }
             }
