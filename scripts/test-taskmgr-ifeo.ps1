@@ -13,6 +13,12 @@ $psKey = "HKCU:\$testKey"
 $failures = New-Object System.Collections.Generic.List[string]
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "tml-ifeo-$name"
 New-Item -ItemType Directory -Force $tmp | Out-Null
+# 登记前会检查 exe 及目录是否可被 Everyone/Users 写入；仓库构建目录的 ACL 因机器而异，
+# 所以改用用户临时目录（继承用户 profile 的 ACL，默认安全）里的副本做被测程序。
+$dirA = Join-Path $tmp 'a'
+New-Item -ItemType Directory -Force $dirA | Out-Null
+Copy-Item $exePath (Join-Path $dirA 'TaskManagerLite.exe')
+$exePath = Join-Path $dirA 'TaskManagerLite.exe'
 
 function Check($ok, $msg) {
     if ($ok) { "  通过：$msg" } else { "  失败：$msg"; $script:failures.Add($msg) }
@@ -62,9 +68,27 @@ try {
     Check ((Run $exePath @('--taskmgr-status')) -eq 10) '撤销后状态为未登记'
     Check ((Run $exePath @('--unregister-taskmgr')) -eq 0) '重复撤销是空操作'
 
+    "== 位置检查：exe 所在目录可被 Users 写入时拒绝登记（--force 绕过）"
+    $dirC = Join-Path $tmp 'c'
+    New-Item -ItemType Directory -Force $dirC | Out-Null
+    $exeC = Join-Path $dirC 'TaskManagerLite.exe'
+    Copy-Item $exePath $exeC
+    Check ((Run $exeC @('--register-taskmgr')) -eq 0) '默认安全的目录可以登记'
+    Check ((Run $exeC @('--unregister-taskmgr')) -eq 0) '撤销'
+    & icacls $dirC /grant '*S-1-5-32-545:M' | Out-Null
+    Check ($LASTEXITCODE -eq 0) '给目录授予 BUILTIN\Users 修改权限（仅用于测试）'
+    Check ((Run $exeC @('--register-taskmgr')) -eq 5) '目录可被 Users 写入：登记被拒绝（5）'
+    Check (-not (Test-Path $psKey)) '被拒绝时没有写注册表'
+    Check ((Run $exeC @('--register-taskmgr', '--force')) -eq 0) '加 --force 可绕过位置检查'
+    Check ((Run $exeC @('--taskmgr-status')) -eq 0) '强制登记后状态为已登记'
+    Check ((Run $exeC @('--unregister-taskmgr', '--elevated-child')) -eq 0) '带 --elevated-child 的撤销照常工作（子进程模式）'
+    Check (-not (Test-Path $psKey)) '撤销后键已清理'
+
     "== 非法测试键被拒绝，不会退回真实键"
     $env:TML_IFEO_TEST_KEY = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\Taskmgr.exe'
     Check ((Run $exePath @('--register-taskmgr')) -eq 1) '不以测试前缀开头的键被拒绝（退出码 1）'
+    $env:TML_IFEO_TEST_KEY = 'Software\TaskManagerLite-test\'
+    Check ((Run $exePath @('--register-taskmgr')) -eq 1) '只有前缀、没有名字的键被拒绝（退出码 1）'
     $env:TML_IFEO_TEST_KEY = $testKey
 
     "== 被 IFEO 重定向启动：第一个参数是 taskmgr.exe 路径，应被忽略且正常启动"

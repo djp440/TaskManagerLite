@@ -29,8 +29,8 @@ pub use shellops::{ShellError, reveal_in_explorer, search_online, search_url, sh
 pub use snapshot::{Process, ProcessKey, ProcessSnapshot};
 pub use system::SystemMetrics;
 pub use taskmgr::{
-    Ifeo, IfeoError, Registration, TEST_KEY_ENV, TEST_KEY_PREFIX, debugger_value, launched_as_taskmgr_debugger, run_cli,
-    set_replace_taskmgr,
+    Ifeo, IfeoError, Registration, TEST_KEY_ENV, TEST_KEY_PREFIX, check_install_location, debugger_value,
+    launched_as_taskmgr_debugger, run_cli, set_replace_taskmgr,
 };
 pub use view::{
     Group, GroupHeader, HEADER_INDEX, SortKey, Totals, ViewMode, ViewOptions, ViewRow, build_group_view, build_view, tree_from,

@@ -199,6 +199,81 @@ fn 撤销时保留键里的其他值() {
     assert!(k.key_exists(), "键里还有别的值，不能删键");
 }
 
+/// 往测试键的 Taskmgr.exe 子键里直接写一个任意类型的 Debugger 值。
+fn write_raw_debugger(k: &TestKey, ty: windows::Win32::System::Registry::REG_VALUE_TYPE, data: &[u8]) {
+    use windows::Win32::System::Registry::{
+        HKEY, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, RegCloseKey, RegCreateKeyExW, RegSetValueExW,
+    };
+    let sub = wide(&format!(r"{}\Taskmgr.exe", k.root));
+    unsafe {
+        let mut h = HKEY::default();
+        assert_eq!(
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(sub.as_ptr()),
+                None,
+                PCWSTR::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_SET_VALUE | KEY_WOW64_64KEY,
+                None,
+                &mut h,
+                None
+            )
+            .0,
+            0
+        );
+        let name = wide("Debugger");
+        assert_eq!(RegSetValueExW(h, PCWSTR(name.as_ptr()), None, ty, Some(data)).0, 0);
+        let _ = RegCloseKey(h);
+    }
+}
+
+fn utf16_bytes(s: &str) -> Vec<u8> {
+    wide(s).iter().flat_map(|c| c.to_le_bytes()).collect()
+}
+
+#[test]
+fn reg_expand_sz_的值展开后判断_有效的他人登记受保护() {
+    use windows::Win32::System::Registry::REG_EXPAND_SZ;
+    let k = TestKey::new("expand");
+    let ifeo = k.ifeo();
+    let exe = self_exe();
+    write_raw_debugger(&k, REG_EXPAND_SZ, &utf16_bytes(r#""%SystemRoot%\System32\cmd.exe""#));
+
+    // 展开后是存在的 cmd.exe：被他人有效占用，不加 force 不能覆盖也不能删除。
+    assert!(matches!(ifeo.status(&exe).unwrap(), Registration::OtherExe { exists: true, .. }));
+    assert!(matches!(ifeo.register(&exe, false), Err(IfeoError::Occupied(_))));
+    assert!(matches!(ifeo.unregister(&exe, false), Err(IfeoError::Occupied(_))));
+    assert_eq!(ifeo.debugger().unwrap().as_deref(), Some(r#""%SystemRoot%\System32\cmd.exe""#), "原值未被改动");
+
+    // 展开后指向不存在的文件：失效，可直接替换。
+    write_raw_debugger(&k, REG_EXPAND_SZ, &utf16_bytes(r#""%SystemRoot%\definitely-not-here\x.exe""#));
+    assert!(matches!(ifeo.status(&exe).unwrap(), Registration::OtherExe { exists: false, .. }));
+    ifeo.register(&exe, false).unwrap();
+    assert_eq!(ifeo.status(&exe).unwrap(), Registration::ThisExe);
+}
+
+#[test]
+fn 非字符串类型的_debugger_值按被占用处理() {
+    use windows::Win32::System::Registry::REG_DWORD;
+    let k = TestKey::new("dword");
+    let ifeo = k.ifeo();
+    let exe = self_exe();
+    write_raw_debugger(&k, REG_DWORD, &1u32.to_le_bytes());
+
+    match ifeo.status(&exe).unwrap() {
+        Registration::OtherExe { exists: true, debugger } => assert!(debugger.contains("类型 4"), "{debugger}"),
+        other => panic!("DWORD 值应按被占用处理：{other:?}"),
+    }
+    assert!(matches!(ifeo.register(&exe, false), Err(IfeoError::Occupied(_))));
+    assert!(matches!(ifeo.unregister(&exe, false), Err(IfeoError::Occupied(_))));
+    assert!(ifeo.debugger().unwrap().is_some(), "值仍在");
+
+    // force 才能覆盖。
+    ifeo.register(&exe, true).unwrap();
+    assert_eq!(ifeo.status(&exe).unwrap(), Registration::ThisExe);
+}
+
 #[test]
 fn 目标文件不存在时拒绝登记() {
     let k = TestKey::new("nofile");
