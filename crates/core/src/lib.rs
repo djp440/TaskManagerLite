@@ -29,6 +29,8 @@ pub use clipboard::{clipboard_text, set_clipboard_text};
 pub use control::{EndError, end_process, is_elevated, relaunch_elevated};
 pub use cpu::{CpuInfo, CpuSample, read_cpu_info};
 pub use details::{Arch, Counters, DetailColumn, StaticInfo, StaticReader, local_time_text};
+mod gpu;
+pub use gpu::Gpu;
 pub use disks::{DiskVolume, PhysicalDisk};
 pub use etw::{DiskTrace, StartError, TraceGuard, TraceState, stop_all as stop_disk_trace};
 pub use icon::{IconBitmap, default_icon, file_icon};

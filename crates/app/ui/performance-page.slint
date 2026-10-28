@@ -31,6 +31,7 @@ component Graph inherits Rectangle {
         viewbox-width: self.width / 1px;
         viewbox-height: self.height / 1px;
         commands: root.area;
+        fit: fill;
         fill: root.tint.with-alpha(0.16);
     }
 
@@ -40,6 +41,8 @@ component Graph inherits Rectangle {
         viewbox-width: self.width / 1px;
         viewbox-height: self.height / 1px;
         commands: root.line;
+        // 避免描边占用高度后，等比适配把矮图的横轴也一起压缩。
+        fit: fill;
         stroke: root.tint;
         stroke-width: 1.5px;
     }
@@ -105,7 +108,7 @@ export component ResourceCard inherits Rectangle {
                 overflow: elide;
             }
 
-            if root.data.kind == ResourceKind.network: Text {
+            if root.data.kind == ResourceKind.network || root.data.kind == ResourceKind.gpu: Text {
                 text: root.data.adapter-name;
                 font-size: 12px;
                 color: Palette.foreground;
@@ -253,6 +256,33 @@ export component PerformancePage inherits Rectangle {
                     }
                 }
 
+                if root.data.kind == ResourceKind.gpu: VerticalLayout {
+                    spacing: 4px;
+                    for line[i] in root.data.gpu-lines: VerticalLayout {
+                        Text {
+                            text: (i == 0 ? "专用显存" : "共享显存") + " · " + root.data.gpu-scales[i];
+                            color: Theme.subtle-text;
+                            font-size: 12px;
+                        }
+                        Rectangle {
+                            // 路径使用 64px 高的绘图区；外框另占上下各 1px。
+                            min-height: 66px;
+                            max-height: 66px;
+                            border-width: 1px;
+                            border-color: root.tint.with-alpha(0.55);
+                            Graph {
+                                x: detail-graph.x;
+                                y: 1px;
+                                width: detail-graph.width;
+                                height: 64px;
+                                line: line;
+                                area: root.data.gpu-areas[i];
+                                tint: root.tint;
+                                grid: true;
+                            }
+                        }
+                    }
+                }
                 // 详情区目前对所有类型通用；需要按类型定制时（CPU、内存等），
                 // 在这里按 root.data.kind 分支，并让通用统计项排除这些类型。
                 if root.data.kind == ResourceKind.memory: MemoryDetail {

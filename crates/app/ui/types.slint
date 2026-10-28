@@ -48,6 +48,7 @@ export enum ResourceKind {
     memory,
     disk,
     network,
+    gpu,
 }
 
 // 配色类型：对应 Theme 中的资源色。
@@ -56,6 +57,7 @@ export enum ResourceTint {
     memory,
     disk,
     network,
+    gpu,
 }
 
 // 性能概览中的一张资源卡片。元数据（id、类型、标题、说明、统计项标签）随数据一起由 Rust 提供。
@@ -75,6 +77,9 @@ export struct Resource {
     mini-area: string,
     scale: string,
     stats: [string],
+    gpu-lines: [string],
+    gpu-areas: [string],
+    gpu-scales: [string],
     disk-info: string,
     adapter-name: string,
     adapter-description: string,

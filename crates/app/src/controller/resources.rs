@@ -180,6 +180,7 @@ pub struct ResourceSet {
     /// 实例出现时自动选中；用户明确选中别的实例后清除。退出时优先保存它，而不是回退用的 CPU。
     pending: Option<String>,
     network_key: Vec<(String, String, String)>,
+    gpu_memory: HashMap<String, [History; 2]>,
     disk_key: Vec<(u32, Vec<String>)>,
     receive: HashMap<String, History>,
     send: HashMap<String, History>,
@@ -199,12 +200,43 @@ impl ResourceSet {
         let nk: Vec<_> = networks.iter().map(|n| (n.id.clone(), n.name.clone(), n.connection.clone())).collect();
         let dk: Vec<_> = disks.iter().map(|d| (d.number, d.volumes.iter().map(|v| v.mount.clone()).collect())).collect();
         if nk != self.network_key || dk != self.disk_key || self.instances.iter().any(|i| i.id == NETWORK || i.id == DISK) {
-            self.update(network_instances(disks, networks));
+            let gpu_instances: Vec<_> = self.instances.iter().filter(|i| i.kind == ResourceKind::Gpu).cloned().collect();
+            let mut instances = network_instances(disks, networks);
+            instances.extend(gpu_instances);
+            self.update(instances);
             self.network_key = nk;
             self.disk_key = dk;
             self.receive.retain(|id,_| networks.iter().any(|n| &n.id == id));
             self.send.retain(|id,_| networks.iter().any(|n| &n.id == id));
         }
+    }
+
+    pub fn sync_gpus(&mut self, gpus: &[tml_core::Gpu]) {
+        let mut instances: Vec<_> = self.instances.iter().filter(|i| i.kind != ResourceKind::Gpu).cloned().collect();
+        for (index, g) in gpus.iter().enumerate() {
+            instances.push(Instance::new(&g.id, ResourceKind::Gpu, ResourceTint::Gpu,
+                &format!("GPU {index}"), "% 利用率（最忙引擎）", &["利用率", "专用显存", "共享显存"]));
+        }
+        if instances != self.instances { self.update(instances); }
+        self.gpu_memory.retain(|id,_| gpus.iter().any(|g| &g.id == id));
+    }
+
+    pub fn push_gpu_memory(&mut self, gpus: &[tml_core::Gpu], now: Instant, gap: bool) {
+        for g in gpus {
+            let h = self.gpu_memory.entry(g.id.clone()).or_default();
+            h[0].push(now, if gap { None } else { g.dedicated });
+            h[1].push(now, if gap { None } else { g.shared });
+        }
+    }
+
+    pub fn gpu_memory_paths(&self, gpu: &tml_core::Gpu, now: Instant, size: (f64, f64)) -> Vec<(String, String, String)> {
+        self.gpu_memory.get(&gpu.id).map(|h| h.iter().enumerate().map(|(index,h)| {
+            let total = if index == 0 { gpu.dedicated_total } else { gpu.shared_total };
+            let scale = if total > 0 { total as f64 } else { h.max().max(1.0) };
+            let label = if total > 0 { crate::format::gigabytes(total) } else { "容量不可用".into() };
+            let (line, area) = h.paths(now, scale, size);
+            (line, label, area)
+        }).collect()).unwrap_or_default()
     }
 
     pub fn push_network(&mut self, n: &tml_core::NetworkAdapter, now: Instant) {
@@ -294,6 +326,9 @@ impl ResourceSet {
     /// 采样中断：所有曲线在此断开。
     pub fn push_gap(&mut self, at: Instant) {
         for h in self.receive.values_mut().chain(self.send.values_mut()) { h.push(at, None); }
+        for pair in self.gpu_memory.values_mut() {
+            for h in pair { h.push(at, None); }
+        }
         for h in self.histories.values_mut() {
             h.push(at, None);
         }
