@@ -3767,6 +3767,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pin-weak",
+ "raw-window-handle",
  "slint-macros",
  "unicode-segmentation",
  "vtable",
@@ -4202,6 +4203,7 @@ name = "tml-app"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "raw-window-handle",
  "serde_json",
  "slint",
  "slint-build",

@@ -3,10 +3,11 @@ import { Theme } from "theme.slint";
 import { ColumnLayout, ProcRow, Resource, ResourceKind, ResourceTint } from "types.slint";
 import { ProcessPage, Columns, ProcessMenu } from "process-page.slint";
 import { PerformancePage } from "performance-page.slint";
+import { MiniWindow, OpacityChoice } from "mini-window.slint";
 import { MemoryView } from "memory-detail.slint";
 import { StatItem } from "stats-panel.slint";
 
-export { ColumnLayout, MemoryView, ProcRow, Resource, ResourceKind, ResourceTint, StatItem, Columns, ProcessMenu }
+export { ColumnLayout, MemoryView, ProcRow, Resource, ResourceKind, ResourceTint, StatItem, Columns, ProcessMenu, MiniWindow, OpacityChoice }
 export { CoreGraph, CpuData, GridLayout } from "cpu-detail.slint";
 
 component Tab inherits Rectangle {
@@ -136,6 +137,32 @@ component PinIcon inherits Rectangle {
         stroke: root.tint;
         stroke-width: 1.3px;
         commands: "M 8 9.8 L 8 14.8";
+    }
+}
+
+// 迷你模式图标：大窗口的轮廓里，右上角一个实心小窗口。
+component MiniIcon inherits Rectangle {
+    in property <brush> tint;
+    width: 16px;
+    height: 16px;
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        stroke: root.tint;
+        stroke-width: 1.3px;
+        commands: "M 6.5 2.5 L 2.5 2.5 L 2.5 13.5 L 13.5 13.5 L 13.5 9.5";
+    }
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        fill: root.tint;
+        commands: "M 9 2 L 14 2 L 14 7 L 9 7 Z";
     }
 }
 
@@ -282,6 +309,8 @@ export component AppWindow inherits Window {
     callback confirm-accepted();
     callback elevate();
     callback graph-resized();
+    // 切换到迷你模式（性能页工具栏按钮、双击性能页左栏卡片、Ctrl+M）。
+    callback mini-mode();
     // 性能页选中的资源：实例 id 与它在 resources 中的下标，均由 Rust 维护。
     in property <string> selected-resource: "cpu";
     in property <int> resource-index: 0;
@@ -297,6 +326,7 @@ export component AppWindow inherits Window {
     private property <string> search-hint: @tr("搜索名称或 PID（Ctrl+F）");
     private property <string> search-hint-short: @tr("搜索名称或 PID");
     private property <string> elevate-text: @tr("以管理员身份重启");
+    private property <string> mini-text: @tr("迷你模式（Ctrl+M）");
     private property <string> pin-text: root.pinned ? @tr("取消置顶") : @tr("窗口置顶");
     // Fluent 输入框左右内边距各 12px，另留 4px 光标余量。
     private property <length> search-comfort: min(220px, search-measure.preferred-width + 28px);
@@ -342,6 +372,10 @@ export component AppWindow inherits Window {
             if event.modifiers.control && (event.text == "f" || event.text == "F") {
                 root.page = 0;
                 search.focus();
+                return accept;
+            }
+            if event.modifiers.control && (event.text == "m" || event.text == "M") {
+                root.mini-mode();
                 return accept;
             }
             if root.page != 0 {
@@ -525,6 +559,34 @@ export component AppWindow inherits Window {
                             }
                         }
 
+                        // 迷你模式入口（性能页）：与置顶按钮同样是图标按钮。
+                        if root.page == 1: VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 32px;
+                                height: 32px;
+                                Button {
+                                    width: 100%;
+                                    height: 100%;
+                                    accessible-label: root.mini-text;
+                                    clicked => {
+                                        root.mini-mode();
+                                    }
+                                    Tooltip {
+                                        TipBox {
+                                            text: root.mini-text;
+                                        }
+                                    }
+                                }
+
+                                MiniIcon {
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    tint: Palette.foreground;
+                                }
+                            }
+                        }
+
                         // 置顶开关：图钉图标，置顶时换成强调色的实心图钉（按钮本身保持普通样式，避免整块强调色过于醒目）。
                         VerticalLayout {
                             alignment: center;
@@ -641,6 +703,9 @@ export component AppWindow inherits Window {
                     }
                     graph-resized => {
                         root.graph-resized();
+                    }
+                    mini-mode => {
+                        root.mini-mode();
                     }
                 }
             }

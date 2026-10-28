@@ -26,6 +26,30 @@ pub struct WindowRect {
     pub height: f32,
 }
 
+/// 迷你模式（#19）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MiniSettings {
+    /// 退出时处于迷你模式：下次启动直接进入。
+    pub active: bool,
+    /// 迷你窗口左上角（物理像素）；从未进入过迷你模式时为 `None`。
+    pub position: Option<(i32, i32)>,
+    /// 迷你窗口置顶，默认开启。
+    pub on_top: bool,
+    /// 不透明度百分比，见 [`MiniSettings::OPACITIES`]。
+    pub opacity: u8,
+}
+
+impl MiniSettings {
+    /// 右键菜单提供的不透明度档位。
+    pub const OPACITIES: [u8; 5] = [100, 90, 80, 70, 60];
+}
+
+impl Default for MiniSettings {
+    fn default() -> Self {
+        Self { active: false, position: None, on_top: true, opacity: 100 }
+    }
+}
+
 /// 进程列表中可调宽度的列，单位为逻辑像素；名称列自动伸缩，不在其中。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColumnWidths {
@@ -94,6 +118,7 @@ pub struct Settings {
     pub background_sampling: bool,
     /// 关闭窗口时最小化到托盘（窗口隐藏、进程常驻、托盘图标可唤起）。默认关闭，此时关闭窗口即退出。
     pub close_to_tray: bool,
+    pub mini: MiniSettings,
     /// 本版本不认识的顶层字段，保存时原样写回。
     extra: Map<String, Value>,
 }
@@ -116,6 +141,7 @@ impl Default for Settings {
             replace_taskmgr: false,
             background_sampling: false,
             close_to_tray: false,
+            mini: MiniSettings::default(),
             extra: Map::new(),
         }
     }
@@ -138,6 +164,7 @@ const KNOWN: &[&str] = &[
     "accurate_disk_io",
     "background_sampling",
     "close_to_tray",
+    "mini",
 ];
 
 fn int<T: TryFrom<i64>>(o: &Map<String, Value>, key: &str) -> Option<T> {
@@ -276,6 +303,20 @@ impl Settings {
         if let Some(b) = o.get("close_to_tray").and_then(Value::as_bool) {
             s.close_to_tray = b;
         }
+        if let Some(m) = o.get("mini").and_then(Value::as_object) {
+            let flag = |key: &str, default: bool| m.get(key).and_then(Value::as_bool).unwrap_or(default);
+            s.mini.active = flag("active", false);
+            s.mini.on_top = flag("on_top", true);
+            if let (Some(x), Some(y)) = (int(m, "x"), int(m, "y")) {
+                s.mini.position = Some((x, y));
+            }
+            // 只接受菜单里的档位，其余值回退为不透明。
+            if let Some(p) = int::<u8>(m, "opacity")
+                && MiniSettings::OPACITIES.contains(&p)
+            {
+                s.mini.opacity = p;
+            }
+        }
         if let Some(b) = o.get("accurate_disk_io").and_then(Value::as_bool) {
             s.accurate_disk_io = b;
         }
@@ -344,6 +385,15 @@ impl Settings {
         o.insert("replace_taskmgr".into(), self.replace_taskmgr.into());
         o.insert("background_sampling".into(), self.background_sampling.into());
         o.insert("close_to_tray".into(), self.close_to_tray.into());
+        let mut m = Map::new();
+        m.insert("active".into(), self.mini.active.into());
+        if let Some((x, y)) = self.mini.position {
+            m.insert("x".into(), x.into());
+            m.insert("y".into(), y.into());
+        }
+        m.insert("on_top".into(), self.mini.on_top.into());
+        m.insert("opacity".into(), self.mini.opacity.into());
+        o.insert("mini".into(), Value::Object(m));
         let mut text = serde_json::to_string_pretty(&Value::Object(o)).unwrap_or_default();
         text.push('\n');
         text
@@ -449,8 +499,21 @@ mod tests {
             replace_taskmgr: true,
             background_sampling: true,
             close_to_tray: true,
+            mini: MiniSettings { active: true, position: Some((-1500, 40)), on_top: false, opacity: 80 },
             extra: Map::new(),
         }
+    }
+
+    #[test]
+    fn 迷你模式容错() {
+        assert_eq!(parse("{}").mini, MiniSettings::default());
+        let s = parse(r#"{"mini": {"active": "yes", "x": 10, "opacity": 55, "on_top": 0}}"#);
+        assert_eq!(s.mini, MiniSettings::default(), "类型不对、缺 y、非档位的不透明度都回退默认");
+        let s = parse(r#"{"mini": {"x": 10, "y": -20, "opacity": 70}}"#);
+        assert_eq!(s.mini.position, Some((10, -20)));
+        assert_eq!(s.mini.opacity, 70);
+        assert!(s.mini.on_top);
+        assert_eq!(parse(r#"{"mini": true}"#).mini, MiniSettings::default());
     }
 
     #[test]

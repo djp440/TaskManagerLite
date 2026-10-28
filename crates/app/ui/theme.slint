@@ -1,4 +1,5 @@
 import { Palette } from "std-widgets.slint";
+import { ResourceTint } from "types.slint";
 
 export global Theme {
     out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
@@ -18,6 +19,20 @@ export global Theme {
     out property <brush> hover: dark ? #ffffff0f : #0000000a;
     out property <brush> selected: dark ? #4c9bf540 : #4c9bf52e;
     out property <brush> grid: dark ? #ffffff10 : #0000000d;
+
+    // 资源卡片与曲线的主题色。
+    public pure function resource-tint(t: ResourceTint) -> color {
+        if t == ResourceTint.memory {
+            return Theme.memory;
+        }
+        if t == ResourceTint.disk {
+            return Theme.disk;
+        }
+        if t == ResourceTint.network {
+            return Theme.network;
+        }
+        return Theme.cpu;
+    }
 
     out property <length> row-height: 30px;
     out property <length> radius: 8px;

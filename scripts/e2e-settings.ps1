@@ -1,5 +1,5 @@
 # 设置持久化端到端验收：用临时 TML_SETTINGS_DIR 写入非默认设置，启动 exe，检查窗口位置/大小被应用，
-# 再用 WM_CLOSE 优雅关闭，检查设置文件被写回；另测损坏文件、显示器之外的位置、窗口置顶、详细信息列、开发模式不碰设置文件。
+# 再用 WM_CLOSE 优雅关闭，检查设置文件被写回；另测损坏文件、显示器之外的位置、窗口置顶、详细信息列、迷你模式、开发模式不碰设置文件。
 # 只结束自己启动的进程。用法：pwsh scripts/e2e-settings.ps1 [-Exe target/release/TaskManagerLite.exe]
 param([string]$Exe = "$PSScriptRoot/../target/release/TaskManagerLite.exe")
 
@@ -19,6 +19,8 @@ public static class Win {
     [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int index);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool GetLayeredWindowAttributes(IntPtr h, out uint key, out byte alpha, out uint flags);
 }
 '@
 [void][Win]::SetProcessDPIAware()
@@ -251,6 +253,48 @@ try {
     Close-App $app
     $s = Get-Content $settingsFile -Raw | ConvertFrom-Json
     Check ($s.sort.key -eq 'cpu' -and $s.sort.descending -eq $true) "排序列（用户名）未显示时回到 CPU 降序，实际 $($s.sort.key) $($s.sort.descending)"
+
+    '== 5i. 迷你模式：按设置以迷你窗口启动，位置、置顶、不透明度被应用；移动后保存；双击回到完整模式 =='
+    $dir = New-Dir 'mini'
+    $settingsFile = Join-Path $dir 'settings.json'
+    '{ "window": { "x": 140, "y": 110, "width": 800, "height": 560 }, "page": 1, "mini": { "active": true, "x": 300, "y": 200, "on_top": true, "opacity": 80 } }' | Set-Content -Encoding utf8 $settingsFile
+    $app = Start-App $dir
+    $w = Window-State $app
+    $s = Scale $app
+    Check ($w.X -eq 300 -and $w.Y -eq 200) "迷你窗口位置 = (300, 200)，实际 ($($w.X), $($w.Y))"
+    Check ([math]::Abs($w.W - 250 * $s) -le 2) "迷你窗口宽 250（逻辑），实际 $($w.W) 物理像素（缩放 $s）"
+    Check (& $topmost $app) '迷你窗口置顶'
+    $key = 0; $alpha = 0; $flags = 0
+    $layered = [Win]::GetLayeredWindowAttributes($app.Handle, [ref]$key, [ref]$alpha, [ref]$flags)
+    Check ($layered -and $alpha -eq 204) "不透明度 80%（alpha 204），实际 $(if ($layered) { $alpha } else { '未分层' })"
+    [void][Win]::SetWindowPos($app.Handle, [IntPtr]::Zero, 420, 260, 0, 0, 0x0001 -bor 0x0004 -bor 0x0010)
+    Start-Sleep -Milliseconds 600
+    Close-App $app
+    $s2 = Get-Content $settingsFile -Raw | ConvertFrom-Json
+    Check ($s2.mini.active -eq $true -and $s2.mini.x -eq 420 -and $s2.mini.y -eq 260) "退出时仍在迷你模式，新位置 (420, 260) 被保存，实际 $($s2.mini.active) ($($s2.mini.x), $($s2.mini.y))"
+    Check ($s2.mini.opacity -eq 80 -and $s2.mini.on_top -eq $true) '不透明度与置顶被写回'
+    Check ($s2.window.x -eq 140 -and $s2.window.y -eq 110 -and [math]::Abs($s2.window.width - 800) -lt 1.5) "完整窗口的矩形不受迷你模式影响，实际 ($($s2.window.x),$($s2.window.y)) $($s2.window.width)"
+    $app = Start-App $dir
+    $w = Window-State $app
+    Check ($w.X -eq 420 -and $w.Y -eq 260) "再次启动时迷你窗口在 (420, 260)，实际 ($($w.X), $($w.Y))"
+    # 在第一张卡片上双击（两次按下松开）。
+    $lp = [IntPtr]((([int](30 * $s)) -shl 16) -bor [int](120 * $s))
+    [void][Win]::PostMessage($app.Handle, 0x0200, [IntPtr]::Zero, $lp)
+    foreach ($i in 1..2) {
+        [void][Win]::PostMessage($app.Handle, 0x0201, [IntPtr]1, $lp)
+        [void][Win]::PostMessage($app.Handle, 0x0202, [IntPtr]::Zero, $lp)
+    }
+    Start-Sleep -Milliseconds 800
+    Check (-not [Win]::IsWindowVisible($app.Handle)) '双击后迷你窗口隐藏'
+    $mini = $app.Handle
+    $app.Process.Refresh()
+    $app.Handle = $app.Process.MainWindowHandle
+    $w = Window-State $app
+    Check ($app.Handle -ne $mini -and $w.X -eq 140 -and $w.Y -eq 110) "完整窗口出现在 (140, 110)，实际 ($($w.X), $($w.Y))"
+    Close-App $app
+    $s2 = Get-Content $settingsFile -Raw | ConvertFrom-Json
+    Check ($s2.mini.active -eq $false -and $s2.mini.x -eq 420) "回到完整模式后退出：mini.active = false，迷你位置保留，实际 $($s2.mini.active) $($s2.mini.x)"
+    Check ($s2.page -eq 1) '页签仍是性能页'
 
     '== 6. 开发模式（--measure-startup）不读写设置文件 =='
     $dir = New-Dir 'dev'

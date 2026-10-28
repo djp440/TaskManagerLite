@@ -177,7 +177,10 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     // 窗口隐藏到托盘后，“最后一个窗口关闭”不再结束事件循环，退出统一走 `quit_event_loop`。
-    ui.show()?;
+    // 上次退出时处于迷你模式则直接以迷你窗口启动，完整窗口等回到完整模式时才第一次显示。
+    if !controller.start_mini() {
+        ui.show()?;
+    }
     slint::run_event_loop_until_quit()?;
     ui.hide()?;
     controller.remove_tray();

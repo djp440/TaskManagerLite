@@ -8,7 +8,7 @@ use std::time::Duration;
 use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, LogicalSize, Model, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
 
-use crate::{AppWindow, Columns, CpuData, ProcessMenu};
+use crate::{AppWindow, Columns, CpuData, MiniWindow, ProcessMenu};
 
 type Step = (&'static str, fn(&AppWindow));
 
@@ -254,7 +254,89 @@ const STEPS: &[Step] = &[
         ui.global::<Columns>().invoke_reset_details();
         assert_eq!(ui.get_sort_key(), 2, "隐藏排序列后应回到按 CPU 排序");
     }),
+    // 迷你模式：在性能页选中内存后按 Ctrl+M 进入；之后的截图取迷你窗口。
+    ("55-迷你模式-深色", |ui| {
+        ui.set_page(1);
+        ui.invoke_resource_selected("memory".into());
+        press_ctrl(ui, "m");
+        with_controller(|c| assert!(c.is_mini(), "Ctrl+M 应进入迷你模式"));
+        // 每个窗口有自己的 Palette；截图模式只给完整窗口设了深色。
+        with_mini(|m| m.invoke_set_dark(true));
+    }),
+    ("56-迷你模式-浅色", |_| {
+        with_mini(|m| {
+            check_mini(m);
+            m.invoke_set_dark(false);
+            // 60% 不透明度之后切换置顶、隐藏再显示：winit 会重写扩展样式，下一步核对分层样式已被补回。
+            m.invoke_opacity_selected(60);
+            m.set_pinned(false);
+            let _ = m.hide();
+            let _ = m.show();
+        })
+    }),
+    // 双击卡片回到完整模式：页签与选中的资源不变，详情大图立即补画。
+    ("57-迷你模式双击返回-深色", |ui| {
+        with_controller(|c| assert_eq!(c.mini_alpha(), Some(153), "切换置顶、隐藏再显示后应仍是 60% 不透明度"));
+        with_mini(|m| {
+            let checked: Vec<i32> = m.get_opacity_choices().iter().filter(|c| c.checked).map(|c| c.percent).collect();
+            assert_eq!(checked, [60], "菜单里应只有 60% 带勾");
+            m.invoke_set_dark(true);
+            let at = LogicalPosition::new(120.0, 30.0);
+            let w = m.window();
+            w.dispatch_event(WindowEvent::PointerMoved { position: at });
+            for _ in 0..2 {
+                w.dispatch_event(WindowEvent::PointerPressed { position: at, button: PointerEventButton::Left });
+                w.dispatch_event(WindowEvent::PointerReleased { position: at, button: PointerEventButton::Left });
+            }
+        });
+        with_controller(|c| assert!(!c.is_mini(), "双击迷你窗口应回到完整模式"));
+        assert_eq!(ui.get_page(), 1, "回到完整模式后应仍在性能页");
+        assert_eq!(ui.get_selected_resource(), "memory", "回到完整模式后选中的资源应不变");
+        assert!(ui.window().is_visible(), "完整窗口应重新显示");
+        let r = ui.get_resources().row_data(1).expect("内存卡片");
+        assert!(!r.line.is_empty(), "回到完整模式后详情大图应立即补画");
+        eprintln!("迷你模式双击返回：页签与选中资源保持");
+    }),
+    // 再次进入后按 Esc 返回。
+    ("58-迷你模式Esc返回-深色", |ui| {
+        ui.invoke_mini_mode();
+        with_mini(|m| press(m, Key::Escape));
+        with_controller(|c| assert!(!c.is_mini(), "Esc 应回到完整模式"));
+    }),
 ];
+
+/// 当前控制器（截图模式下总是存在）。
+fn with_controller(f: impl FnOnce(&crate::controller::Controller)) {
+    crate::CONTROLLER.with(|c| f(c.borrow().as_ref().expect("控制器")));
+}
+
+fn with_mini(f: impl FnOnce(&MiniWindow)) {
+    with_controller(|c| f(c.mini().expect("迷你窗口")));
+}
+
+/// 迷你窗口：宽 250，恰好容纳四张卡片；迷你模式下只画卡片迷你图，不画详情大图。
+fn check_mini(m: &MiniWindow) {
+    let size = m.window().size().to_logical(m.window().scale_factor());
+    assert!((size.width - 250.0).abs() < 1.0, "迷你窗口宽应为 250：{size:?}");
+    let rows = m.get_resources();
+    assert_eq!(rows.row_count(), 4, "迷你窗口应显示 4 张资源卡片");
+    assert!((180.0..400.0).contains(&size.height), "迷你窗口高度异常：{size:?}");
+    for r in rows.iter() {
+        assert!(!r.mini_line.is_empty(), "{} 卡片应有迷你曲线", r.title);
+        assert!(r.line.is_empty(), "迷你模式下不应画 {} 的详情大图", r.title);
+    }
+    eprintln!("迷你窗口尺寸 {size:?}");
+}
+
+/// 按住 Ctrl 再按一个字符键。
+fn press_ctrl(ui: &AppWindow, ch: &str) {
+    let w = ui.window();
+    let ctrl: slint::SharedString = Key::Control.into();
+    w.dispatch_event(WindowEvent::KeyPressed { text: ctrl.clone() });
+    w.dispatch_event(WindowEvent::KeyPressed { text: ch.into() });
+    w.dispatch_event(WindowEvent::KeyReleased { text: ch.into() });
+    w.dispatch_event(WindowEvent::KeyReleased { text: ctrl });
+}
 
 /// 工具栏截图的统一设定：页面、提权状态、主题与窗口宽度（高 600），平铺视图、无搜索词。
 fn toolbar(ui: &AppWindow, page: i32, elevated: bool, dark: bool, width: f32) {
@@ -300,7 +382,7 @@ fn group_boundary(ui: &AppWindow) -> usize {
 }
 
 /// 向窗口发送一次按键。
-fn press(ui: &AppWindow, key: Key) {
+fn press(ui: &impl ComponentHandle, key: Key) {
     let w = ui.window();
     let text: slint::SharedString = key.into();
     w.dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
@@ -459,7 +541,13 @@ fn step(weak: slint::Weak<AppWindow>, dir: Rc<PathBuf>, i: usize) {
             });
             panic!("截图步骤 {name}：工具栏最小宽度 {need} 超出窗口宽度 {width}");
         }
-        match ui.window().take_snapshot() {
+        // 迷你模式下截迷你窗口。
+        let mini = crate::CONTROLLER.with(|c| c.borrow().as_ref().filter(|c| c.is_mini()).and_then(|c| c.mini().map(|m| m.as_weak())));
+        let snapshot = match mini.and_then(|m| m.upgrade()) {
+            Some(m) => m.window().take_snapshot(),
+            None => ui.window().take_snapshot(),
+        };
+        match snapshot {
             Ok(buf) => {
                 let path = dir.join(format!("{name}.bmp"));
                 if let Err(e) = write_bmp(&path, &buf) {

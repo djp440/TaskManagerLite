@@ -1,0 +1,143 @@
+import { Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Resource } from "types.slint";
+import { ResourceCard } from "performance-page.slint";
+
+// 迷你模式右键菜单里的一个不透明度选项。
+export struct OpacityChoice {
+    percent: int,
+    checked: bool,
+}
+
+// 迷你模式：无边框小窗口，只显示各资源的卡片（数值与迷你曲线），与性能页左侧的卡片相同。
+// 拖动任意位置移动窗口，双击、Ctrl+M 或 Esc 回到完整模式，右键弹出菜单。
+export component MiniWindow inherits Window {
+    title: @tr("任务管理器 Lite");
+    no-frame: true;
+    always-on-top: root.pinned;
+    default-font-family: "Microsoft YaHei UI";
+    default-font-size: 13px;
+    background: Theme.surface;
+    forward-focus: keys;
+
+    // 置顶：默认开启，由 Rust 按设置恢复，退出时保存。
+    in-out property <bool> pinned: true;
+    in property <[Resource]> resources;
+    in-out property <[OpacityChoice]> opacity-choices;
+    callback restore();
+    // 指针按下后移动了一小段距离：交给系统开始拖动窗口。
+    callback drag();
+    callback opacity-selected(int);
+    // 置顶切换后 winit 会重写扩展样式，Rust 据此补回不透明度。
+    callback pinned-changed();
+    changed pinned => {
+        root.pinned-changed();
+    }
+    callback quit();
+
+    // 与性能页左栏同宽，再加四周的内边距与边框。
+    width: 240px + 2 * 4px + 2px;
+    height: cards.preferred-height + 2px;
+
+    // 供截图模式切换深浅色。
+    public function set-dark(dark: bool) {
+        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    menu := ContextMenuArea {
+        width: 100%;
+        height: 100%;
+        Menu {
+            MenuItem {
+                title: @tr("返回完整模式");
+                activated => {
+                    root.restore();
+                }
+            }
+
+            // 双向绑定：原生菜单激活勾选项时会直接改写 checked。
+            MenuItem {
+                title: @tr("窗口置顶");
+                checkable: true;
+                checked <=> root.pinned;
+            }
+
+            Menu {
+                title: @tr("不透明度");
+                for c in root.opacity-choices: MenuItem {
+                    title: c.percent + "%";
+                    checkable: true;
+                    checked <=> c.checked;
+                    activated => {
+                        root.opacity-selected(c.percent);
+                    }
+                }
+            }
+
+            MenuSeparator { }
+
+            MenuItem {
+                title: @tr("退出");
+                activated => {
+                    root.quit();
+                }
+            }
+        }
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape || (event.modifiers.control && (event.text == "m" || event.text == "M")) {
+                root.restore();
+                return accept;
+            }
+            reject
+        }
+
+        // 卡片之间与四周的空隙也能拖动、双击、右键。
+        TouchArea {
+            double-clicked => {
+                root.restore();
+            }
+            moved => {
+                if self.pressed && (abs(self.mouse-x - self.pressed-x) > 4px || abs(self.mouse-y - self.pressed-y) > 4px) {
+                    root.drag();
+                }
+            }
+            pointer-event(e) => {
+                if e.button == PointerEventButton.right && e.kind == PointerEventKind.down {
+                    menu.show({ x: self.mouse-x, y: self.mouse-y });
+                }
+            }
+        }
+
+        cards := VerticalLayout {
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            padding: 4px;
+            spacing: 2px;
+            alignment: start;
+            for r in root.resources: ResourceCard {
+                data: r;
+                tint: Theme.resource-tint(r.tint);
+                draggable: true;
+                double-clicked => {
+                    root.restore();
+                }
+                drag-started => {
+                    root.drag();
+                }
+                context-menu(x, y) => {
+                    menu.show({ x: x, y: y });
+                }
+            }
+        }
+    }
+
+    // 无边框窗口的 1px 描边，盖在内容之上。
+    Rectangle {
+        border-width: 1px;
+        border-color: Theme.dark ? #ffffff2e : #00000033;
+    }
+}
