@@ -172,6 +172,14 @@ component ProcRowView inherits Rectangle {
                 }
             }
 
+            Image {
+                y: (parent.height - self.height) / 2;
+                width: 16px;
+                height: 16px;
+                source: root.data.icon;
+                image-fit: contain;
+            }
+
             Text {
                 text: root.data.name;
                 horizontal-stretch: 1;

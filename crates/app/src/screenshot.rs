@@ -85,6 +85,27 @@ const STEPS: &[Step] = &[
     }),
     ("14-性能内存-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
     ("15-性能内存-深色-默认尺寸", |ui| resize(ui, 1040.0, 700.0)),
+    // 进程图标：浏览器（有自己的图标）。依赖本机正在运行 chrome，没有时列表为空。
+    ("16-进程图标-chrome-深色", |ui| {
+        resize(ui, 1040.0, 700.0);
+        ui.invoke_set_dark(true);
+        ui.set_page(0);
+        ui.set_filter("chrome".into());
+        ui.invoke_filter_edited("chrome".into());
+    }),
+    // 通用图标：没有图标资源（svchost、RuntimeBroker）或拿不到路径（System）的进程都显示同一个默认图标。
+    ("17-进程图标-默认图标-svchost-深色", |ui| {
+        ui.set_filter("svchost".into());
+        ui.invoke_filter_edited("svchost".into());
+    }),
+    ("18-进程图标-默认图标-RuntimeBroker-深色", |ui| {
+        ui.set_filter("RuntimeBroker".into());
+        ui.invoke_filter_edited("RuntimeBroker".into());
+    }),
+    ("19-进程图标-默认图标-System-深色", |ui| {
+        ui.set_filter("System".into());
+        ui.invoke_filter_edited("System".into());
+    }),
 ];
 
 /// 在表头（y = 56 + 17）的 `x` 处按下并水平拖动 `dx` 逻辑像素。
