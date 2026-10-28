@@ -12,6 +12,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HWND, LPARAM, RPC_E_CHANGED_MODE};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
@@ -28,8 +29,9 @@ const UWP_FRAME_CLASS: &str = "ApplicationFrameWindow";
 const UWP_CORE_CLASS: &str = "Windows.UI.Core.CoreWindow";
 /// `DWM_CLOAKED_SHELL`：被外壳隐藏（其他虚拟桌面、挂起的 UWP）。
 const DWM_CLOAKED_SHELL: u32 = 2;
-/// 创建 `IVirtualDesktopManager` 最多尝试的次数，之后放弃并退回“cloaked 一律不是应用”。
-const MAX_CREATE_ATTEMPTS: u32 = 3;
+/// 创建 / 查询失败后的退避：首次 1 秒，之后每次连续失败翻倍，最长 60 秒。
+const BACKOFF_BASE: Duration = Duration::from_secs(1);
+const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 /// 判定一个顶层窗口用到的事实。
 #[derive(Debug, Clone, Copy, Default)]
@@ -78,23 +80,32 @@ struct DesktopProbe {
     /// 先于 `com_initialized` 的清理释放（`Drop` 里显式按顺序处理）。
     manager: Option<IVirtualDesktopManager>,
     com_initialized: bool,
-    attempts: u32,
+    com_usable: bool,
+    /// COM 初始化只做一次（失败重试创建管理器时不再重复初始化，否则引用计数对不上）。
+    com_tried: bool,
+    backoff: Backoff,
     /// 本轮枚举里“是否存在多个虚拟桌面”的缓存；每轮 `app_pids` 开头清空，第一次需要时才读注册表。
     multiple_desktops: Option<bool>,
 }
 
 impl DesktopProbe {
     fn manager(&mut self) -> Option<&IVirtualDesktopManager> {
-        if self.manager.is_none() && self.attempts < MAX_CREATE_ATTEMPTS {
-            self.attempts += 1;
-            // 多线程套间：没有消息泵也能用。线程已用别的模型初始化过（RPC_E_CHANGED_MODE）时沿用，不由我们反初始化。
-            let init = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-            if init.is_ok() {
-                self.com_initialized = true;
+        let now = Instant::now();
+        if self.manager.is_none() && self.backoff.allowed(now) {
+            if !self.com_tried {
+                self.com_tried = true;
+                // 多线程套间：没有消息泵也能用。线程已用别的模型初始化过（RPC_E_CHANGED_MODE）时沿用，不由我们反初始化。
+                let init = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+                self.com_initialized = init.is_ok();
+                self.com_usable = init.is_ok() || init == RPC_E_CHANGED_MODE;
             }
-            if init.is_ok() || init == RPC_E_CHANGED_MODE {
-                self.manager = unsafe { CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_INPROC_SERVER) }.ok();
-            }
+            self.manager = if self.com_usable {
+                unsafe { CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_INPROC_SERVER) }.ok()
+            } else {
+                None
+            };
+            // 创建失败（如开机自启时外壳尚未就绪）只是暂时退避，之后会再试；成功则清零。
+            if self.manager.is_some() { self.backoff.succeeded() } else { self.backoff.failed(now) }
         }
         self.manager.as_ref()
     }
@@ -106,13 +117,40 @@ impl DesktopProbe {
         }
         let Some(manager) = self.manager() else { return false };
         match unsafe { manager.IsWindowOnCurrentVirtualDesktop(hwnd) } {
-            Ok(on_current) => !on_current.as_bool(),
+            Ok(on_current) => {
+                self.backoff.succeeded();
+                !on_current.as_bool()
+            }
             Err(_) => {
-                // 外壳重启后旧接口会一直失败：丢弃它，下次重新创建。窗口已销毁之类的错误也走这里，代价只是重建一次。
+                // 外壳重启后旧接口会一直失败：丢弃它，按退避时间重新创建。
                 self.manager = None;
+                self.backoff.failed(Instant::now());
                 false
             }
         }
+    }
+}
+
+/// 创建 / 查询失败后的退避：只计“连续”失败，成功一次就清零；没有永久放弃的上限，只是两次尝试之间隔得越来越久。
+#[derive(Debug, Default)]
+struct Backoff {
+    failures: u32,
+    retry_at: Option<Instant>,
+}
+
+impl Backoff {
+    fn allowed(&self, now: Instant) -> bool {
+        self.retry_at.is_none_or(|t| now >= t)
+    }
+
+    fn failed(&mut self, now: Instant) {
+        self.failures = self.failures.saturating_add(1);
+        let delay = BACKOFF_BASE.saturating_mul(1u32 << (self.failures - 1).min(6)).min(BACKOFF_MAX);
+        self.retry_at = Some(now + delay);
+    }
+
+    fn succeeded(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -262,12 +300,37 @@ mod tests {
         assert!(probe.manager.is_some(), "应已创建 IVirtualDesktopManager");
         // 无效句柄：系统回答“在当前桌面”（Ok(TRUE)），同样不会被当成其他桌面上的应用。
         assert!(!probe.on_other_desktop(HWND(0x7777_7777 as _)));
-        assert_eq!(probe.attempts, 1, "管理器只创建一次");
+        assert_eq!(probe.backoff.failures, 0, "创建成功后失败计数为 0");
         // 只有一个桌面时完全不触碰 COM。
         let mut single = DesktopProbe::default();
         single.multiple_desktops = Some(false);
         assert!(!single.on_other_desktop(HWND(0x7777_7777 as _)));
-        assert!(single.manager.is_none() && single.attempts == 0 && !single.com_initialized);
+        assert!(single.manager.is_none() && single.backoff.failures == 0 && !single.com_tried && !single.com_initialized);
+    }
+
+    #[test]
+    fn backoff_counts_only_consecutive_failures_and_never_gives_up() {
+        let t0 = Instant::now();
+        let mut b = Backoff::default();
+        assert!(b.allowed(t0));
+        b.failed(t0);
+        assert!(!b.allowed(t0), "失败后先退避");
+        assert!(b.allowed(t0 + BACKOFF_BASE));
+        b.failed(t0 + BACKOFF_BASE);
+        assert!(!b.allowed(t0 + BACKOFF_BASE + BACKOFF_BASE), "连续失败后退避翻倍");
+        assert!(b.allowed(t0 + BACKOFF_BASE + BACKOFF_BASE * 2));
+        // 成功一次：计数清零，下次失败又从最短退避开始。
+        b.succeeded();
+        assert_eq!(b.failures, 0);
+        assert!(b.allowed(t0));
+        b.failed(t0);
+        assert!(b.allowed(t0 + BACKOFF_BASE));
+        // 很多次连续失败：退避封顶，不会永久放弃，也不会溢出。
+        let mut b = Backoff::default();
+        for _ in 0..1000 {
+            b.failed(t0);
+        }
+        assert!(b.allowed(t0 + BACKOFF_MAX));
     }
 
     #[test]
