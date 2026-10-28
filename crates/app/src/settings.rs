@@ -82,6 +82,8 @@ pub struct Settings {
     pub columns: ColumnWidths,
     /// 后台继续采样：窗口最小化或隐藏时继续采系统指标，曲线不断开。默认关闭。
     pub background_sampling: bool,
+    /// 关闭窗口时最小化到托盘（窗口隐藏、进程常驻、托盘图标可唤起）。默认关闭，此时关闭窗口即退出。
+    pub close_to_tray: bool,
     /// 本版本不认识的顶层字段，保存时原样写回。
     extra: Map<String, Value>,
 }
@@ -99,6 +101,7 @@ impl Default for Settings {
             resource: "cpu".into(),
             columns: ColumnWidths::default(),
             background_sampling: false,
+            close_to_tray: false,
             extra: Map::new(),
         }
     }
@@ -106,7 +109,7 @@ impl Default for Settings {
 
 // 顶层字段名。新增字段时同步加入 KNOWN。
 // `tree` 是旧版的布尔视图开关，读取时迁移为 `view`，保存时不再写出。
-const KNOWN: &[&str] = &["window", "interval_index", "tree", "view", "sort", "page", "resource", "columns", "background_sampling"];
+const KNOWN: &[&str] = &["window", "interval_index", "tree", "view", "sort", "page", "resource", "columns", "background_sampling", "close_to_tray"];
 
 fn int<T: TryFrom<i64>>(o: &Map<String, Value>, key: &str) -> Option<T> {
     T::try_from(o.get(key)?.as_i64()?).ok()
@@ -230,6 +233,9 @@ impl Settings {
         if let Some(b) = o.get("background_sampling").and_then(Value::as_bool) {
             s.background_sampling = b;
         }
+        if let Some(b) = o.get("close_to_tray").and_then(Value::as_bool) {
+            s.close_to_tray = b;
+        }
         s.extra = o.iter().filter(|(k, _)| !KNOWN.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
         s
     }
@@ -260,6 +266,7 @@ impl Settings {
         c.insert("disk".into(), number(self.columns.disk));
         o.insert("columns".into(), Value::Object(c));
         o.insert("background_sampling".into(), self.background_sampling.into());
+        o.insert("close_to_tray".into(), self.close_to_tray.into());
         let mut text = serde_json::to_string_pretty(&Value::Object(o)).unwrap_or_default();
         text.push('\n');
         text
@@ -357,6 +364,7 @@ mod tests {
             resource: "network".into(),
             columns: ColumnWidths { pid: 90.0, cpu: 64.5, memory: 140.0, disk: 200.0 },
             background_sampling: true,
+            close_to_tray: true,
             extra: Map::new(),
         }
     }
@@ -383,6 +391,13 @@ mod tests {
         assert!(parse(r#"{"background_sampling": true}"#).background_sampling);
         assert!(!parse(r#"{"background_sampling": "yes"}"#).background_sampling);
         assert!(!parse("{}").background_sampling);
+    }
+
+    #[test]
+    fn 关闭到托盘默认关闭且只认布尔值() {
+        assert!(!Settings::default().close_to_tray);
+        assert!(parse(r#"{"close_to_tray": true}"#).close_to_tray);
+        assert!(!parse(r#"{"close_to_tray": 1}"#).close_to_tray);
     }
 
     #[test]
