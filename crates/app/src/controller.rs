@@ -90,6 +90,17 @@ struct State {
 }
 
 impl State {
+    /// 托盘提示里的采样状态：手动暂停优先于“隐藏且没开后台采样”。
+    fn tray_sampling(&self) -> tray::Sampling {
+        if self.paused {
+            tray::Sampling::Paused
+        } else if self.sampling() {
+            tray::Sampling::Live
+        } else {
+            tray::Sampling::Hidden
+        }
+    }
+
     /// 当前是否在采样（见 `sampling::plan`）；它的变化意味着曲线上要留断点。
     fn sampling(&self) -> bool {
         crate::sampling::plan(self.visible, self.background, self.paused) != crate::sampling::Plan::Idle
@@ -464,7 +475,7 @@ impl Controller {
     /// 隐藏到托盘时记一行日志，带上此刻的托盘提示文字（自动化验收据此核对 CPU/内存读数）。
     fn log_hidden(&self) {
         let s = self.state.borrow();
-        let tip = tray::tooltip(self.tray_reading(&s), s.sampling()).replace('\n', " | ");
+        let tip = tray::tooltip(self.tray_reading(&s), s.tray_sampling()).replace('\n', " | ");
         self.log.borrow_mut().line(format!("隐藏到托盘 提示={tip}"));
     }
 
@@ -498,7 +509,7 @@ impl Controller {
         }
         let tip = {
             let s = self.state.borrow();
-            tray::tooltip(self.tray_reading(&s), s.sampling())
+            tray::tooltip(self.tray_reading(&s), s.tray_sampling())
         };
         let tray = Tray::new(&tip, |event| {
             let controller = crate::CONTROLLER.with(|c| c.borrow().clone());
@@ -538,7 +549,7 @@ impl Controller {
 
     fn update_tray_tip(&self, s: &State) {
         if let Some(tray) = &*self.tray.borrow() {
-            tray.set_tip(&tray::tooltip(self.tray_reading(s), s.sampling()));
+            tray.set_tip(&tray::tooltip(self.tray_reading(s), s.tray_sampling()));
         }
     }
 

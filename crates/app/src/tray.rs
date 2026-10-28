@@ -8,6 +8,8 @@
 //! - 全部在界面线程使用；回调由 Slint 的事件循环（同一个 Win32 消息循环）派发。
 
 use std::cell::RefCell;
+use std::sync::Once;
+use std::sync::atomic::{AtomicIsize, Ordering};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -15,10 +17,10 @@ use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
+    AppendMenuW, ChangeWindowMessageFilterEx, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
     GWLP_USERDATA, GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, HICON, HMENU, MF_STRING, PostMessageW,
     RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, SetMenuDefaultItem, SetWindowLongPtrW,
-    TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_COMMAND, WM_LBUTTONUP, WM_NULL,
+    MSGFLT_ALLOW, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE, WM_COMMAND, WM_LBUTTONUP, WM_NULL,
     WM_RBUTTONUP, WNDCLASSEXW, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
@@ -65,8 +67,19 @@ fn command_event(id: usize) -> Option<Event> {
     }
 }
 
-/// 托盘提示文字（`szTip` 最多 127 个 UTF-16 单元）。`live` 为假表示采样已暂停，数值是最后一次读数。
-pub fn tooltip(cpu: Option<(f32, u64, u64)>, live: bool) -> String {
+/// 提示文字对应的采样状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sampling {
+    /// 正在采样，读数是实时的。
+    Live,
+    /// 窗口不可见且没有开启后台采样：读数是最后一次的。
+    Hidden,
+    /// 用户在工具栏里暂停了采样。
+    Paused,
+}
+
+/// 托盘提示文字（`szTip` 最多 127 个 UTF-16 单元）。非 `Live` 时数值是最后一次读数，并在末尾说明原因。
+pub fn tooltip(cpu: Option<(f32, u64, u64)>, sampling: Sampling) -> String {
     let Some((cpu_usage, used, total)) = cpu else { return "TaskManagerLite".into() };
     let pct = if total > 0 { used as f64 / total as f64 * 100.0 } else { 0.0 };
     let gib = |b: u64| b as f64 / 1024.0 / 1024.0 / 1024.0;
@@ -77,8 +90,10 @@ pub fn tooltip(cpu: Option<(f32, u64, u64)>, live: bool) -> String {
         gib(used),
         gib(total)
     );
-    if !live {
-        text.push_str("\n采样已暂停，开启后台采样可持续更新");
+    match sampling {
+        Sampling::Live => {}
+        Sampling::Hidden => text.push_str("\n采样已暂停，开启后台采样可持续更新"),
+        Sampling::Paused => text.push_str("\n采样已手动暂停"),
     }
     text
 }
@@ -142,12 +157,18 @@ impl Tray {
             CreateWindowExW(Default::default(), CLASS, w!("TaskManagerLite Tray"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinst), None)
         }
         .ok()?;
-        let icon = create_icon(unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as usize)?;
+        let Some(icon) = create_icon(unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as usize) else {
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return None;
+        };
+        let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
+        // 提权运行时 UIPI 默认拦截来自普通权限的资源管理器的广播，放行后重启资源管理器才能恢复图标。
+        let _ = unsafe { ChangeWindowMessageFilterEx(hwnd, taskbar_created, MSGFLT_ALLOW, None) };
         let inner = Box::new(Inner {
             hwnd,
             icon,
             tip: RefCell::new(tip_units(initial_tip)),
-            taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
+            taskbar_created,
             on_event: Box::new(on_event),
         });
         // Box 的地址在 Tray 存活期间不变；窗口过程通过它取回状态，Tray 先于窗口销毁。
@@ -159,6 +180,8 @@ impl Tray {
             }
             return None;
         }
+        TRAY_HWND.store(hwnd.0 as isize, Ordering::Release);
+        install_panic_hook();
         Some(Tray { inner })
     }
 
@@ -176,6 +199,7 @@ impl Tray {
 impl Drop for Tray {
     fn drop(&mut self) {
         let inner = &*self.inner;
+        TRAY_HWND.store(0, Ordering::Release);
         unsafe {
             let _ = Shell_NotifyIconW(NIM_DELETE, &inner.data(Default::default()));
             SetWindowLongPtrW(inner.hwnd, GWLP_USERDATA, 0);
@@ -185,6 +209,37 @@ impl Drop for Tray {
     }
 }
 
+/// 当前托盘窗口（0 = 没有），供 panic hook 在不加锁、不分配的前提下删除图标。
+static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// release 配置是 `panic = "abort"`，panic 时不会运行 Drop，托盘图标会一直残留到鼠标扫过。
+/// 安装一个 panic hook 删除图标，并先取出、再调用原有的 hook，保留 hook 链。
+fn install_panic_hook() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            delete_icon_for_panic();
+            previous(info);
+        }));
+    });
+}
+
+/// 只用栈上数据：不分配、不加锁，panic 中可以安全调用。
+fn delete_icon_for_panic() {
+    let hwnd = TRAY_HWND.swap(0, Ordering::AcqRel);
+    if hwnd == 0 {
+        return;
+    }
+    let data = NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: HWND(hwnd as *mut _),
+        uID: ICON_ID,
+        ..Default::default()
+    };
+    let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &data) };
+}
+
 unsafe extern "system" fn wnd_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const Inner;
     // SAFETY: 指针来自 `Tray::new` 中的 Box，Tray 销毁窗口之前先清零。
@@ -192,6 +247,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, message: u32, wparam: WPARAM, lpa
         return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
     };
     match message {
+        // 默认处理会销毁窗口，托盘从此失效而进程还活着（资源管理器重启、不带 /F 的 taskkill 都会发 WM_CLOSE）。
+        // 退出只走菜单“退出”。
+        WM_CLOSE => {}
         CALLBACK_MESSAGE => match mouse_action(lparam.0 as u32 & 0xFFFF) {
             Some(Mouse::Event(e)) => (inner.on_event)(e),
             Some(Mouse::Menu) => {
@@ -318,17 +376,38 @@ mod tests {
     #[test]
     fn tooltip_shows_cpu_and_memory() {
         let gib = 1024u64 * 1024 * 1024;
-        let t = tooltip(Some((12.4, 8 * gib, 32 * gib)), true);
+        let t = tooltip(Some((12.4, 8 * gib, 32 * gib)), Sampling::Live);
         assert!(t.contains("CPU 12%") && t.contains("内存 25%") && t.contains("8.0/32.0 GB"), "{t}");
         assert!(!t.contains("暂停"));
-        assert!(tooltip(Some((1.0, gib, 2 * gib)), false).contains("采样已暂停"));
-        assert_eq!(tooltip(None, true), "TaskManagerLite");
+        let hidden = tooltip(Some((1.0, gib, 2 * gib)), Sampling::Hidden);
+        assert!(hidden.contains("采样已暂停") && hidden.contains("开启后台采样"));
+        // 用户手动暂停时不提示“开启后台采样”（那不会让采样恢复）。
+        let paused = tooltip(Some((1.0, gib, 2 * gib)), Sampling::Paused);
+        assert!(paused.contains("手动暂停") && !paused.contains("后台采样"), "{paused}");
+        assert_eq!(tooltip(None, Sampling::Live), "TaskManagerLite");
+    }
+
+    #[test]
+    fn wm_close_does_not_destroy_the_tray_window() {
+        use windows::Win32::UI::WindowsAndMessaging::{IsWindow, SendMessageW};
+        let Some(tray) = Tray::new("TaskManagerLite", |_| {}) else {
+            eprintln!("没有可用的任务栏，跳过");
+            return;
+        };
+        let hwnd = tray.inner.hwnd;
+        unsafe { SendMessageW(hwnd, WM_CLOSE, None, None) };
+        assert!(unsafe { IsWindow(Some(hwnd)) }.as_bool(), "WM_CLOSE 不应销毁托盘窗口");
+        // panic hook 的删除路径：取走 hwnd 后清零，重复调用无副作用。
+        assert_eq!(TRAY_HWND.load(Ordering::Acquire), hwnd.0 as isize);
+        delete_icon_for_panic();
+        assert_eq!(TRAY_HWND.load(Ordering::Acquire), 0);
+        delete_icon_for_panic();
     }
 
     #[test]
     fn tooltip_fits_the_shell_limit() {
         let gib = 1024u64 * 1024 * 1024;
-        let t = tooltip(Some((100.0, 1024 * gib, 1024 * gib)), false);
+        let t = tooltip(Some((100.0, 1024 * gib, 1024 * gib)), Sampling::Hidden);
         assert!(t.encode_utf16().count() <= 127, "{}", t.encode_utf16().count());
         let units = tip_units(&"字".repeat(300));
         assert_eq!(units[127], 0);

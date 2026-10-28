@@ -152,6 +152,11 @@ try {
     Check (-not $a.Process.HasExited) 'WM_CLOSE 后进程仍在'
     Check ([Win]::ByClass([uint32]$a.Process.Id, 'TaskManagerLiteTray', $false).Count -eq 1) 'WM_CLOSE 后托盘窗口仍在'
 
+    # 托盘窗口自己收到 WM_CLOSE（资源管理器重启、不带 /F 的 taskkill）也不能被销毁。
+    [void][Win]::SendMessage($a.Tray, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 300
+    Check ([Win]::ByClass([uint32]$a.Process.Id, 'TaskManagerLiteTray', $false).Count -eq 1) '托盘窗口收到 WM_CLOSE 后仍在'
+
     $t0 = Get-Date
     $b = Start-Process -FilePath $exePath -PassThru   # 第二个实例，同样的 TML_INSTANCE_ID
     $started.Add($b)
