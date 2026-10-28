@@ -2,6 +2,7 @@
 
 mod clipboard;
 mod control;
+mod cpu;
 mod icon;
 mod instance;
 mod memory;
@@ -15,6 +16,7 @@ mod view;
 
 pub use clipboard::{clipboard_text, set_clipboard_text};
 pub use control::{EndError, end_process, is_elevated, relaunch_elevated};
+pub use cpu::{CpuInfo, CpuSample, read_cpu_info};
 pub use icon::{IconBitmap, default_icon, file_icon};
 pub use instance::{Acquired, SingleInstance, acquire, activate_own_window, is_relaunch};
 pub use memory::{MemoryHardware, MemoryStatus};

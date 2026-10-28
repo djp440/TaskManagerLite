@@ -10,6 +10,7 @@ use tml_core::{
     ViewRow, build_view, end_process, tree_from,
 };
 
+mod cpu;
 mod memory;
 mod process_menu;
 mod resources;
@@ -19,7 +20,8 @@ use crate::icons::{self, IconCache, IconWorker};
 use crate::logging::Log;
 use crate::sampling::{Command, SamplerHandle};
 use crate::settings::{ColumnWidths, Settings, Store};
-use crate::{AppWindow, ColumnLayout, Columns, ProcRow, Resource, ResourceKind, placement};
+use crate::{AppWindow, ColumnLayout, Columns, CpuData, ProcRow, Resource, ResourceKind, placement};
+use cpu::CpuState;
 use resources::{Edit, Instance, ResourceSet};
 
 const STATUS_ENDED: i32 = 1;
@@ -57,6 +59,8 @@ struct State {
     selected: Option<ProcessKey>,
     /// 性能页的资源实例、曲线历史与选中项。
     resources: ResourceSet,
+    /// CPU 详情：每个逻辑处理器的历史与基本信息。
+    cpu: CpuState,
     system: SystemMetrics,
     memory: MemoryStatus,
     /// 内存硬件信息只读取一次，首个快照之后才有。
@@ -139,6 +143,7 @@ impl Controller {
         // 恢复上次选中的资源实例；实例暂时不存在时先用 CPU，实例出现后自动切回。
         let restored = c.state.borrow_mut().resources.restore(&settings.resource);
         c.sync_selection(&c.state.borrow());
+        c.state.borrow().cpu.attach(ui);
         if !restored {
             c.log.borrow_mut().line(format!("设置中的资源 {} 暂不存在，待其出现后恢复", settings.resource));
         }
@@ -201,6 +206,7 @@ impl Controller {
         ui.on_confirm_accepted(with(Controller::confirm));
         ui.on_elevate(with(Controller::elevate));
         ui.on_graph_resized(with(Controller::redraw_graphs));
+        ui.global::<CpuData>().on_grid_resized(with(Controller::redraw_graphs));
         let c = Rc::downgrade(self);
         ui.on_resource_selected(move |id| {
             if let Some(c) = c.upgrade() {
@@ -335,6 +341,18 @@ impl Controller {
         self.sampler.send(Command::Visible(visible));
     }
 
+    /// 截图模式：逻辑处理器网格改用演示曲线。
+    pub fn use_demo_cpu_history(&self, cores: usize) {
+        self.state.borrow_mut().cpu.use_demo_history(cores);
+    }
+
+    /// 截图模式：核对逻辑处理器网格的曲线路径尺寸是否是最新的（见 `CpuState::check_paths_current`）。
+    pub fn check_cpu_paths(&self) -> Result<(), String> {
+        let Some(ui) = self.ui.upgrade() else { return Ok(()) };
+        let s = self.state.borrow();
+        s.cpu.check_paths_current(&ui, s.resources.selected() == resources::CPU)
+    }
+
     pub fn has_first_data(&self) -> bool {
         self.state.borrow().first_data
     }
@@ -347,6 +365,7 @@ impl Controller {
             s.resources.update(resources::summary_instances());
             if std::mem::take(&mut s.gap) {
                 s.resources.push_gap(now);
+                s.cpu.push_gap(now);
             }
             // 首次采样没有基线，CPU、磁盘、网络都是 0，不画进曲线。
             if s.first_data {
@@ -355,6 +374,8 @@ impl Controller {
                 s.resources.push(resources::DISK, now, Some(m.disk_active as f64));
                 s.resources.push(resources::NETWORK, now, Some(m.net_recv + m.net_send));
             }
+            let with_history = s.first_data;
+            s.cpu.record(now, sample.cpu, with_history);
             s.snapshot = sample.snapshot;
             s.system = m;
             s.memory = sample.memory;
@@ -439,7 +460,6 @@ impl Controller {
             (w, h) if w > 1.0 && h > 1.0 => (w, h),
             _ => (600.0, 300.0),
         };
-        let logical = std::thread::available_parallelism().map_or(0, |n| n.get());
         let mem_pct = if m.memory_total > 0 { m.memory_used as f64 / m.memory_total as f64 * 100.0 } else { 0.0 };
         let cpu = format::percent(m.cpu_usage);
         let gib = |b: u64| b as f64 / 1024.0 / 1024.0 / 1024.0;
@@ -455,12 +475,8 @@ impl Controller {
                 let history = s.resources.history(&inst.id);
                 // (纵轴顶端取值, 卡片摘要, 纵轴标注, 统计项取值)
                 let (scale, value, scale_label, stats) = match inst.kind {
-                    ResourceKind::Cpu => (100.0, cpu.clone(), "100%".to_string(), vec![
-                        cpu.clone(),
-                        logical.to_string(),
-                        s.snapshot.processes.len().to_string(),
-                    ]),
-                    // 内存页的统计项在 MemoryView 里，卡片只需要摘要。
+                    // CPU、内存详情页的统计项在各自的数据里（CpuData / MemoryView），卡片只需要摘要。
+                    ResourceKind::Cpu => (100.0, s.cpu.card_value(&cpu), "100%".to_string(), vec![]),
                     ResourceKind::Memory => (
                         m.memory_total.max(1) as f64,
                         format!("{mem} ({mem_pct:.0}%)"),
@@ -490,7 +506,7 @@ impl Controller {
                     _ => String::new(),
                 };
                 Resource {
-                    detail: detail.into(),
+                    detail: if inst.kind == ResourceKind::Cpu { s.cpu.model_name() } else { detail }.into(),
                     value: value.into(),
                     line: line.into(),
                     area: area.into(),
@@ -503,6 +519,7 @@ impl Controller {
             })
             .collect();
         self.apply_resources(s, rows);
+        s.cpu.refresh(&ui, now, s.snapshot.processes.len(), &cpu, s.resources.selected() == resources::CPU);
         if let Some(t) = mem_text {
             ui.set_memory_view(memory::view(t));
         }

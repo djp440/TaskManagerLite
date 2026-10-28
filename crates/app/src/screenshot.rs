@@ -8,7 +8,7 @@ use std::time::Duration;
 use slint::platform::{PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, Model, LogicalSize, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
 
-use crate::{AppWindow, Columns, ProcessMenu};
+use crate::{AppWindow, Columns, CpuData, ProcessMenu};
 
 type Step = (&'static str, fn(&AppWindow));
 
@@ -28,6 +28,7 @@ const STEPS: &[Step] = &[
         ui.set_page(1);
         ui.invoke_resource_selected("cpu".into());
     }),
+    ("03b-性能CPU逻辑处理器-深色", |ui| use_demo_cores(ui, 0)),
     ("04-性能内存-深色", |ui| ui.invoke_resource_selected("memory".into())),
     ("05-性能网络-深色", |ui| ui.invoke_resource_selected("network".into())),
     ("06-结束进程树确认-深色", |ui| {
@@ -42,9 +43,11 @@ const STEPS: &[Step] = &[
         ui.invoke_set_dark(false);
     }),
     ("08-性能CPU-浅色", |ui| {
+        ui.global::<CpuData>().set_per_core(false);
         ui.set_page(1);
         ui.invoke_resource_selected("cpu".into());
     }),
+    ("08b-性能CPU逻辑处理器-浅色", |ui| ui.global::<CpuData>().set_per_core(true)),
     // 用真实的指针事件拖动表头：“内存”列左边缘向左 60 像素，“PID”列向左 30 像素。
     ("09-列宽拖动-深色", |ui| {
         ui.invoke_set_dark(true);
@@ -106,7 +109,52 @@ const STEPS: &[Step] = &[
         ui.set_filter("System".into());
         ui.invoke_filter_edited("System".into());
     }),
+    // CPU 页（编号接在进程图标步骤之后）：整体曲线与逻辑处理器网格在最小尺寸、中等尺寸下的表现（逐核曲线用演示数据，便于核对形态）。
+    ("20-性能CPU整体-深色-最小尺寸760x480", |ui| {
+        ui.invoke_set_dark(true);
+        ui.set_filter("".into());
+        ui.invoke_filter_edited("".into());
+        ui.set_page(1);
+        ui.invoke_resource_selected("cpu".into());
+        ui.global::<CpuData>().set_per_core(false);
+        resize(ui, 760.0, 480.0);
+    }),
+    ("21-性能CPU整体-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
+    ("22-性能CPU逻辑处理器-深色-最小尺寸760x480", |ui| {
+        use_demo_cores(ui, 0);
+        resize(ui, 760.0, 480.0);
+    }),
+    ("23-性能CPU逻辑处理器-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
+    ("24-性能CPU逻辑处理器-浅色-最小尺寸760x480", |ui| {
+        ui.invoke_set_dark(false);
+        resize(ui, 760.0, 480.0);
+    }),
+    ("25-性能CPU整体-浅色-900x600", |ui| {
+        ui.global::<CpuData>().set_per_core(false);
+        resize(ui, 900.0, 600.0);
+    }),
+    // 核数很多（假装 64 个逻辑处理器）：小窗口里小图保持最小高度、网格区滚动；大窗口里放得下就不滚动。
+    ("26-性能CPU64核-深色-最小尺寸760x480", |ui| {
+        ui.invoke_set_dark(true);
+        use_demo_cores(ui, 64);
+        resize(ui, 760.0, 480.0);
+    }),
+    ("27-性能CPU64核-深色-1040x700", |ui| resize(ui, 1040.0, 700.0)),
 ];
+
+
+/// 切到逻辑处理器网格，并让各核显示演示曲线：核 0 恒 100%（贴顶边的横线）、核 1 从 0 升到 100%
+/// （左下到右上的斜线）、核 2 方波、核 3 恒 50%、核 4 正弦……用来核对曲线是否按格子实际尺寸铺满。
+/// `cores` 为 0 时用真实的逻辑处理器数量，否则假装有这么多个。
+fn use_demo_cores(ui: &AppWindow, cores: usize) {
+    crate::CONTROLLER.with(|c| {
+        if let Some(c) = c.borrow().as_ref() {
+            c.use_demo_cpu_history(cores);
+        }
+    });
+    ui.global::<CpuData>().set_per_core(true);
+}
+
 
 /// `--menu-shot <过滤>[:pid]:<dark|light>`：切换主题、过滤并（`:pid` 时按 PID 升序，PID 4 排第一）
 /// 在第一行右键，弹出原生右键菜单。原生菜单是系统窗口，`take_snapshot` 截不到，
@@ -213,6 +261,14 @@ fn step(weak: slint::Weak<AppWindow>, dir: Rc<PathBuf>, i: usize) {
     // 等待重新布局与渲染后再截图。
     Timer::single_shot(Duration::from_millis(400), move || {
         let Some(ui) = weak.upgrade() else { return };
+        // 出图前核对逻辑处理器网格的曲线路径尺寸是最新的；不一致就让截图直接失败，不留下错误的图。
+        crate::CONTROLLER.with(|c| {
+            if let Some(c) = c.borrow().as_ref()
+                && let Err(e) = c.check_cpu_paths()
+            {
+                panic!("截图步骤 {name}：{e}");
+            }
+        });
         match ui.window().take_snapshot() {
             Ok(buf) => {
                 let path = dir.join(format!("{name}.bmp"));
