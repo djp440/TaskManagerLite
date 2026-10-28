@@ -1,9 +1,16 @@
 # 开发经验
 
-## 2026-10-27 23:59 右键菜单
-- Windows 上 Slint 的 `ContextMenuArea` 走 muda 的原生弹出菜单（`TrackPopupMenu`，模态）：`take_snapshot` 截不到，`--screenshot` 里触发会阻塞事件循环。菜单截图用 `scripts/menu-screenshots.ps1`（应用 `--menu-shot` 自己右键，脚本按类名 `#32768` 找菜单窗口并 `PrintWindow`，脚本须声明 DPI 感知）。原生菜单不随应用深浅色变化。
-- 行内 `TouchArea` 会吞掉右键，`ContextMenuArea` 收不到：在 `pointer-event` 里右键按下时先选中行、让 Rust 读取路径/命令行设置 `ProcessMenu` 的可用状态，再调用 `menu.show(...)`。菜单项 `enabled` 绑定全局属性，弹出时求值。
-- 命令行用 `NtQueryInformationProcess(ProcessCommandLineInformation=60)` + 受限查询权限；受保护进程（System）返回 `None`。`std::process::Command` 会给程序名加引号，测试断言要带引号。
+## 2026-10-28 08:57 第二批集成（CPU/内存详情、分组视图、多 PR 合并）
+- Slint 的 `changed` 回调在组件创建时不触发：初始尺寸要在 `init` 里上报一次，否则曲线按默认 100×50 生成。
+- 网格布局依赖模型时，组件创建那一刻模型还是空的，算出的是 1×1 的格子；按这个尺寸生成的曲线会被裁剪。Slint 只上报网格区的尺寸，格子尺寸在 Rust 里用布局同一个纯函数（`grid_plan`，经 pure callback 给 Slint）计算。截图模式在出图前断言曲线尺寸等于格子尺寸。
+- 逐核网格选列数：在满足最小格宽 64px、格高 24px 的选项里，先选空格最少的，再选宽高比最接近 2:1 的（12 核为 4×3，64 核为 8×8）。放不下时网格区自己滚动。
+- 详情页放进 `ScrollView`，统计项用 `stats-panel.slint` 的 `StatsPanel`（按宽度自动定列数）；截图步骤固定包含 760×480 和 900×600 两种尺寸。
+- 逐核曲线和 CPU 统计只在 CPU 被选中、并且处于“逻辑处理器”视图时才计算。基准速度取 `CallNtPowerInformation(ProcessorInformation)` 的 MaxMhz：注册表 `~MHz` 是 3893，会显示成 3.89 GHz。超过 64 个逻辑处理器（多个处理器组）时，`SystemProcessorPerformanceInformation` 只返回当前组的核，这是已知限制。
+- 内存：已缓存 = 备用 + 已修改（`SystemMemoryListInformation`，class 80）；已压缩取 Memory Compression 进程的工作集。SMBIOS Type 17 通过 `GetSystemFirmwareTable('RSMB')` 在首个快照之后读一次，不用 WMI。
+- 分组视图：“应用”的判定是 `visible && (WS_EX_APPWINDOW || (!owner && !toolwindow)) && 有标题 && !cloaked`。`DWMWA_CLOAKED=2` 同时覆盖挂起的 UWP 和其他虚拟桌面上的窗口，所以其他桌面上的应用会被归入后台，这是已知限制。EnumWindows 只在分组视图下每次采样运行，单次约 0.08 ms。应用行显示整棵进程树的合计。
+- 分组标题行的 `index` 是 `HEADER_INDEX`（`usize::MAX`）：凡是按行号去取 `snapshot.processes` 的代码，都必须先经过 `ViewRow::process()`，否则会越界 panic，而且 git 合并时不会报冲突。
+- 测试里 `cmd /c ping -t` 只结束 cmd 会留下孤儿 ping：直接启动 ping.exe，或者用 Drop 守卫结束整棵进程树。
+- 合并流程：仓库没有必需检查，`gh pr merge --auto` 会立即合并，所以要等 CI 跑完再手动合并。agent 没有 force push 权限，feature 分支用合并提交并入 main，不用 rebase。堆叠的 PR 在基础 PR squash 合并后会出现 add/add 冲突；先确认 `git diff <基础 PR head> origin/main` 为空，再取堆叠分支一侧解决冲突。
 
 ## 2026-10-28 00:20 进程图标
 - `slint::Image` 的 `PartialEq` 按像素缓冲指针比较，空 `Image` 彼此不相等：放进 `ProcRow` 会让“行未变化则跳过”的判断全部失效。空图标用同一个 1×1 透明图的克隆占位。
@@ -12,6 +19,12 @@
 - 不要用 `SHGetFileInfoW` 取图标：它会把整套外壳 DLL（windows.storage、thumbcache、PROPSYS 等）拉进进程，常驻工作集约 +6.8 MB；并发调用还会失败（测试并行跑 10 次失败 6 次）。没有图标资源的 exe（svchost、RuntimeBroker）和拿不到路径的 System 一律用默认图标：`imageres.dll` 资源 ID 15（`PrivateExtractIconsW` 传索引 -15，就是外壳显示的蓝色应用窗口图标），再退 `IDI_APPLICATION`；每个尺寸只取一次并缓存。改后相对 main 的 release 常驻内存约 +1.7 MB 工作集、+1.0 MB 私有（剩余的 WindowsCodecs 来自 PNG 压缩图标的解码）。
 - `IconCache::resolved` 只接受 `Source::Resolving` 的进程：DPI 变化 `reset()` 后新旧两次 Resolve 都会回来，重复结果必须忽略，否则引用计数多加一次、条目永远释放不掉。
 - `procinfo.rs` 的路径读取只用 `PROCESS_QUERY_LIMITED_INFORMATION`，System（PID 4）等取不到时为 `None`；#4、#17 复用该模块。
+
+## 2026-10-27 23:59 右键菜单
+- Windows 上 Slint 的 `ContextMenuArea` 走 muda 的原生弹出菜单（`TrackPopupMenu`，模态）：`take_snapshot` 截不到，`--screenshot` 里触发会阻塞事件循环。菜单截图用 `scripts/menu-screenshots.ps1`（应用 `--menu-shot` 自己右键，脚本按类名 `#32768` 找菜单窗口并 `PrintWindow`，脚本须声明 DPI 感知）。原生菜单不随应用深浅色变化。
+- 行内 `TouchArea` 会吞掉右键，`ContextMenuArea` 收不到：在 `pointer-event` 里右键按下时先选中行、让 Rust 读取路径/命令行设置 `ProcessMenu` 的可用状态，再调用 `menu.show(...)`。菜单项 `enabled` 绑定全局属性，弹出时求值。
+- 命令行用 `NtQueryInformationProcess(ProcessCommandLineInformation=60)` + 受限查询权限；受保护进程（System）返回 `None`。`std::process::Command` 会给程序名加引号，测试断言要带引号。
+- 交互自动化用 PostMessage 发 `WM_RBUTTONDOWN/UP`，不动用户的真实鼠标；菜单用 `WM_CANCELMODE` 关闭。真实光标停在窗口内时，菜单关闭后系统会补发一次 `WM_MOUSEMOVE` 到光标所在位置，会干扰后续的模拟点击，所以测试前要把窗口移到光标不在的位置。
 
 ## 2026-10-27 23:10 设置持久化与窗口恢复
 - 窗口显示前调用 `set_size` 会被 `preferred-width/height` 覆盖：改为把保存的大小写入 `initial-width/height` 属性并绑定到 preferred。大小按逻辑像素保存（不同缩放的显示器上视觉大小一致），位置按物理像素，`set_position` 在显示前有效。
