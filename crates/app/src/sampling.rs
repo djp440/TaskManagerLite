@@ -18,8 +18,6 @@ pub enum Command {
     /// 是否每次采样都枚举窗口、找出应用进程（分组视图需要）。
     Apps(bool),
     /// 是否用 ETW 统计进程磁盘速率（设置项 `accurate_disk_io`；需要管理员权限）。
-    /// 运行中切换的入口，设置页（#16）接入前暂无发送方。
-    #[allow(dead_code)]
     AccurateDisk(bool),
 }
 

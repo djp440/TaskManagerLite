@@ -1,0 +1,303 @@
+import { Button, Palette, ScrollView, Switch } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { SegmentedControl, ShieldIcon } from "controls.slint";
+
+// 设置页的数据与回调，由 Rust 维护（见 controller/settings_page.rs）。
+// 置顶与刷新间隔不在这里：它们与顶栏共用 AppWindow 的属性。
+export global SettingsData {
+    // 开机启动：开关状态与状态说明（例如在系统“启动应用”中被禁用）。
+    in-out property <bool> autostart;
+    in property <string> autostart-note;
+    callback autostart-toggled(bool);
+
+    in-out property <bool> close-to-tray;
+    callback close-to-tray-toggled(bool);
+
+    // 主题：0 跟随系统，1 浅色，2 深色。
+    in-out property <int> theme;
+    callback theme-selected(int);
+
+    in-out property <bool> background-sampling;
+    callback background-sampling-toggled(bool);
+
+    // 精确磁盘读写：设置意愿与实际是否在用 ETW。
+    in-out property <bool> accurate-disk;
+    in property <bool> accurate-disk-active;
+    callback accurate-disk-toggled(bool);
+
+    // 替换系统任务管理器：登记状态、是否正在等待提权子进程、状态说明（错误时为红色）。
+    in-out property <bool> replace-taskmgr;
+    in property <bool> taskmgr-busy;
+    in property <string> taskmgr-note;
+    in property <bool> taskmgr-error;
+    callback replace-taskmgr-toggled(bool);
+
+    in property <string> settings-path;
+    callback open-settings-folder();
+
+    // 每次进入设置页时调用：重新读取以注册表为准的开机启动与接管状态。
+    callback refresh();
+}
+
+// 一行设置：左侧标题、说明与状态提示，右侧控件（子元素）。
+component SettingRow inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <string> note;
+    in property <bool> note-error;
+    // 需要管理员权限：标题旁显示盾牌。
+    in property <bool> shield;
+    in property <bool> last;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 12px;
+        padding-bottom: 12px;
+        spacing: 24px;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 3px;
+            HorizontalLayout {
+                alignment: start;
+                spacing: 6px;
+                Text {
+                    text: root.title;
+                    font-size: 14px;
+                    color: Palette.foreground;
+                    vertical-alignment: center;
+                }
+
+                if root.shield: VerticalLayout {
+                    alignment: center;
+                    ShieldIcon {
+                        width: 14px;
+                        height: 14px;
+                        tint: Theme.subtle-text;
+                    }
+                }
+            }
+
+            if root.description != "": Text {
+                text: root.description;
+                font-size: 12px;
+                color: Theme.subtle-text;
+                wrap: word-wrap;
+            }
+
+            if root.note != "": Text {
+                text: root.note;
+                font-size: 12px;
+                color: root.note-error ? Theme.danger : Theme.network;
+                wrap: word-wrap;
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 0;
+            alignment: center;
+            @children
+        }
+    }
+
+    if !root.last: Rectangle {
+        x: 16px;
+        y: parent.height - 1px;
+        width: parent.width - 32px;
+        height: 1px;
+        background: Theme.divider;
+    }
+}
+
+// 一组设置：组标题与一张卡片。
+component SettingGroup inherits VerticalLayout {
+    in property <string> title;
+    spacing: 8px;
+
+    Text {
+        text: root.title;
+        font-size: 13px;
+        font-weight: 600;
+        color: Theme.subtle-text;
+    }
+
+    Rectangle {
+        background: Theme.surface-raised;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: Theme.divider;
+        VerticalLayout {
+            @children
+        }
+    }
+}
+
+export component SettingsPage inherits Rectangle {
+    in property <bool> elevated;
+    in-out property <bool> pinned;
+    in-out property <int> interval-index;
+    callback interval-changed(int);
+
+    init => {
+        SettingsData.refresh();
+    }
+
+    ScrollView {
+        content-width: self.visible-width;
+        content-height: column.preferred-height;
+
+        column := VerticalLayout {
+            width: parent.visible-width;
+            alignment: start;
+            padding-top: 24px;
+            padding-bottom: 32px;
+            // 内容最宽 720，居中。
+            padding-left: max(24px, (self.width - 720px) / 2);
+            padding-right: max(24px, (self.width - 720px) / 2);
+            spacing: 24px;
+
+            SettingGroup {
+                title: @tr("常规");
+                SettingRow {
+                    title: @tr("开机时启动");
+                    description: SettingsData.close-to-tray
+                        ? @tr("登录 Windows 后在托盘中启动，不打开窗口。")
+                        : @tr("登录 Windows 后最小化启动。");
+                    note: SettingsData.autostart-note;
+                    Switch {
+                        accessible-label: @tr("开机时启动");
+                        checked <=> SettingsData.autostart;
+                        toggled => {
+                            SettingsData.autostart-toggled(self.checked);
+                        }
+                    }
+                }
+
+                SettingRow {
+                    title: @tr("关闭时最小化到托盘");
+                    description: @tr("点关闭按钮时隐藏到通知区域；单击托盘图标恢复，右键托盘图标退出。");
+                    last: true;
+                    Switch {
+                        accessible-label: @tr("关闭时最小化到托盘");
+                        checked <=> SettingsData.close-to-tray;
+                        toggled => {
+                            SettingsData.close-to-tray-toggled(self.checked);
+                        }
+                    }
+                }
+            }
+
+            SettingGroup {
+                title: @tr("外观");
+                SettingRow {
+                    title: @tr("主题");
+                    description: @tr("跟随系统时随 Windows 的深浅色设置自动切换。");
+                    SegmentedControl {
+                        model: [@tr("跟随系统"), @tr("浅色"), @tr("深色")];
+                        current-index <=> SettingsData.theme;
+                        selected(i) => {
+                            SettingsData.theme-selected(i);
+                        }
+                    }
+                }
+
+                SettingRow {
+                    title: @tr("窗口置顶");
+                    description: @tr("完整窗口始终显示在其他窗口之上。迷你窗口的置顶在它的右键菜单里单独设置。");
+                    last: true;
+                    Switch {
+                        accessible-label: @tr("窗口置顶");
+                        checked <=> root.pinned;
+                    }
+                }
+            }
+
+            SettingGroup {
+                title: @tr("采样");
+                SettingRow {
+                    title: @tr("刷新间隔");
+                    description: @tr("与顶栏的刷新间隔相同。暂停后数据与曲线都停止更新。");
+                    SegmentedControl {
+                        model: [@tr("0.5 秒"), @tr("1 秒"), @tr("2 秒"), @tr("暂停")];
+                        current-index <=> root.interval-index;
+                        selected(i) => {
+                            root.interval-changed(i);
+                        }
+                    }
+                }
+
+                SettingRow {
+                    title: @tr("后台继续采样");
+                    description: @tr("窗口最小化或隐藏到托盘时继续采集 CPU、内存等系统指标，曲线不断档；进程列表仍暂停刷新。");
+                    Switch {
+                        accessible-label: @tr("后台继续采样");
+                        checked <=> SettingsData.background-sampling;
+                        toggled => {
+                            SettingsData.background-sampling-toggled(self.checked);
+                        }
+                    }
+                }
+
+                SettingRow {
+                    title: @tr("精确统计进程磁盘读写");
+                    shield: true;
+                    description: @tr("用 Windows 事件追踪（ETW）统计每个进程实际发生的磁盘读写。需要以管理员身份运行，否则使用系统的 I/O 计数（含网络与设备 I/O）。");
+                    note: !SettingsData.accurate-disk ? ""
+                        : SettingsData.accurate-disk-active ? @tr("正在使用 ETW 统计")
+                        : !root.elevated ? @tr("当前未以管理员身份运行，暂用系统 I/O 计数")
+                        : @tr("ETW 会话未能启动，暂用系统 I/O 计数");
+                    last: true;
+                    Switch {
+                        accessible-label: @tr("精确统计进程磁盘读写");
+                        checked <=> SettingsData.accurate-disk;
+                        toggled => {
+                            SettingsData.accurate-disk-toggled(self.checked);
+                        }
+                    }
+                }
+            }
+
+            SettingGroup {
+                title: @tr("系统集成");
+                SettingRow {
+                    title: @tr("替换系统任务管理器");
+                    shield: true;
+                    description: @tr("按 Ctrl+Shift+Esc 或从任务栏菜单打开任务管理器时，改为启动本程序。修改需要管理员授权。");
+                    note: SettingsData.taskmgr-busy ? @tr("正在等待管理员授权…") : SettingsData.taskmgr-note;
+                    note-error: SettingsData.taskmgr-error && !SettingsData.taskmgr-busy;
+                    last: true;
+                    Switch {
+                        accessible-label: @tr("替换系统任务管理器");
+                        enabled: !SettingsData.taskmgr-busy;
+                        checked <=> SettingsData.replace-taskmgr;
+                        toggled => {
+                            SettingsData.replace-taskmgr-toggled(self.checked);
+                        }
+                    }
+                }
+            }
+
+            // 开发模式（截图、测量）不读写设置文件，没有路径时不显示。
+            if SettingsData.settings-path != "": HorizontalLayout {
+                spacing: 12px;
+                Text {
+                    horizontal-stretch: 1;
+                    text: @tr("设置保存在 {0}", SettingsData.settings-path);
+                    font-size: 12px;
+                    color: Theme.faint-text;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                Button {
+                    text: @tr("打开所在文件夹");
+                    clicked => {
+                        SettingsData.open-settings-folder();
+                    }
+                }
+            }
+        }
+    }
+}

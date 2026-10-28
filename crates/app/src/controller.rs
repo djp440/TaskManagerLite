@@ -16,6 +16,7 @@ mod cpu;
 mod memory;
 mod mini;
 mod process_menu;
+mod settings_page;
 
 pub use columns::sort_index as detail_sort_index;
 mod resources;
@@ -242,6 +243,7 @@ impl Controller {
         c.bind_process_menu(ui);
         c.bind_columns(ui);
         c.bind_mini(ui);
+        c.bind_settings(ui);
         ui.set_pinned(settings.always_on_top);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
         if settings.interval_index != 1 {
@@ -431,7 +433,10 @@ impl Controller {
         }
         settings.mini.active = self.is_mini();
         settings.interval_index = ui.get_interval_index();
-        settings.page = ui.get_page();
+        // 设置页不记录，保留进入它之前的页面。
+        if let p @ 0..=1 = ui.get_page() {
+            settings.page = p;
+        }
         settings.always_on_top = ui.get_pinned();
         let cols = ui.global::<Columns>();
         settings.columns = ColumnWidths {
@@ -560,11 +565,15 @@ impl Controller {
         });
         self.tray_failed.set(tray.is_none());
         self.log.borrow_mut().line(if tray.is_some() { "托盘图标已创建" } else { "托盘图标创建失败" });
+        let failed = tray.is_none();
         *self.tray.borrow_mut() = tray;
+        // 开机启动时直接隐藏到托盘，图标却建不出来：把窗口显示出来，否则用户找不到它。
+        if failed && self.hidden.get() {
+            self.show_window();
+        }
     }
 
-    /// 设置页（#16）调用；目前只能通过设置文件的 `close_to_tray` 字段开启。
-    #[allow(dead_code)]
+    /// 设置页的“关闭时最小化到托盘”开关。
     pub fn set_close_to_tray(&self, on: bool) {
         self.settings.borrow_mut().close_to_tray = on;
         if on {
@@ -594,8 +603,7 @@ impl Controller {
         }
     }
 
-    /// 后台继续采样开关（设置页 #16 调用；目前只能通过设置文件的 `background_sampling` 字段开启）。
-    #[allow(dead_code)]
+    /// 设置页的“后台继续采样”开关。
     pub fn set_background_sampling(&self, on: bool) {
         let mut s = self.state.borrow_mut();
         if s.background == on {
@@ -632,7 +640,9 @@ impl Controller {
         // 只采系统指标的采样（窗口不可见）不带进程快照：保留上一份，界面也不刷新，回到前台时马上会补一次完整采样。
         let fresh = sample.processes_fresh;
         if let Some(ui) = self.ui.upgrade() {
-            ui.global::<Columns>().set_disk_accurate(sample.disk_source == tml_core::DiskSource::Etw);
+            let etw = sample.disk_source == tml_core::DiskSource::Etw;
+            ui.global::<Columns>().set_disk_accurate(etw);
+            ui.global::<crate::SettingsData>().set_accurate_disk_active(etw);
         }
         {
             let mut s = self.state.borrow_mut();

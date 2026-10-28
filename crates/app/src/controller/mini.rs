@@ -14,7 +14,8 @@ use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, VK_LBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetCursorPos, GetLayeredWindowAttributes, GetWindowLongPtrW, HTCAPTION, LAYERED_WINDOW_ATTRIBUTES_FLAGS,
-    LWA_ALPHA, PostMessageW, SetLayeredWindowAttributes, SetWindowLongPtrW, WM_NCLBUTTONDOWN, WS_EX_LAYERED,
+    LWA_ALPHA, PostMessageW, SW_MINIMIZE, SetLayeredWindowAttributes, SetWindowLongPtrW, ShowWindow, WM_NCLBUTTONDOWN,
+    WS_EX_LAYERED,
 };
 
 use super::Controller;
@@ -135,6 +136,10 @@ impl Controller {
             let settings = self.settings.borrow().mini;
             w.set_resources(ModelRc::from(self.resources.clone()));
             w.set_pinned(settings.on_top);
+            let theme = self.settings.borrow().theme;
+            if theme != 0 {
+                w.invoke_set_theme(theme);
+            }
             w.set_opacity_choices(ModelRc::new(VecModel::from(opacity_choices(settings.opacity))));
             let c = Rc::downgrade(self);
             w.on_restore(move || {
@@ -171,12 +176,48 @@ impl Controller {
         self.mini.get()
     }
 
-    /// 启动时按设置直接进入迷你模式（完整窗口此时还没显示过）。返回是否进入。
-    pub fn start_mini(self: &Rc<Self>) -> bool {
-        if self.store.is_none() || !self.settings.borrow().mini.active {
-            return false;
+    /// 显示启动时的窗口。上次退出时处于迷你模式则直接以迷你窗口启动，完整窗口等回到完整模式时才第一次显示。
+    /// 开机启动（`--autostart`）时：开启了“关闭时最小化到托盘”就不显示窗口，只等托盘图标出现
+    /// （图标建不出来时 `ensure_tray` 会把窗口显示出来）；否则最小化启动。
+    pub fn start(self: &Rc<Self>, autostart: bool) -> Result<(), slint::PlatformError> {
+        let Some(ui) = self.ui.upgrade() else { return Ok(()) };
+        let mini = self.store.is_some() && self.settings.borrow().mini.active;
+        if autostart && self.store.is_some() && self.settings.borrow().close_to_tray {
+            self.hidden.set(true);
+            self.log.borrow_mut().line("开机启动 隐藏到托盘");
+            // 迷你模式下先把迷你窗口放好位置，从托盘唤起时直接显示它。
+            if mini && !self.show_mini(false) {
+                self.log.borrow_mut().line("迷你窗口不可用，唤起时显示完整窗口");
+            }
+            return Ok(());
         }
-        self.show_mini()
+        if !(mini && self.show_mini(true)) {
+            ui.show()?;
+        }
+        if autostart {
+            self.log.borrow_mut().line("开机启动 最小化");
+            self.minimize_when_created(40);
+        }
+        Ok(())
+    }
+
+    /// 把当前模式的窗口最小化。winit 不支持以最小化状态创建窗口，窗口创建前调用 `set_minimized` 也会被忽略，
+    /// 所以等到窗口句柄出现后直接用 Win32 最小化（之后 winit 会同步最小化状态）。
+    /// `tries` 次（每次间隔 50ms）之后仍没有句柄就放弃。
+    fn minimize_when_created(&self, tries: u32) {
+        match self.with_active(hwnd_of).flatten() {
+            // SAFETY: hwnd 是本进程刚取得的有效窗口句柄。
+            Some(hwnd) => unsafe {
+                let _ = ShowWindow(hwnd, SW_MINIMIZE);
+            },
+            None if tries > 0 => slint::Timer::single_shot(Duration::from_millis(50), move || {
+                let controller = crate::CONTROLLER.with(|c| c.borrow().clone());
+                if let Some(c) = controller {
+                    c.minimize_when_created(tries - 1);
+                }
+            }),
+            None => self.log.borrow_mut().line("开机启动 最小化失败：窗口一直没有创建"),
+        }
     }
 
     /// 切换到迷你模式：完整窗口隐藏（页面状态保留），迷你窗口出现在上次的位置。
@@ -186,14 +227,15 @@ impl Controller {
         }
         // 记下完整窗口此刻的位置与大小，迷你模式期间不再跟踪它。
         self.track_window();
-        if self.show_mini()
+        if self.show_mini(true)
             && let Some(ui) = self.ui.upgrade()
         {
             let _ = ui.hide();
         }
     }
 
-    fn show_mini(self: &Rc<Self>) -> bool {
+    /// 放好迷你窗口并切到迷你模式；`show` 为 false 时（开机启动直接隐藏到托盘）只放好位置、不显示。
+    fn show_mini(self: &Rc<Self>, show: bool) -> bool {
         let Some(mini) = self.mini_window() else { return false };
         let Some(ui) = self.ui.upgrade() else { return false };
         let saved = self.settings.borrow().mini.position;
@@ -216,6 +258,9 @@ impl Controller {
         mini.window().set_position(PhysicalPosition::new(pos.0, pos.1));
         self.state.borrow_mut().mini = true;
         self.sampler.send(Command::Mini(true));
+        if !show {
+            return true;
+        }
         if let Err(e) = mini.show() {
             self.log.borrow_mut().line(format!("迷你窗口显示失败 {e}"));
             self.state.borrow_mut().mini = false;

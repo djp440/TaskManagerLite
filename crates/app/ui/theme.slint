@@ -2,7 +2,9 @@ import { Palette } from "std-widgets.slint";
 import { ResourceTint } from "types.slint";
 
 export global Theme {
-    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    // 跟随系统时 color-scheme 为 unknown，Fluent 按系统深浅色取色：此时从背景色推断。
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark
+        || (Palette.color-scheme == ColorScheme.unknown && Palette.background == #1C1C1C);
 
     out property <color> cpu: #4c9bf5;
     out property <color> memory: #b37feb;

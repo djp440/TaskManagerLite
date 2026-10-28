@@ -6,8 +6,10 @@ import { PerformancePage } from "performance-page.slint";
 import { MiniWindow, OpacityChoice } from "mini-window.slint";
 import { MemoryView } from "memory-detail.slint";
 import { StatItem } from "stats-panel.slint";
+import { SegmentedControl, ShieldIcon } from "controls.slint";
+import { SettingsPage, SettingsData } from "settings-page.slint";
 
-export { ColumnLayout, MemoryView, ProcRow, Resource, ResourceKind, ResourceTint, StatItem, Columns, ProcessMenu, MiniWindow, OpacityChoice }
+export { ColumnLayout, MemoryView, ProcRow, Resource, ResourceKind, ResourceTint, StatItem, Columns, ProcessMenu, MiniWindow, OpacityChoice, SettingsData }
 export { CoreGraph, CpuData, GridLayout } from "cpu-detail.slint";
 
 component Tab inherits Rectangle {
@@ -47,70 +49,6 @@ component Tab inherits Rectangle {
     }
 }
 
-// 分段选择：一组互斥的选项并排显示，当前项高亮。
-component SegmentedControl inherits Rectangle {
-    in property <[string]> model;
-    in-out property <int> current-index;
-    callback selected(int);
-
-    height: 30px;
-    width: row.preferred-width;
-    border-radius: 7px;
-    background: Theme.hover;
-    border-width: 1px;
-    border-color: Theme.divider;
-
-    row := HorizontalLayout {
-        padding: 2px;
-        spacing: 2px;
-        for label[i] in root.model: Rectangle {
-            width: caption.preferred-width + 24px;
-            border-radius: 5px;
-            background: i == root.current-index ? Theme.selected : touch.has-hover ? Theme.hover : transparent;
-            touch := TouchArea {
-                clicked => {
-                    root.current-index = i;
-                    root.selected(i);
-                }
-            }
-
-            caption := Text {
-                text: label;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                font-weight: i == root.current-index ? 600 : 400;
-                color: i == root.current-index ? Palette.foreground : Theme.subtle-text;
-            }
-        }
-    }
-}
-
-// 盾牌图标：表示需要管理员权限的操作（与 Windows 的 UAC 盾牌同义），左半实心、右半描边。
-component ShieldIcon inherits Rectangle {
-    in property <brush> tint;
-    width: 16px;
-    height: 16px;
-
-    Path {
-        width: 100%;
-        height: 100%;
-        viewbox-width: 16;
-        viewbox-height: 16;
-        fill: root.tint;
-        commands: "M 8 1.6 L 8 14.6 C 4.9 13.7 2.6 11 2.6 7.6 L 2.6 3.6 Z";
-    }
-
-    Path {
-        width: 100%;
-        height: 100%;
-        viewbox-width: 16;
-        viewbox-height: 16;
-        stroke: root.tint;
-        stroke-width: 1.3px;
-        commands: "M 8 1.6 L 13.4 3.6 L 13.4 7.6 C 13.4 11 11.1 13.7 8 14.6 C 4.9 13.7 2.6 11 2.6 7.6 L 2.6 3.6 Z";
-    }
-}
-
 // 图钉图标：窗口置顶。未置顶时描边，置顶时实心。
 component PinIcon inherits Rectangle {
     in property <brush> tint;
@@ -137,6 +75,33 @@ component PinIcon inherits Rectangle {
         stroke: root.tint;
         stroke-width: 1.3px;
         commands: "M 8 9.8 L 8 14.8";
+    }
+}
+
+// 设置图标：齿轮轮廓与中心圆孔。
+component GearIcon inherits Rectangle {
+    in property <brush> tint;
+    width: 16px;
+    height: 16px;
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        stroke: root.tint;
+        stroke-width: 1.3px;
+        commands: "M 6.42 3.15 L 6.8 1.2 L 9.2 1.2 L 9.58 3.15 L 10.32 3.46 L 11.96 2.35 L 13.65 4.04 L 12.54 5.68 L 12.85 6.42 L 14.8 6.8 L 14.8 9.2 L 12.85 9.58 L 12.54 10.32 L 13.65 11.96 L 11.96 13.65 L 10.32 12.54 L 9.58 12.85 L 9.2 14.8 L 6.8 14.8 L 6.42 12.85 L 5.68 12.54 L 4.04 13.65 L 2.35 11.96 L 3.46 10.32 L 3.15 9.58 L 1.2 9.2 L 1.2 6.8 L 3.15 6.42 L 3.46 5.68 L 2.35 4.04 L 4.04 2.35 L 5.68 3.46 Z";
+    }
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        stroke: root.tint;
+        stroke-width: 1.3px;
+        commands: "M 10.2 8 A 2.2 2.2 0 1 0 5.8 8 A 2.2 2.2 0 1 0 10.2 8 Z";
     }
 }
 
@@ -260,7 +225,7 @@ component ConfirmDialog inherits Rectangle {
 export component AppWindow inherits Window {
     title: @tr("任务管理器 Lite");
     // 初始大小由 Rust 在显示前按设置写入。
-    in property <length> initial-width: 1040px;
+    in property <length> initial-width: 1080px;
     in property <length> initial-height: 700px;
     preferred-width: root.initial-width;
     preferred-height: root.initial-height;
@@ -321,13 +286,17 @@ export component AppWindow inherits Window {
     // 工具栏随窗口变窄依次收缩：
     // 1. 搜索框从 220px 缩到“舒适宽度”，即恰好放下完整的占位文字（由布局完成）；
     // 2. 仍放不下时，“以管理员身份重启”收成盾牌图标按钮（悬停显示提示）；
-    // 3. 还放不下时隐藏品牌字样（窗口标题栏仍显示应用名）。
+    // 3. 还放不下时隐藏品牌字样（窗口标题栏仍显示应用名）；
+    // 4. 仍放不下时收起置顶按钮（设置页里可以切换置顶）。
     // 档位按搜索框的舒适宽度判断；最窄时（约 800 以下）搜索框再缩到只放下简短占位文字。判断只用不随档位变化的量（各部分的首选/最小宽度），避免绑定循环。
     private property <string> search-hint: @tr("搜索名称或 PID（Ctrl+F）");
     private property <string> search-hint-short: @tr("搜索名称或 PID");
     private property <string> elevate-text: @tr("以管理员身份重启");
     private property <string> mini-text: @tr("迷你模式（Ctrl+M）");
     private property <string> pin-text: root.pinned ? @tr("取消置顶") : @tr("窗口置顶");
+    private property <string> settings-text: @tr("设置");
+    // 进入设置页之前的页面，再点设置按钮时回到这里。
+    private property <int> page-before-settings: 0;
     // Fluent 输入框左右内边距各 12px，另留 4px 光标余量。
     private property <length> search-comfort: min(220px, search-measure.preferred-width + 28px);
     private property <length> search-floor: min(root.search-comfort, max(140px, search-short-measure.preferred-width + 28px));
@@ -336,15 +305,33 @@ export component AppWindow inherits Window {
     // Fluent 按钮左右内边距各 12px；提权按钮的需求含它与左侧控件的 8px 间距。
     private property <length> elevate-text-need: root.elevated ? 0px : max(32px, elevate-measure.preferred-width + 24px) + 8px;
     private property <length> elevate-icon-need: root.elevated ? 0px : 32px + 8px;
-    private property <length> toolbar-core-need: tabs.preferred-width + toolbar-core.min-width + (root.page == 0 ? root.search-comfort - root.search-floor : 0px);
-    out property <bool> toolbar-elevate-compact: brand.preferred-width + root.toolbar-core-need + root.elevate-text-need > root.toolbar-room;
-    out property <bool> toolbar-brand-shown: brand.preferred-width + root.toolbar-core-need + (root.toolbar-elevate-compact ? root.elevate-icon-need : root.elevate-text-need) <= root.toolbar-room;
+    // 设置按钮与置顶按钮各 32px，加上与左侧控件的 8px 间距。
+    private property <length> icon-button-need: 32px + 8px;
+    private property <length> toolbar-core-need: tabs.preferred-width + toolbar-core.min-width + root.icon-button-need + (root.page == 0 ? root.search-comfort - root.search-floor : 0px);
+    out property <bool> toolbar-elevate-compact: brand.preferred-width + root.toolbar-core-need + root.icon-button-need + root.elevate-text-need > root.toolbar-room;
+    private property <length> elevate-need: root.toolbar-elevate-compact ? root.elevate-icon-need : root.elevate-text-need;
+    out property <bool> toolbar-brand-shown: brand.preferred-width + root.toolbar-core-need + root.icon-button-need + root.elevate-need <= root.toolbar-room;
+    out property <bool> toolbar-pin-shown: root.toolbar-core-need + root.icon-button-need + root.elevate-need <= root.toolbar-room;
     // 截图模式与单元测试据此断言工具栏没有被挤出窗口（最小宽度不超过窗口宽度即没有控件被裁剪）。
     out property <length> toolbar-min-width: toolbar.min-width;
 
     // 供截图模式切换深浅色。
     public function set-dark(dark: bool) {
         Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    // 主题设置：0 跟随系统，1 浅色，2 深色。
+    public function set-theme(mode: int) {
+        Palette.color-scheme = mode == 1 ? ColorScheme.light : mode == 2 ? ColorScheme.dark : ColorScheme.unknown;
+    }
+
+    function toggle-settings() {
+        if root.page == 2 {
+            root.page = root.page-before-settings;
+        } else {
+            root.page-before-settings = root.page;
+            root.page = 2;
+        }
     }
 
     function move-selection(delta: int) {
@@ -451,7 +438,7 @@ export component AppWindow inherits Window {
                                 width: self.preferred-width;
                                 height: parent.height;
                                 spacing: 8px;
-                                // 与 Tab 之间留 16px（Tab 自带内边距，视觉间距更大）；再宽会让默认 1040 宽度下提权按钮收成图标。
+                                // 与 Tab 之间留 16px（Tab 自带内边距，视觉间距更大）；再宽会让默认 1080 宽度下提权按钮收成图标。
                                 padding-right: 16px;
                                 Text {
                                     text: "TaskManager";
@@ -586,34 +573,35 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                    }
 
-                        // 置顶开关：图钉图标，置顶时换成强调色的实心图钉（按钮本身保持普通样式，避免整块强调色过于醒目）。
-                        VerticalLayout {
-                            alignment: center;
-                            Rectangle {
-                                width: 32px;
-                                height: 32px;
-                                Button {
-                                    width: 100%;
-                                    height: 100%;
-                                    accessible-label: root.pin-text;
-                                    // 与“结束进程”一致不转移焦点：键盘用户 Tab 到这里后可以继续按空格切换。
-                                    clicked => {
-                                        root.pinned = !root.pinned;
-                                    }
-                                    Tooltip {
-                                        TipBox {
-                                            text: root.pin-text;
-                                        }
+                    // 置顶开关：图钉图标，置顶时换成强调色的实心图钉（按钮本身保持普通样式，避免整块强调色过于醒目）。
+                    // 最窄时收起（设置页里仍可切换置顶）。
+                    if root.toolbar-pin-shown: VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+                            Button {
+                                width: 100%;
+                                height: 100%;
+                                accessible-label: root.pin-text;
+                                // 与“结束进程”一致不转移焦点：键盘用户 Tab 到这里后可以继续按空格切换。
+                                clicked => {
+                                    root.pinned = !root.pinned;
+                                }
+                                Tooltip {
+                                    TipBox {
+                                        text: root.pin-text;
                                     }
                                 }
+                            }
 
-                                PinIcon {
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                    tint: root.pinned ? Palette.accent-background : Palette.foreground;
-                                    filled: root.pinned;
-                                }
+                            PinIcon {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                tint: root.pinned ? Palette.accent-background : Palette.foreground;
+                                filled: root.pinned;
                             }
                         }
                     }
@@ -652,6 +640,34 @@ export component AppWindow inherits Window {
                                 x: (parent.width - self.width) / 2;
                                 y: (parent.height - self.height) / 2;
                                 tint: Palette.foreground;
+                            }
+                        }
+                    }
+
+                    // 设置入口：再点一次回到进入设置页之前的页面。
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+                            Button {
+                                width: 100%;
+                                height: 100%;
+                                accessible-label: root.settings-text;
+                                clicked => {
+                                    root.toggle-settings();
+                                }
+                                Tooltip {
+                                    TipBox {
+                                        text: root.settings-text;
+                                    }
+                                }
+                            }
+
+                            GearIcon {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                tint: root.page == 2 ? Palette.accent-background : Palette.foreground;
                             }
                         }
                     }
@@ -706,6 +722,15 @@ export component AppWindow inherits Window {
                     }
                     mini-mode => {
                         root.mini-mode();
+                    }
+                }
+
+                if root.page == 2: SettingsPage {
+                    elevated: root.elevated;
+                    pinned <=> root.pinned;
+                    interval-index <=> root.interval-index;
+                    interval-changed(i) => {
+                        root.interval-changed(i);
                     }
                 }
             }
