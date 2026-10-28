@@ -266,7 +266,7 @@ export component PerformancePage inherits Rectangle {
                             max-height: 64px;
                             border-width: 1px;
                             border-color: root.tint.with-alpha(0.55);
-                            Graph { line: line; tint: root.tint; grid: true; }
+                            Graph { line: line; area: root.data.gpu-areas[i]; tint: root.tint; grid: true; }
                         }
                     }
                 }

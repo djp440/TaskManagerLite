@@ -965,6 +965,7 @@ impl Controller {
 
                 Resource {
                     gpu_lines: ModelRc::new(VecModel::from(memory_graphs.iter().map(|p| SharedString::from(p.0.clone())).collect::<Vec<_>>())),
+                    gpu_areas: ModelRc::new(VecModel::from(memory_graphs.iter().map(|p| SharedString::from(p.2.clone())).collect::<Vec<_>>())),
                     gpu_scales: ModelRc::new(VecModel::from(memory_graphs.iter().map(|p| SharedString::from(p.1.clone())).collect::<Vec<_>>())),
                     adapter_name: gpu.map(|g| g.name.clone()).or_else(|| network.map(|n| n.name.clone())).unwrap_or_default().into(),
                     adapter_description: network.map(|n| n.description.clone()).unwrap_or_default().into(),
