@@ -154,7 +154,7 @@ impl Controller {
                     c.set_mini_opacity(p.clamp(0, 100) as u8);
                 }
             });
-            w.on_pinned_changed(|| Self::reapply_opacity_soon());
+            w.on_pinned_changed(Self::reapply_opacity_soon);
             let c = Rc::downgrade(self);
             w.on_quit(move || {
                 if let Some(c) = c.upgrade() {
