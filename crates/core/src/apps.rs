@@ -104,8 +104,12 @@ impl DesktopProbe {
             } else {
                 None
             };
-            // 创建失败（如开机自启时外壳尚未就绪）只是暂时退避，之后会再试；成功则清零。
-            if self.manager.is_some() { self.backoff.succeeded() } else { self.backoff.failed(now) }
+            // 创建失败（如开机自启时外壳尚未就绪）只是暂时退避，之后会再试。创建成功不清零：
+            // 否则某个窗口的查询持续失败时会形成“创建成功→查询失败→退避 1 秒→再创建”的循环，退避爬不上去；
+            // 只有查询成功（`on_other_desktop`）才算恢复。
+            if self.manager.is_none() {
+                self.backoff.failed(now);
+            }
         }
         self.manager.as_ref()
     }
@@ -300,12 +304,22 @@ mod tests {
         assert!(probe.manager.is_some(), "应已创建 IVirtualDesktopManager");
         // 无效句柄：系统回答“在当前桌面”（Ok(TRUE)），同样不会被当成其他桌面上的应用。
         assert!(!probe.on_other_desktop(HWND(0x7777_7777 as _)));
-        assert_eq!(probe.backoff.failures, 0, "创建成功后失败计数为 0");
+        assert_eq!(probe.backoff.failures, 0, "查询成功后失败计数为 0");
         // 只有一个桌面时完全不触碰 COM。
         let mut single = DesktopProbe::default();
         single.multiple_desktops = Some(false);
         assert!(!single.on_other_desktop(HWND(0x7777_7777 as _)));
         assert!(single.manager.is_none() && single.backoff.failures == 0 && !single.com_tried && !single.com_initialized);
+    }
+
+    #[test]
+    fn desktop_probe_respects_backoff_without_touching_com() {
+        // 退避期内 manager() 直接返回 None，且不会去初始化 COM、不会再创建管理器。
+        let mut probe = DesktopProbe::default();
+        probe.backoff.failed(Instant::now());
+        assert!(probe.manager().is_none());
+        assert!(!probe.com_tried && !probe.com_initialized && probe.manager.is_none());
+        assert_eq!(probe.backoff.failures, 1, "退避期内不应改动失败计数");
     }
 
     #[test]

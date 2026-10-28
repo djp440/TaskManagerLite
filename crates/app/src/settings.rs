@@ -80,6 +80,8 @@ pub struct Settings {
     /// 性能页选中的资源实例 id（`cpu`、`memory`、`disk`、`network`……）。
     pub resource: String,
     pub columns: ColumnWidths,
+    /// 用 ETW 统计进程磁盘速率（需要管理员权限，默认关闭，见 ADR-0004）。
+    pub accurate_disk_io: bool,
     /// 窗口置顶。
     pub always_on_top: bool,
     /// 用户选择用本程序接管 Ctrl+Shift+Esc（IFEO 登记，见 ADR 0003）。这只是意愿，登记是否有效以注册表为准。
@@ -104,6 +106,7 @@ impl Default for Settings {
             page: 0,
             resource: "cpu".into(),
             columns: ColumnWidths::default(),
+            accurate_disk_io: false,
             always_on_top: false,
             replace_taskmgr: false,
             background_sampling: false,
@@ -117,7 +120,7 @@ impl Default for Settings {
 // `tree` 是旧版的布尔视图开关，读取时迁移为 `view`，保存时不再写出。
 const KNOWN: &[&str] = &[
     "window", "interval_index", "tree", "view", "sort", "page", "resource", "columns", "always_on_top",
-    "replace_taskmgr", "background_sampling", "close_to_tray",
+    "replace_taskmgr", "accurate_disk_io", "background_sampling", "close_to_tray",
 ];
 
 fn int<T: TryFrom<i64>>(o: &Map<String, Value>, key: &str) -> Option<T> {
@@ -245,6 +248,9 @@ impl Settings {
         if let Some(b) = o.get("close_to_tray").and_then(Value::as_bool) {
             s.close_to_tray = b;
         }
+        if let Some(b) = o.get("accurate_disk_io").and_then(Value::as_bool) {
+            s.accurate_disk_io = b;
+        }
         if let Some(b) = o.get("always_on_top").and_then(Value::as_bool) {
             s.always_on_top = b;
         }
@@ -280,6 +286,7 @@ impl Settings {
         c.insert("memory".into(), number(self.columns.memory));
         c.insert("disk".into(), number(self.columns.disk));
         o.insert("columns".into(), Value::Object(c));
+        o.insert("accurate_disk_io".into(), self.accurate_disk_io.into());
         o.insert("always_on_top".into(), self.always_on_top.into());
         o.insert("replace_taskmgr".into(), self.replace_taskmgr.into());
         o.insert("background_sampling".into(), self.background_sampling.into());
@@ -380,6 +387,7 @@ mod tests {
             page: 1,
             resource: "network".into(),
             columns: ColumnWidths { pid: 90.0, cpu: 64.5, memory: 140.0, disk: 200.0 },
+            accurate_disk_io: true,
             always_on_top: true,
             replace_taskmgr: true,
             background_sampling: true,
@@ -430,7 +438,7 @@ mod tests {
             r#"{"tree": "yes", "view": 5, "interval_index": "2", "page": 5, "resource": 3,
                 "sort": {"key": 7, "descending": "no"},
                 "window": {"x": 1, "y": 2, "width": "wide", "height": 3},
-                "columns": {"pid": "x", "cpu": 100, "memory": null}, "always_on_top": 1}"#,
+                "columns": {"pid": "x", "cpu": 100, "memory": null}, "accurate_disk_io": "yes", "always_on_top": 1}"#,
         );
         let d = Settings::default();
         assert_eq!(s.view, d.view);
@@ -440,8 +448,23 @@ mod tests {
         assert_eq!(s.sort_key, d.sort_key);
         assert_eq!(s.descending, d.descending);
         assert_eq!(s.window, None);
+        assert!(!s.accurate_disk_io);
         assert_eq!(s.columns, ColumnWidths { cpu: 100.0, ..ColumnWidths::default() });
         assert!(!s.always_on_top);
+    }
+
+    #[test]
+    fn 精确磁盘开关默认关闭且可读写() {
+        assert!(!Settings::default().accurate_disk_io);
+        assert!(!parse("{}").accurate_disk_io);
+        assert!(parse(r#"{"accurate_disk_io": true}"#).accurate_disk_io);
+        // 非布尔值回退为关闭，而不是被当成“未知字段”原样保留。
+        for bad in ["1", "\"true\"", "null"] {
+            let s = parse(&format!("{{\"accurate_disk_io\": {bad}}}"));
+            assert!(!s.accurate_disk_io, "{bad}");
+            let out: Value = serde_json::from_str(&s.to_json()).unwrap();
+            assert_eq!(out["accurate_disk_io"], false);
+        }
     }
 
     #[test]

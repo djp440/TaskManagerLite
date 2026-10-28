@@ -592,6 +592,9 @@ impl Controller {
         let now = Instant::now();
         // 只采系统指标的采样（窗口不可见）不带进程快照：保留上一份，界面也不刷新，回到前台时马上会补一次完整采样。
         let fresh = sample.processes_fresh;
+        if let Some(ui) = self.ui.upgrade() {
+            ui.global::<Columns>().set_disk_accurate(sample.disk_source == tml_core::DiskSource::Etw);
+        }
         {
             let mut s = self.state.borrow_mut();
             let m = sample.system;

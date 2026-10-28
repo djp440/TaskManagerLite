@@ -15,7 +15,13 @@ use crate::nt::RawProcess;
 use crate::snapshot::ProcessKey;
 use crate::system::filetime;
 
-struct OwnedHandle(HANDLE);
+pub(crate) struct OwnedHandle(HANDLE);
+
+impl OwnedHandle {
+    pub(crate) fn raw(&self) -> HANDLE {
+        self.0
+    }
+}
 
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
@@ -25,11 +31,11 @@ impl Drop for OwnedHandle {
     }
 }
 
-fn open(pid: u32, access: PROCESS_ACCESS_RIGHTS) -> windows::core::Result<OwnedHandle> {
+pub(crate) fn open(pid: u32, access: PROCESS_ACCESS_RIGHTS) -> windows::core::Result<OwnedHandle> {
     unsafe { OpenProcess(access, false, pid) }.map(OwnedHandle)
 }
 
-fn create_time(h: &OwnedHandle) -> Option<u64> {
+pub(crate) fn create_time(h: &OwnedHandle) -> Option<u64> {
     let mut t = [FILETIME::default(); 4];
     let [c, e, k, u] = &mut t;
     unsafe { GetProcessTimes(h.0, c, e, k, u) }.ok()?;
