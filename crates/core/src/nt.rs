@@ -219,7 +219,20 @@ mod tests {
         assert!(p.threads >= 1 && p.handles > 0, "{p:?}");
         assert!(p.working_set > 0 && p.peak_working_set >= p.working_set && p.commit > 0, "{p:?}");
         assert!(!p.suspended);
-        assert_eq!(p.base_priority, 8, "测试进程应为正常优先级");
+        // CI 的执行器可能以非正常优先级运行测试，按本进程实际的优先级类核对。
+        // SAFETY: 伪句柄，无需关闭。
+        let class = unsafe {
+            windows::Win32::System::Threading::GetPriorityClass(windows::Win32::System::Threading::GetCurrentProcess())
+        };
+        let expected = match class {
+            0x40 => 4,
+            0x4000 => 6,
+            0x8000 => 10,
+            0x80 => 13,
+            0x100 => 24,
+            _ => 8,
+        };
+        assert_eq!(p.base_priority, expected, "基本优先级应与本进程的优先级类 {class:#x} 一致");
     }
 
     #[test]

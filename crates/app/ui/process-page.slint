@@ -491,7 +491,8 @@ export component ProcessPage inherits Rectangle {
                     for c[i] in Columns.choices: MenuItem {
                         title: c.title;
                         checkable: true;
-                        checked: c.shown;
+                        // 双向绑定：原生菜单激活勾选项时会直接改写 checked，单向绑定会因此失效，之后“恢复默认列”等改动就不再反映到勾选状态上。
+                        checked <=> c.shown;
                         activated => {
                             Columns.toggle-detail(i);
                         }
