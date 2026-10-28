@@ -8,6 +8,8 @@ mod placement;
 mod sampling;
 mod screenshot;
 mod settings;
+#[cfg(all(test, feature = "renderer-software"))]
+mod toolbar_fit;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
