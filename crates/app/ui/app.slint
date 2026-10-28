@@ -1,12 +1,12 @@
 import { Button, CheckBox, ComboBox, LineEdit, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { ColumnLayout, ProcRow, Resource, ResourceKind, ResourceTint } from "types.slint";
-import { ProcessPage, Columns } from "process-page.slint";
+import { ProcessPage, Columns, ProcessMenu } from "process-page.slint";
 import { PerformancePage } from "performance-page.slint";
 import { MemoryView } from "memory-detail.slint";
 import { StatItem } from "stats-panel.slint";
 
-export { ColumnLayout, MemoryView, ProcRow, Resource, ResourceKind, ResourceTint, StatItem, Columns }
+export { ColumnLayout, MemoryView, ProcRow, Resource, ResourceKind, ResourceTint, StatItem, Columns, ProcessMenu }
 
 component Tab inherits Rectangle {
     in property <string> text;
@@ -434,12 +434,14 @@ export component AppWindow inherits Window {
                         vertical-alignment: center;
                         overflow: elide;
                         font-size: 12px;
-                        color: root.status-kind == 1 ? Theme.subtle-text : Theme.danger;
+                        color: root.status-kind == 1 || root.status-kind == 6 || root.status-kind == 7 ? Theme.subtle-text : Theme.danger;
                         text: root.status-kind == 1 ? @tr("已结束 {0}", root.status-arg)
                             : root.status-kind == 2 ? @tr("没有权限结束 {0}，可以以管理员身份重启后再试", root.status-arg)
                             : root.status-kind == 3 ? @tr("{0} 已经退出", root.status-arg)
                             : root.status-kind == 4 ? @tr("已取消以管理员身份重启")
                             : root.status-kind == 5 ? @tr("操作失败：{0}", root.status-arg)
+                            : root.status-kind == 6 ? @tr("已复制 {0} 的路径", root.status-arg)
+                            : root.status-kind == 7 ? @tr("已复制 {0} 的命令行", root.status-arg)
                             : "";
                     }
                 }

@@ -6,9 +6,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use slint::platform::{PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, LogicalSize, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
+use slint::{ComponentHandle, LogicalPosition, Model, LogicalSize, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
 
-use crate::{AppWindow, Columns};
+use crate::{AppWindow, Columns, ProcessMenu};
 
 type Step = (&'static str, fn(&AppWindow));
 
@@ -107,6 +107,71 @@ const STEPS: &[Step] = &[
         ui.invoke_filter_edited("System".into());
     }),
 ];
+
+/// `--menu-shot <过滤>[:pid]:<dark|light>`：切换主题、过滤并（`:pid` 时按 PID 升序，PID 4 排第一）
+/// 在第一行右键，弹出原生右键菜单。原生菜单是系统窗口，`take_snapshot` 截不到，
+/// 由 `scripts/menu-screenshots.ps1` 从外部抓取，所以这里不退出，菜单会一直阻塞到被脚本结束进程。
+pub fn run_menu(ui: &AppWindow, spec: &str, warmup: Duration) {
+    ui.window().set_position(PhysicalPosition::new(-6000, -6000));
+    let parts: Vec<&str> = spec.split(':').collect();
+    let filter = parts.first().copied().unwrap_or("").to_string();
+    let by_pid = parts.contains(&"pid");
+    let dark = !parts.contains(&"light");
+    let weak = ui.as_weak();
+    Timer::single_shot(warmup, move || {
+        let Some(ui) = weak.upgrade() else { return };
+        // 暂停采样，列表不再重排。
+        ui.set_interval_index(3);
+        ui.invoke_interval_changed(3);
+        ui.invoke_set_dark(dark);
+        ui.set_filter(filter.as_str().into());
+        ui.invoke_filter_edited(filter.as_str().into());
+        if by_pid {
+            ui.invoke_sort_by(1);
+        }
+        // 等列表布局完成后，在第一行名称列上右键（顶栏 56 + 表头 34 + 半行 15）。
+        Timer::single_shot(Duration::from_millis(500), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let at = LogicalPosition::new(120.0, 56.0 + 34.0 + 15.0);
+            let w = ui.window();
+            w.dispatch_event(WindowEvent::PointerMoved { position: at });
+            w.dispatch_event(WindowEvent::PointerPressed { position: at, button: PointerEventButton::Right });
+            w.dispatch_event(WindowEvent::PointerReleased { position: at, button: PointerEventButton::Right });
+        });
+    });
+}
+
+/// `--menu-action <动作>:<pid>`：选中指定 PID 的进程并直接触发一个右键菜单动作
+/// （`open-location`、`properties`、`copy-path`、`copy-command-line`），用于 `scripts/test-menu-actions.ps1`
+/// 自动验收，免去点击原生菜单。动作执行后不退出，由脚本检查结果并结束进程。
+pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
+    ui.window().set_position(PhysicalPosition::new(-6000, -6000));
+    let (action, pid) = spec.split_once(':').unwrap_or((spec, "0"));
+    let (action, pid) = (action.to_string(), pid.parse::<i32>().unwrap_or(0));
+    let weak = ui.as_weak();
+    Timer::single_shot(warmup, move || {
+        let Some(ui) = weak.upgrade() else { return };
+        ui.set_filter(pid.to_string().as_str().into());
+        ui.invoke_filter_edited(pid.to_string().as_str().into());
+        Timer::single_shot(Duration::from_millis(500), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let rows = ui.get_rows();
+            let Some(i) = (0..rows.row_count()).find(|&i| rows.row_data(i).is_some_and(|r| r.pid == pid)) else {
+                eprintln!("列表中没有 pid {pid}");
+                return;
+            };
+            ui.invoke_select(i as i32);
+            let menu = ui.global::<ProcessMenu>();
+            match action.as_str() {
+                "open-location" => menu.invoke_open_location(),
+                "properties" => menu.invoke_show_properties(),
+                "copy-path" => menu.invoke_copy_path(),
+                "copy-command-line" => menu.invoke_copy_command_line(),
+                other => eprintln!("未知动作 {other}"),
+            }
+        });
+    });
+}
 
 /// 在表头（y = 56 + 17）的 `x` 处按下并水平拖动 `dx` 逻辑像素。
 fn drag(ui: &AppWindow, x: f32, dx: f32) {
