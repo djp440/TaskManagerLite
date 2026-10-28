@@ -42,6 +42,8 @@ const STATUS_ERROR: i32 = 5;
 
 const CONFIRM_CRITICAL: i32 = 1;
 const CONFIRM_TREE: i32 = 2;
+/// 隐藏启动时托盘图标创建失败的重试次数（每秒一次）。
+const TRAY_RETRIES: u32 = 30;
 
 pub struct Controller {
     ui: slint::Weak<AppWindow>,
@@ -68,6 +70,8 @@ pub struct Controller {
     tray: RefCell<Option<Tray>>,
     /// 托盘图标创建失败过一次就不再重试（例如没有任务栏）。
     tray_failed: Cell<bool>,
+    /// 隐藏启动时托盘图标创建失败后已重试的次数（见 `ensure_tray`）。
+    tray_retries: Cell<u32>,
     /// 窗口被隐藏到托盘（与最小化不同：任务栏上没有按钮，只能从托盘或再次启动唤起）。
     hidden: Cell<bool>,
     /// 迷你模式的窗口，第一次进入迷你模式时创建（见 `mini.rs`）。
@@ -228,6 +232,7 @@ impl Controller {
             store,
             tray: RefCell::new(None),
             tray_failed: Cell::new(false),
+            tray_retries: Cell::new(0),
             hidden: Cell::new(false),
             mini: OnceCell::new(),
             drag_pending: Cell::new(false),
@@ -433,10 +438,11 @@ impl Controller {
         }
         settings.mini.active = self.is_mini();
         settings.interval_index = ui.get_interval_index();
-        // 设置页不记录，保留进入它之前的页面。
-        if let p @ 0..=1 = ui.get_page() {
-            settings.page = p;
-        }
+        // 设置页不记录，记录进入它之前的页面。
+        settings.page = match ui.get_page() {
+            2 => ui.get_page_before_settings(),
+            p => p,
+        };
         settings.always_on_top = ui.get_pinned();
         let cols = ui.global::<Columns>();
         settings.columns = ColumnWidths {
@@ -567,9 +573,21 @@ impl Controller {
         self.log.borrow_mut().line(if tray.is_some() { "托盘图标已创建" } else { "托盘图标创建失败" });
         let failed = tray.is_none();
         *self.tray.borrow_mut() = tray;
-        // 开机启动时直接隐藏到托盘，图标却建不出来：把窗口显示出来，否则用户找不到它。
         if failed && self.hidden.get() {
-            self.show_window();
+            // 开机启动时直接隐藏到托盘：登录早期通知区可能还没就绪，每秒重试；一直建不出来就把窗口显示出来，否则用户找不到它。
+            let tries = self.tray_retries.get();
+            if tries < TRAY_RETRIES {
+                self.tray_retries.set(tries + 1);
+                slint::Timer::single_shot(Duration::from_secs(1), || {
+                    let controller = crate::CONTROLLER.with(|c| c.borrow().clone());
+                    if let Some(c) = controller {
+                        c.tray_failed.set(false);
+                        c.ensure_tray();
+                    }
+                });
+            } else {
+                self.show_window();
+            }
         }
     }
 

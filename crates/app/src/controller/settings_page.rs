@@ -130,7 +130,7 @@ impl Controller {
 
     /// 读取开机启动状态写回界面；`error` 是刚才修改失败的原因，优先显示。
     fn refresh_autostart(&self, error: Option<String>) {
-        let status = exe().and_then(|exe| AutostartKey::from_env().status(&exe));
+        let status = AutostartKey::from_env().and_then(|key| key.status(&exe()?));
         let note = error.unwrap_or_else(|| autostart_note(&status));
         let on = status.as_ref().is_ok_and(Autostart::is_on);
         self.settings_data(|d| {
@@ -140,7 +140,7 @@ impl Controller {
     }
 
     fn set_autostart(&self, on: bool) {
-        let result = exe().and_then(|exe| AutostartKey::from_env().set(&exe, on));
+        let result = AutostartKey::from_env().and_then(|key| key.set(&exe()?, on));
         self.log.borrow_mut().line(format!("开机启动 设为={on} 结果={result:?}"));
         self.refresh_autostart(result.err().map(|e| format!("无法修改开机启动：{e}")));
     }
@@ -177,7 +177,11 @@ impl Controller {
             Some(e) => (e.to_string(), !matches!(e, IfeoError::Cancelled)),
             None => taskmgr_note(&status, wanted),
         };
-        let on = matches!(status, Ok(Registration::ThisExe));
+        // 读不出状态时开关沿用设置里的意愿，只显示错误，免得已登记的用户误以为没有登记。
+        let on = match status {
+            Ok(r) => matches!(r, Registration::ThisExe),
+            Err(_) => wanted,
+        };
         self.settings_data(|d| {
             d.set_replace_taskmgr(on);
             d.set_taskmgr_note(note.into());

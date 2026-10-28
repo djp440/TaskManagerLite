@@ -14,8 +14,8 @@ use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, VK_LBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetCursorPos, GetLayeredWindowAttributes, GetWindowLongPtrW, HTCAPTION, LAYERED_WINDOW_ATTRIBUTES_FLAGS,
-    LWA_ALPHA, PostMessageW, SW_MINIMIZE, SetLayeredWindowAttributes, SetWindowLongPtrW, ShowWindow, WM_NCLBUTTONDOWN,
-    WS_EX_LAYERED,
+    LWA_ALPHA, PostMessageW, SW_SHOWMINNOACTIVE, SetLayeredWindowAttributes, SetWindowLongPtrW, ShowWindow,
+    WM_NCLBUTTONDOWN, WS_EX_LAYERED,
 };
 
 use super::Controller;
@@ -196,19 +196,19 @@ impl Controller {
         }
         if autostart {
             self.log.borrow_mut().line("开机启动 最小化");
-            self.minimize_when_created(40);
+            self.minimize_when_created(100);
         }
         Ok(())
     }
 
     /// 把当前模式的窗口最小化。winit 不支持以最小化状态创建窗口，窗口创建前调用 `set_minimized` 也会被忽略，
-    /// 所以等到窗口句柄出现后直接用 Win32 最小化（之后 winit 会同步最小化状态）。
+    /// 所以等到窗口句柄出现后直接用 Win32 最小化（不激活其他窗口；之后 winit 会同步最小化状态）。
     /// `tries` 次（每次间隔 50ms）之后仍没有句柄就放弃。
     fn minimize_when_created(&self, tries: u32) {
         match self.with_active(hwnd_of).flatten() {
             // SAFETY: hwnd 是本进程刚取得的有效窗口句柄。
             Some(hwnd) => unsafe {
-                let _ = ShowWindow(hwnd, SW_MINIMIZE);
+                let _ = ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
             },
             None if tries > 0 => slint::Timer::single_shot(Duration::from_millis(50), move || {
                 let controller = crate::CONTROLLER.with(|c| c.borrow().clone());

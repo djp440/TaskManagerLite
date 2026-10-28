@@ -295,8 +295,8 @@ export component AppWindow inherits Window {
     private property <string> mini-text: @tr("迷你模式（Ctrl+M）");
     private property <string> pin-text: root.pinned ? @tr("取消置顶") : @tr("窗口置顶");
     private property <string> settings-text: @tr("设置");
-    // 进入设置页之前的页面，再点设置按钮时回到这里。
-    private property <int> page-before-settings: 0;
+    // 进入设置页之前的页面：再点齿轮时回到它，在设置页里保存设置时也记录它。
+    out property <int> page-before-settings: 0;
     // Fluent 输入框左右内边距各 12px，另留 4px 光标余量。
     private property <length> search-comfort: min(220px, search-measure.preferred-width + 28px);
     private property <length> search-floor: min(root.search-comfort, max(140px, search-short-measure.preferred-width + 28px));

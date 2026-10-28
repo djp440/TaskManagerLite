@@ -307,6 +307,8 @@ const STEPS: &[Step] = &[
     ("59-设置页-深色", |ui| {
         click_settings(ui);
         assert_eq!(ui.get_page(), 2, "点设置按钮应进入设置页");
+        // 在设置页里保存设置时记录的是这个页面。
+        assert_eq!(ui.get_page_before_settings(), 1, "应记下进入设置页之前的性能页");
         let d = ui.global::<SettingsData>();
         // 截图模式不读写设置文件，填一个示例路径展示页脚。
         d.set_settings_path(r"C:\Users\demo\AppData\Roaming\TaskManagerLite\settings.json".into());

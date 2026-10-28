@@ -7,7 +7,8 @@ use std::path::Path;
 
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR};
 use windows::Win32::System::Registry::{
-    HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_BINARY, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
+    HKEY_CURRENT_USER, REG_SZ, RRF_NOEXPAND, RRF_RT_REG_BINARY, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW,
+    RegGetValueW, RegSetKeyValueW,
 };
 use windows::core::PCWSTR;
 
@@ -51,13 +52,19 @@ impl AutostartKey {
         Self { run: RUN_KEY.into(), approved: APPROVED_KEY.into() }
     }
 
-    /// 设置了 [`AUTOSTART_TEST_KEY_ENV`] 且合法时用测试键，否则用真实位置。
-    pub fn from_env() -> Self {
-        match std::env::var(AUTOSTART_TEST_KEY_ENV) {
+    /// 没有设置 [`AUTOSTART_TEST_KEY_ENV`] 时用真实位置；设置了就必须是合法的测试键，否则报错，绝不退回真实的 Run 键。
+    pub fn from_env() -> std::io::Result<Self> {
+        Self::from_env_value(std::env::var(AUTOSTART_TEST_KEY_ENV))
+    }
+
+    fn from_env_value(v: Result<String, std::env::VarError>) -> std::io::Result<Self> {
+        match v {
+            Err(std::env::VarError::NotPresent) => Ok(Self::user()),
+            // 前缀之后至少要有一个字符，不能直接写在 TaskManagerLite-test 键本身上。
             Ok(k) if k.len() > TEST_KEY_PREFIX.len() && k.starts_with(TEST_KEY_PREFIX) && !k.contains("..") => {
-                Self::under(&k)
+                Ok(Self::under(&k))
             }
-            _ => Self::user(),
+            _ => Err(std::io::Error::other(format!("{AUTOSTART_TEST_KEY_ENV} 必须以 {TEST_KEY_PREFIX} 开头且其后不为空"))),
         }
     }
 
@@ -68,7 +75,8 @@ impl AutostartKey {
     }
 
     pub fn status(&self, exe: &Path) -> std::io::Result<Autostart> {
-        let Some(value) = read(&self.run, RRF_RT_REG_SZ.0)? else {
+        // 别的工具可能写成 REG_EXPAND_SZ，按原文读取（不展开环境变量）。
+        let Some(value) = read(&self.run, RRF_RT_REG_SZ.0 | RRF_RT_REG_EXPAND_SZ.0 | RRF_NOEXPAND.0)? else {
             return Ok(Autostart::Off);
         };
         let text = String::from_utf16_lossy(&value);
@@ -171,7 +179,7 @@ fn delete(subkey: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::System::Registry::{REG_BINARY, RegDeleteTreeW};
+    use windows::Win32::System::Registry::{REG_BINARY, REG_EXPAND_SZ, RegDeleteTreeW};
 
     /// 每个测试一个独立的测试键，结束时整棵删除。
     struct TestKey(String, AutostartKey);
@@ -240,5 +248,37 @@ mod tests {
         // 在本程序里重新开启会清掉系统的禁用标记。
         t.1.set(exe, true).unwrap();
         assert_eq!(t.1.status(exe).unwrap(), Autostart::On);
+    }
+
+    #[test]
+    fn 别的工具写成_reg_expand_sz_也能读() {
+        let t = TestKey::new("expand");
+        let (key, name) = (wide(&t.1.run), wide(VALUE_NAME));
+        let value = wide(r"%SystemDrive%\tools\other.exe");
+        check(unsafe {
+            RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                PCWSTR(key.as_ptr()),
+                PCWSTR(name.as_ptr()),
+                REG_EXPAND_SZ.0,
+                Some(value.as_ptr().cast()),
+                (value.len() * 2) as u32,
+            )
+        })
+        .unwrap();
+        let exe = Path::new(r"C:\new\TaskManagerLite.exe");
+        // 按原文读取，不展开环境变量。
+        assert!(matches!(t.1.status(exe).unwrap(), Autostart::OtherPath(p) if p == r"%SystemDrive%\tools\other.exe"));
+    }
+
+    #[test]
+    fn 测试键环境变量非法时报错而不是退回真实键() {
+        use std::env::VarError;
+        assert_eq!(AutostartKey::from_env_value(Err(VarError::NotPresent)).unwrap().run, RUN_KEY);
+        let ok = AutostartKey::from_env_value(Ok(format!("{TEST_KEY_PREFIX}x"))).unwrap();
+        assert_eq!(ok.run, format!(r"{TEST_KEY_PREFIX}x\Run"));
+        for bad in [String::new(), r"Software\Other".into(), TEST_KEY_PREFIX.into(), format!(r"{TEST_KEY_PREFIX}..\x")] {
+            assert!(AutostartKey::from_env_value(Ok(bad.clone())).is_err(), "{bad}");
+        }
     }
 }
