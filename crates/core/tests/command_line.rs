@@ -5,6 +5,8 @@ use std::os::windows::process::CommandExt;
 use tml_core::{ProcessKey, Sampler, command_line};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// 以挂起状态创建：进程不会退出，命令行在 CreateProcess 时已写入 PEB，可以读取。
+const CREATE_SUSPENDED: u32 = 0x4;
 
 /// 自己启动的子进程，测试结束时只结束它。
 struct Child(std::process::Child);
@@ -38,11 +40,12 @@ fn reads_the_exact_command_line_of_a_spawned_child() {
 #[test]
 fn quoted_arguments_are_preserved() {
     // 直接启动 ping（不经 cmd，避免遗留孙进程）；主机名参数含空格，会被加引号。
+    // 目标无法解析，ping 会很快退出，读命令行时进程可能已不存在，所以挂起创建（Drop 里的 kill 对挂起进程同样有效）。
     let child = Child(
         std::process::Command::new("ping")
             .args(["-t", "-w", "7777", "no such host.invalid"])
             .stdout(std::process::Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
+            .creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED)
             .spawn()
             .expect("启动子进程"),
     );

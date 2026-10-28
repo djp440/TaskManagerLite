@@ -3,7 +3,7 @@
 ## 2026-10-28 12:30 其他虚拟桌面上的应用（#40）
 - 其他桌面上的窗口和挂起的 UWP 窗口一样是 `DWMWA_CLOAKED=2`。区分靠 `IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop`：挂起的 UWP（计算器、Cortana、Text Input）都回答“在当前桌面”，无效句柄也回答 TRUE，所以“明确 FALSE”才算在其他桌面，不会误把挂起 UWP 算成应用。
 - 第一次调用该接口就会把 `twinapi.dll` 等拉进进程：常驻工作集约 +4 MB（私有基本不变），而且任何 Win10 上几乎总有被 cloak 的挂起 UWP 窗口，会无条件触发。所以先读 `HKCU\...\Explorer\VirtualDesktops\VirtualDesktopIDs`（16 字节一个桌面）：不足 2 个桌面（含值不存在）就不碰 COM；读取出错才按多桌面处理。单桌面机器的分组视图内存与 main 无差别。
-- COM 在采样线程第一次需要时用 MTA 初始化，`IVirtualDesktopManager` 存在 thread_local 里只创建一次；创建或查询失败后按 1s 起翻倍（最长 60s）的退避重试，只计连续失败、成功清零、没有永久放弃的上限（开机自启时外壳未就绪、资源管理器重启都能恢复）；线程已用别的模型初始化（`RPC_E_CHANGED_MODE`）时沿用且不反初始化。
+- COM 在采样线程第一次需要时用 MTA 初始化，`IVirtualDesktopManager` 存在 thread_local 里只创建一次；创建或查询失败后按 1s 起翻倍（最长 60s）的退避重试，只计连续失败、没有永久放弃的上限；清零只发生在查询成功时，创建成功不清零（否则某窗口的查询持续失败会形成“创建成功→查询失败→退避 1 秒→再创建”的循环，退避爬不上去）（开机自启时外壳未就绪、资源管理器重启都能恢复）；线程已用别的模型初始化（`RPC_E_CHANGED_MODE`）时沿用且不反初始化。
 - `MoveWindowToDesktop` 通常只允许移动调用方进程自己的窗口：测试用自己创建的窗口，记事本只尝试一次，被拒绝就说明并跳过。
 
 ## 2026-10-28 12:20 ETW 磁盘速率（#5）
