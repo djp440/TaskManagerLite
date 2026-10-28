@@ -212,6 +212,48 @@ const STEPS: &[Step] = &[
         ui.window().dispatch_event(WindowEvent::PointerMoved { position: at });
     }),
     ("48-工具栏-置顶按钮提示-深色-900x600", |_| {}),
+    // 详细信息列：依次勾选状态、用户名、句柄、线程、描述、映像路径、命令行（按勾选顺序追加在最右），
+    // 总宽超出窗口，表格横向滚动。静态信息由后台读取，下一步再截图，等结果到达。
+    ("49-详细信息列-读取中-深色", |ui| {
+        toolbar(ui, 0, false, true, 1040.0);
+        resize(ui, 1040.0, 700.0);
+        // 指针离开置顶按钮，收起上一步的提示。
+        ui.window().dispatch_event(WindowEvent::PointerExited);
+        let cols = ui.global::<Columns>();
+        for i in [0, 1, 4, 5, 15, 11, 12] {
+            cols.invoke_toggle_detail(i);
+        }
+    }),
+    ("50-详细信息列-深色", |_| {}),
+    // 横向滚动到最右：表头与行一起滚动，名称列保持最小宽度。
+    ("51-详细信息列-滚到最右-深色", |ui| {
+        let at = LogicalPosition::new(500.0, 400.0);
+        ui.window().dispatch_event(WindowEvent::PointerMoved { position: at });
+        ui.window().dispatch_event(WindowEvent::PointerScrolled { position: at, delta_x: -5000.0, delta_y: 0.0 });
+    }),
+    // 滚到最右时拖宽最后一列（命令行）的左边缘 80 像素：列跟随指针变宽，右侧内容不动。
+    ("52-详细信息列-滚动时拖宽-深色", |ui| {
+        let width = ui.window().size().to_logical(ui.window().scale_factor()).width;
+        let cols = ui.global::<Columns>();
+        let last = cols.get_extra().row_count() - 1;
+        let before = cols.get_extra().row_data(last).unwrap().width;
+        drag(ui, width - 10.0 - before, -80.0);
+        let after = cols.get_extra().row_data(last).unwrap().width;
+        assert!((after - before - 80.0).abs() < 1.0, "命令行列应变宽 80：{before} → {after}");
+        eprintln!("滚动时拖宽详细信息列：{before} → {after}");
+    }),
+    ("53-详细信息列-按线程排序-浅色-760x480", |ui| {
+        ui.invoke_set_dark(false);
+        resize(ui, 760.0, 480.0);
+        ui.invoke_sort_by(crate::controller::detail_sort_index(tml_core::DetailColumn::Threads));
+    }),
+    // 恢复默认列：回到只有基本列、名称列伸缩的布局，排序回到 CPU。
+    ("54-详细信息列-恢复默认-深色", |ui| {
+        ui.invoke_set_dark(true);
+        resize(ui, 1040.0, 700.0);
+        ui.global::<Columns>().invoke_reset_details();
+        assert_eq!(ui.get_sort_key(), 2, "隐藏排序列后应回到按 CPU 排序");
+    }),
 ];
 
 /// 工具栏截图的统一设定：页面、提权状态、主题与窗口宽度（高 600），平铺视图、无搜索词。
@@ -278,14 +320,15 @@ fn use_demo_cores(ui: &AppWindow, cores: usize) {
 }
 
 
-/// `--menu-shot <过滤>[:pid]:<dark|light>`：切换主题、过滤并（`:pid` 时按 PID 升序，PID 4 排第一）
-/// 在第一行右键，弹出原生右键菜单。原生菜单是系统窗口，`take_snapshot` 截不到，
+/// `--menu-shot <过滤>[:pid][:header]:<dark|light>`：切换主题、过滤并（`:pid` 时按 PID 升序，PID 4 排第一）
+/// 在第一行右键，弹出原生右键菜单；`:header` 时先显示用户名、线程两列，再在“名称”列标题上右键弹出列选择菜单。原生菜单是系统窗口，`take_snapshot` 截不到，
 /// 由 `scripts/menu-screenshots.ps1` 从外部抓取，所以这里不退出，菜单会一直阻塞到被脚本结束进程。
 pub fn run_menu(ui: &AppWindow, spec: &str, warmup: Duration) {
     ui.window().set_position(PhysicalPosition::new(-6000, -6000));
     let parts: Vec<&str> = spec.split(':').collect();
     let filter = parts.first().copied().unwrap_or("").to_string();
     let by_pid = parts.contains(&"pid");
+    let header = parts.contains(&"header");
     let dark = !parts.contains(&"light");
     let weak = ui.as_weak();
     Timer::single_shot(warmup, move || {
@@ -299,10 +342,15 @@ pub fn run_menu(ui: &AppWindow, spec: &str, warmup: Duration) {
         if by_pid {
             ui.invoke_sort_by(1);
         }
+        if header {
+            let cols = ui.global::<Columns>();
+            cols.invoke_toggle_detail(1);
+            cols.invoke_toggle_detail(5);
+        }
         // 等列表布局完成后，在第一行名称列上右键（顶栏 56 + 表头 34 + 半行 15）。
         Timer::single_shot(Duration::from_millis(500), move || {
             let Some(ui) = weak.upgrade() else { return };
-            let at = LogicalPosition::new(120.0, 56.0 + 34.0 + 15.0);
+            let at = LogicalPosition::new(120.0, if header { 56.0 + 17.0 } else { 56.0 + 34.0 + 15.0 });
             let w = ui.window();
             w.dispatch_event(WindowEvent::PointerMoved { position: at });
             w.dispatch_event(WindowEvent::PointerPressed { position: at, button: PointerEventButton::Right });

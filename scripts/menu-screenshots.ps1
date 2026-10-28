@@ -51,7 +51,9 @@ $cases = @(
     @{ Name = '右键菜单-普通进程-深色'; Spec = 'explorer:dark' },
     @{ Name = '右键菜单-受保护进程-深色'; Spec = '4:pid:dark' },
     @{ Name = '右键菜单-普通进程-浅色'; Spec = 'explorer:light' },
-    @{ Name = '右键菜单-受保护进程-浅色'; Spec = '4:pid:light' }
+    @{ Name = '右键菜单-受保护进程-浅色'; Spec = '4:pid:light' },
+    # 表头右键：列选择菜单（应用先勾选用户名、线程两列，菜单里这两项带勾）。
+    @{ Name = '列选择菜单-深色'; Spec = ':header:dark' }
 )
 foreach ($c in $cases) {
     $p = Start-Process -FilePath $exePath -ArgumentList '--menu-shot', $c.Spec -PassThru

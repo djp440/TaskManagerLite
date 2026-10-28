@@ -1,5 +1,5 @@
 # 设置持久化端到端验收：用临时 TML_SETTINGS_DIR 写入非默认设置，启动 exe，检查窗口位置/大小被应用，
-# 再用 WM_CLOSE 优雅关闭，检查设置文件被写回；另测损坏文件、显示器之外的位置、窗口置顶、开发模式不碰设置文件。
+# 再用 WM_CLOSE 优雅关闭，检查设置文件被写回；另测损坏文件、显示器之外的位置、窗口置顶、详细信息列、开发模式不碰设置文件。
 # 只结束自己启动的进程。用法：pwsh scripts/e2e-settings.ps1 [-Exe target/release/TaskManagerLite.exe]
 param([string]$Exe = "$PSScriptRoot/../target/release/TaskManagerLite.exe")
 
@@ -233,6 +233,24 @@ try {
     $app = Start-App $dir
     Check (-not (& $topmost $app)) '再次启动时不置顶'
     Close-App $app
+
+    '== 5h. 详细信息列：顺序、宽度与按详细信息列排序被恢复并写回；排序列未显示时回到默认排序 =='
+    $dir = New-Dir 'details'
+    $settingsFile = Join-Path $dir 'settings.json'
+    '{ "detail_columns": [ { "id": "user", "width": 150 }, { "id": "threads", "width": 72 }, { "id": "command_line", "width": 420.5 } ], "sort": { "key": "detail:threads", "descending": true } }' | Set-Content -Encoding utf8 $settingsFile
+    $app = Start-App $dir
+    Start-Sleep -Milliseconds 1500
+    Check (-not $app.Process.HasExited) '显示详细信息列时正常运行'
+    Close-App $app
+    $s = Get-Content $settingsFile -Raw | ConvertFrom-Json
+    $cols = @($s.detail_columns | ForEach-Object { "$($_.id)=$($_.width)" }) -join ','
+    Check ($cols -eq 'user=150,threads=72,command_line=420.5') "详细信息列的顺序与宽度被写回，实际 $cols"
+    Check ($s.sort.key -eq 'detail:threads' -and $s.sort.descending -eq $true) "按线程降序被写回，实际 $($s.sort.key) $($s.sort.descending)"
+    '{ "detail_columns": [ { "id": "threads", "width": 72 } ], "sort": { "key": "detail:user", "descending": false } }' | Set-Content -Encoding utf8 $settingsFile
+    $app = Start-App $dir
+    Close-App $app
+    $s = Get-Content $settingsFile -Raw | ConvertFrom-Json
+    Check ($s.sort.key -eq 'cpu' -and $s.sort.descending -eq $true) "排序列（用户名）未显示时回到 CPU 降序，实际 $($s.sort.key) $($s.sort.descending)"
 
     '== 6. 开发模式（--measure-startup）不读写设置文件 =='
     $dir = New-Dir 'dev'

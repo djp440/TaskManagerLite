@@ -1,6 +1,6 @@
 //! 界面线程上的状态与交互逻辑。
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -11,17 +11,23 @@ use tml_core::{
     SystemMetrics, ViewMode, ViewOptions, ViewRow, build_group_view, build_view, end_process, tree_from,
 };
 
+mod columns;
 mod cpu;
 mod memory;
 mod process_menu;
+
+pub use columns::sort_index as detail_sort_index;
 mod resources;
 
+use crate::details::{InfoCache, InfoWorker, Shown};
 use crate::format;
 use crate::icons::{self, IconCache, IconWorker};
 use crate::logging::Log;
 use crate::sampling::{Command, SamplerHandle};
-use crate::settings::{ColumnWidths, Settings, Store};
-use crate::{AppWindow, ColumnLayout, Columns, CpuData, ProcRow, Resource, ResourceKind, placement};
+use crate::settings::{self, ColumnWidths, Settings, Store};
+use crate::{
+    AppWindow, ColumnLayout, Columns, CpuData, DetailChoice, DetailHeader, ProcRow, Resource, ResourceKind, placement,
+};
 use cpu::CpuState;
 use resources::{Edit, Instance, ResourceSet};
 
@@ -40,6 +46,11 @@ pub struct Controller {
     resources: Rc<VecModel<Resource>>,
     sampler: SamplerHandle,
     icon_worker: IconWorker,
+    /// 静态信息（用户名、路径等）的后台读取线程，第一次显示这类列时才创建。
+    info_worker: OnceCell<InfoWorker>,
+    /// 显示中的详细信息列（表头）与列选择菜单的选项；原地更新，见 `columns::assign`。
+    detail_headers: Rc<VecModel<DetailHeader>>,
+    detail_choices: Rc<VecModel<DetailChoice>>,
     /// 当前取图标用的物理像素边长（随显示缩放变化）。
     icon_px: Cell<u32>,
     /// 图标尚未到达时占位用的 1×1 透明图（空 Image 之间比较恒不相等，会让行更新判断失效）。
@@ -76,6 +87,10 @@ struct State {
     pending: Vec<ProcessKey>,
     first_data: bool,
     icons: IconCache<Image>,
+    /// 显示中的“详细信息”列（有序）及其宽度。
+    details: Vec<Shown>,
+    /// 静态信息缓存；只在显示了需要它的列时维护。
+    info: InfoCache,
 }
 
 fn sort_key(i: i32) -> SortKey {
@@ -84,7 +99,7 @@ fn sort_key(i: i32) -> SortKey {
         1 => SortKey::Pid,
         3 => SortKey::Memory,
         4 => SortKey::Disk,
-        _ => SortKey::Cpu,
+        _ => columns::sort_column(i).map_or(SortKey::Cpu, SortKey::Detail),
     }
 }
 
@@ -119,6 +134,7 @@ fn sort_index(k: SortKey) -> i32 {
         SortKey::Cpu => 2,
         SortKey::Memory => 3,
         SortKey::Disk => 4,
+        SortKey::Detail(c) => columns::sort_index(c),
     }
 }
 
@@ -134,6 +150,9 @@ impl Controller {
         state.opts.sort_key = settings.sort_key;
         state.opts.descending = settings.descending;
         state.opts.mode = settings.view;
+        state.details = settings.details.clone();
+        // 排序列已不在显示中（例如设置文件被手动改过）时回到默认排序。
+        columns::fix_sort(&mut state.opts.sort_key, &mut state.opts.descending, &state.details);
         ui.set_view_mode(view_mode_index(settings.view));
         ui.set_page(settings.page);
         let cols = ui.global::<Columns>();
@@ -160,6 +179,9 @@ impl Controller {
                     })
                 });
             }),
+            info_worker: OnceCell::new(),
+            detail_headers: Rc::new(VecModel::default()),
+            detail_choices: Rc::new(VecModel::default()),
             icon_px: Cell::new(0),
             blank_icon: Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::new(1, 1)),
             state: RefCell::new(state),
@@ -176,6 +198,7 @@ impl Controller {
         }
         c.bind(ui);
         c.bind_process_menu(ui);
+        c.bind_columns(ui);
         ui.set_pinned(settings.always_on_top);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
         if settings.interval_index != 1 {
@@ -262,8 +285,8 @@ impl Controller {
                         s.opts.descending = !s.opts.descending;
                     } else {
                         s.opts.sort_key = key;
-                        // 名称和 PID 默认升序，指标列默认降序。
-                        s.opts.descending = !matches!(key, SortKey::Name | SortKey::Pid);
+                        // 名称、PID 与文字列默认升序，指标列默认降序。
+                        s.opts.descending = settings::default_descending(key);
                     }
                 }
                 c.refresh_rows();
@@ -358,6 +381,7 @@ impl Controller {
             settings.descending = s.opts.descending;
             settings.view = s.opts.mode;
             settings.resource = s.resources.selected_for_save().to_owned();
+            settings.details = s.details.clone();
         }
         settings.interval_index = ui.get_interval_index();
         settings.page = ui.get_page();
@@ -437,6 +461,7 @@ impl Controller {
             self.update_resources(&s, now);
         }
         self.track_icons();
+        self.track_info();
         self.refresh_rows();
     }
 
@@ -606,7 +631,14 @@ impl Controller {
     /// 按当前视图选项重建进程列表，并保持选中的进程不变。
     fn refresh_rows(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
-        let mut s = self.state.borrow_mut();
+        let mut guard = self.state.borrow_mut();
+        let s = &mut *guard;
+        // 静态信息由后台读到后缓存在 Controller 里；排序和显示前挂到快照的进程上。
+        if !s.details.is_empty() {
+            for p in &mut s.snapshot.processes {
+                p.info = s.info.get(p.key);
+            }
+        }
         s.view = match (&s.app_pids, s.opts.mode) {
             (Some(apps), ViewMode::Group) => build_group_view(&s.snapshot, apps, &s.opts),
             // 刚切到分组、带窗口信息的快照还没到：保持现有列表，快照一到就会刷新。
@@ -654,19 +686,20 @@ impl Controller {
                     critical: p.critical,
                     icon: s.icons.icon(p.key).cloned().unwrap_or_else(|| self.blank_icon.clone()),
                     header: false,
+                    extra: Self::detail_cells(s, p),
                 }
             })
             .collect();
         if selected_index < 0 {
             s.selected = None;
         }
-        drop(s);
+        drop(guard);
 
         // 原地更新，避免列表重置滚动位置。
         let old = self.rows.row_count();
         for (i, row) in rows.iter().enumerate() {
             if i < old {
-                if self.rows.row_data(i).as_ref() != Some(row) {
+                if !self.rows.row_data(i).is_some_and(|old| same_row(&old, row)) {
                     self.rows.set_row_data(i, row.clone());
                 }
             } else {
@@ -765,6 +798,14 @@ impl Controller {
             ui.set_status_kind(STATUS_ELEVATION_CANCELLED);
         }
     }
+}
+
+/// 两行显示的内容是否相同。`ModelRc` 按指针比较，详细信息单元格要逐项比较内容，
+/// 否则每次采样都会重写所有行。
+fn same_row(a: &ProcRow, b: &ProcRow) -> bool {
+    a.extra.row_count() == b.extra.row_count()
+        && a.extra.iter().zip(b.extra.iter()).all(|(x, y)| x == y)
+        && ProcRow { extra: b.extra.clone(), ..a.clone() } == *b
 }
 
 /// 列表第 `row` 行对应的进程；分组视图的标题行（`index == HEADER_INDEX`）和越界行没有进程。
