@@ -176,6 +176,7 @@ impl Controller {
         }
         c.bind(ui);
         c.bind_process_menu(ui);
+        ui.set_pinned(settings.always_on_top);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
         if settings.interval_index != 1 {
             ui.set_interval_index(settings.interval_index);
@@ -360,6 +361,7 @@ impl Controller {
         }
         settings.interval_index = ui.get_interval_index();
         settings.page = ui.get_page();
+        settings.always_on_top = ui.get_pinned();
         let cols = ui.global::<Columns>();
         settings.columns = ColumnWidths {
             pid: cols.get_pid(),
