@@ -379,9 +379,15 @@ fn run_session(shared: &Arc<Shared>, name: &str) {
     // 会话已存在：先备好停止用的上下文，再公布 started，任何一条退出路径都能停掉它。
     let ctx = StopCtx::arm(name);
     shared.ctx.store(ctx as *const StopCtx as *mut StopCtx, Ordering::Release);
-    LATEST.store(ctx as *const StopCtx as *mut StopCtx, Ordering::Release);
+    let me = ctx as *const StopCtx as *mut StopCtx;
+    // 已取消的旧启动线程不能覆盖后来启动的新会话：先查 cancel 再公布；公布之后若被取消，
+    // 只在 LATEST 仍是自己时撤回（compare_exchange 不会碰别人写入的新值）。
+    if !shared.cancel.load(Ordering::SeqCst) {
+        LATEST.store(me, Ordering::Release);
+    }
     shared.started.store(true, Ordering::SeqCst);
     if shared.cancel.load(Ordering::SeqCst) {
+        let _ = LATEST.compare_exchange(me, std::ptr::null_mut(), Ordering::AcqRel, Ordering::Acquire);
         ctx.stop();
         shared.fail(0);
         return;

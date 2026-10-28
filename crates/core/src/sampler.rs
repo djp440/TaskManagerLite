@@ -72,6 +72,12 @@ impl Sampler {
             self.etw_tried = false;
         }
         self.accurate_disk = on;
+        if !on {
+            // 立即停止会话：窗口不可见或暂停时没有采样，不能等下次 sample()；
+            // 同时清掉就绪标记，下次开启的新会话从头算“半截窗口”。
+            self.etw = None;
+            self.etw_ready = false;
+        }
     }
 
     pub fn sample(&mut self) -> Sample {
@@ -225,5 +231,19 @@ mod tests {
         s.sample();
         s.set_accurate_disk(true);
         assert!(!s.etw_tried);
+    }
+
+    /// 关闭开关立即生效，不必等下一次采样；旧会话的就绪标记不会带到新会话。
+    #[test]
+    fn turning_off_drops_the_trace_without_sampling() {
+        let mut s = Sampler::default();
+        s.accurate_disk = true;
+        s.etw_ready = true;
+        s.etw_tried = true;
+        s.set_accurate_disk(false);
+        assert!(s.etw.is_none() && !s.etw_ready);
+        // 关→开中间没有采样：重新开启后仍是未就绪状态。
+        s.set_accurate_disk(true);
+        assert!(!s.etw_ready && !s.etw_tried);
     }
 }

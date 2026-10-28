@@ -34,7 +34,7 @@ ETW 会话属于系统而不是进程，进程消失后不会自动停止，所�
 
 1. 正常退出：`main` 开头持有 `TraceGuard`，任何返回路径（含 `?`）都会停止会话。`DiskTrace` 被丢弃时只停止自己 `StartTrace` 成功的会话；启动线程尚未走到那一步时，由它看到取消标记后自行停止。
 2. panic：panic 钩子（release 为 `panic = abort`，钩子在 abort 之前运行）停止会话。
-3. 未处理异常（访问违规等）：`SetUnhandledExceptionFilter` 里尽力停止会话。**钩子与过滤器里不做堆分配、不加锁**：会话启动成功后预先构造并泄漏停止用的 `EVENT_TRACE_PROPERTIES` 缓冲与 UTF-16 会话名（几 KB），崩溃路径上只做原子标记和一次 `ControlTraceW`。
+3. 未处理异常（访问违规等）：`SetUnhandledExceptionFilter` 里尽力停止会话。**钩子与过滤器里不做堆分配、不加锁**：会话启动成功后预先构造并泄漏停止用的 `EVENT_TRACE_PROPERTIES` 缓冲与 UTF-16 会话名（几 KB），崩溃路径上只做原子标记和一次 `ControlTraceW`。每次成功启动会泄漏约 4 KB 的停止上下文（次数只取决于用户在设置里关→开切换的次数，可忽略）。已取消的旧启动线程不会覆盖后来启动的新会话在崩溃路径上的登记。
 4. 进程被强行结束（`TerminateProcess` 等）无法在进程内清理：下一次**启动会话时**（开关开启且提权），后台线程用 `QueryAllTracesW`（返回 `ERROR_MORE_DATA` 时扩大到 256 个再查一次）枚举会话，名称带本程序前缀且属主已不存在的一律停止。属主“已不存在”的判定保守：只有 `OpenProcess` 报 `ERROR_INVALID_PARAMETER`（PID 不存在）、创建时间对不上（PID 被复用）或确认已退出才算；拒绝访问等其他错误一律视为存活，宁可漏清也不误停。此前残留的会话只会丢事件，开销很小，直到下次开启时被回收（或重启系统）。
 
 多实例（`--allow-multiple`）各自使用带自己 PID 的会话名，互不干扰；清理只针对属主已不存在的会话。
