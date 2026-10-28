@@ -1,20 +1,22 @@
 //! 界面线程上的状态与交互逻辑。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use tml_core::{
-    EndError, Group, GroupHeader, MemoryHardware, MemoryStatus, ProcessKey, ProcessSnapshot, Sample, SortKey,
+    EndError, Group, GroupHeader, MemoryHardware, MemoryStatus, Process, ProcessKey, ProcessSnapshot, Sample, SortKey,
     SystemMetrics, ViewMode, ViewOptions, ViewRow, build_group_view, build_view, end_process, tree_from,
 };
 
 mod memory;
+mod process_menu;
 mod resources;
 
 use crate::format;
+use crate::icons::{self, IconCache, IconWorker};
 use crate::logging::Log;
 use crate::sampling::{Command, SamplerHandle};
 use crate::settings::{ColumnWidths, Settings, Store};
@@ -35,6 +37,11 @@ pub struct Controller {
     rows: Rc<VecModel<ProcRow>>,
     resources: Rc<VecModel<Resource>>,
     sampler: SamplerHandle,
+    icon_worker: IconWorker,
+    /// 当前取图标用的物理像素边长（随显示缩放变化）。
+    icon_px: Cell<u32>,
+    /// 图标尚未到达时占位用的 1×1 透明图（空 Image 之间比较恒不相等，会让行更新判断失效）。
+    blank_icon: Image,
     state: RefCell<State>,
     pub log: RefCell<Log>,
     /// 启动时读到的设置；保存时在它的基础上更新，未识别的字段因此得以保留。
@@ -64,6 +71,7 @@ struct State {
     /// 等待用户确认要结束的进程，按结束顺序排列。
     pending: Vec<ProcessKey>,
     first_data: bool,
+    icons: IconCache<Image>,
 }
 
 fn sort_key(i: i32) -> SortKey {
@@ -139,6 +147,17 @@ impl Controller {
             rows,
             resources,
             sampler,
+            icon_worker: IconWorker::spawn(|event| {
+                let _ = slint::invoke_from_event_loop(move || {
+                    crate::CONTROLLER.with(|c| {
+                        if let Some(c) = c.borrow().as_ref() {
+                            c.on_icon_event(event);
+                        }
+                    })
+                });
+            }),
+            icon_px: Cell::new(0),
+            blank_icon: Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::new(1, 1)),
             state: RefCell::new(state),
             log: RefCell::new(log),
             settings: RefCell::new(settings.clone()),
@@ -151,6 +170,7 @@ impl Controller {
             c.log.borrow_mut().line(format!("设置中的资源 {} 暂不存在，待其出现后恢复", settings.resource));
         }
         c.bind(ui);
+        c.bind_process_menu(ui);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
         if settings.interval_index != 1 {
             ui.set_interval_index(settings.interval_index);
@@ -220,8 +240,8 @@ impl Controller {
             if let Some(c) = c.upgrade() {
                 let mut s = c.state.borrow_mut();
                 // 分组标题行不可选中，忽略。
-                if let Some(pi) = s.view.get(i as usize).and_then(ViewRow::process) {
-                    s.selected = Some(s.snapshot.processes[pi].key);
+                if let Some(key) = process_key_at(&s.view, &s.snapshot.processes, i as usize) {
+                    s.selected = Some(key);
                 }
             }
         });
@@ -247,7 +267,7 @@ impl Controller {
             if let Some(c) = c.upgrade() {
                 {
                     let mut s = c.state.borrow_mut();
-                    if let Some(key) = s.view.get(i as usize).and_then(ViewRow::process).map(|pi| s.snapshot.processes[pi].key) {
+                    if let Some(key) = process_key_at(&s.view, &s.snapshot.processes, i as usize) {
                         // 树形默认展开，记录折叠项；分组默认折叠，记录展开项。
                         let set = if s.opts.mode == ViewMode::Group { &mut s.opts.expanded } else { &mut s.opts.collapsed };
                         if !set.remove(&key) {
@@ -393,7 +413,66 @@ impl Controller {
             s.first_data = true;
             self.update_resources(&s, now);
         }
+        self.track_icons();
         self.refresh_rows();
+    }
+
+    /// 同步图标缓存：显示缩放变化时按新尺寸重取；新进程交给后台解析路径；已退出的进程清出缓存。
+    fn track_icons(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let px = icons::physical_size(ui.window().scale_factor());
+        let mut guard = self.state.borrow_mut();
+        let s = &mut *guard;
+        if px != self.icon_px.replace(px) {
+            self.log.borrow_mut().line(format!("图标尺寸 {px}px 缩放={}", ui.window().scale_factor()));
+            s.icons.reset();
+            self.icon_worker.extract(vec![None], px);
+        }
+        let fresh = s.icons.track(s.snapshot.processes.iter().map(|p| p.key));
+        drop(guard);
+        self.icon_worker.resolve(fresh);
+    }
+
+    /// 后台线程送回的路径或图标。图标到达时只更新用到它的行，不重建列表。
+    pub fn on_icon_event(&self, event: icons::Event) {
+        match event {
+            icons::Event::Paths(paths) => {
+                let mut wanted = Vec::new();
+                let mut touched = std::collections::HashSet::new();
+                {
+                    let mut s = self.state.borrow_mut();
+                    for (key, path) in paths {
+                        touched.insert(key);
+                        if let Some(path) = s.icons.resolved(key, path) {
+                            wanted.push(Some(path));
+                        }
+                    }
+                }
+                self.icon_worker.extract(wanted, self.icon_px.get());
+                // 拿不到路径的进程此时就能用默认图标。
+                self.update_icons(|_, key| touched.contains(&key));
+            }
+            icons::Event::Icon { path, px, pixels } => {
+                // 显示缩放变化前发出的请求，尺寸已不对。
+                if px != self.icon_px.get() {
+                    return;
+                }
+                let image = pixels.map(Image::from_rgba8);
+                self.state.borrow_mut().icons.loaded(path.as_deref(), image);
+                self.update_icons(|s, key| s.icons.depends_on(key, path.as_deref()));
+            }
+        }
+    }
+
+    /// 刷新满足条件的进程所在行的图标。
+    fn update_icons(&self, affected: impl Fn(&State, ProcessKey) -> bool) {
+        let s = self.state.borrow();
+        for (i, key) in icon_rows(&s.view, &s.snapshot.processes, |key| affected(&s, key)) {
+            if let Some(mut row) = self.rows.row_data(i) {
+                row.icon = s.icons.icon(key).cloned().unwrap_or_else(|| self.blank_icon.clone());
+                self.rows.set_row_data(i, row);
+            }
+        }
     }
 
     /// 迷你图的尺寸与 performance-page.slint 中 ResourceCard 的布局一致。
@@ -523,7 +602,13 @@ impl Controller {
             .enumerate()
             .map(|(i, r)| {
                 if let Some(h) = r.header {
-                    return ProcRow { name: group_title(h).into(), header: true, ..Default::default() };
+                    // 标题行没有图标；用同一个空白图标，否则空 Image 互不相等，每次刷新都会重写这一行。
+                    return ProcRow {
+                        name: group_title(h).into(),
+                        header: true,
+                        icon: self.blank_icon.clone(),
+                        ..Default::default()
+                    };
                 }
                 let p = &procs[r.index];
                 if Some(p.key) == s.selected {
@@ -548,6 +633,7 @@ impl Controller {
                     has_children: r.has_children,
                     expanded: r.expanded,
                     critical: p.critical,
+                    icon: s.icons.icon(p.key).cloned().unwrap_or_else(|| self.blank_icon.clone()),
                     header: false,
                 }
             })
@@ -659,5 +745,80 @@ impl Controller {
         } else if let Some(ui) = self.ui.upgrade() {
             ui.set_status_kind(STATUS_ELEVATION_CANCELLED);
         }
+    }
+}
+
+/// 列表第 `row` 行对应的进程；分组视图的标题行（`index == HEADER_INDEX`）和越界行没有进程。
+fn process_key_at(view: &[ViewRow], procs: &[Process], row: usize) -> Option<ProcessKey> {
+    let pi = view.get(row).and_then(ViewRow::process)?;
+    procs.get(pi).map(|p| p.key)
+}
+
+/// 满足 `affected` 的进程所在的行（行下标与进程身份）；标题行没有进程，直接跳过。
+fn icon_rows(view: &[ViewRow], procs: &[Process], affected: impl Fn(ProcessKey) -> bool) -> Vec<(usize, ProcessKey)> {
+    (0..view.len()).filter_map(|i| process_key_at(view, procs, i).map(|k| (i, k))).filter(|&(_, k)| affected(k)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn p(pid: u32, parent: u32, name: &str) -> Process {
+        Process {
+            key: ProcessKey { pid, create_time: pid as u64 },
+            parent_pid: parent,
+            name: name.into(),
+            cpu_usage: 0.0,
+            private_working_set: 0,
+            disk_rate: 0.0,
+            critical: false,
+        }
+    }
+
+    /// 应用 chrome(10)（子进程 11 折叠不显示）+ 应用 notepad(20) + 后台进程 svc(30)：
+    /// 视图是 [标题, chrome, notepad, 标题, svc]，标题行的 index 是 HEADER_INDEX。
+    fn group() -> (ProcessSnapshot, Vec<ViewRow>) {
+        let snapshot =
+            ProcessSnapshot { processes: vec![p(10, 1, "chrome"), p(11, 10, "gpu"), p(20, 1, "notepad"), p(30, 1, "svc")] };
+        let apps: HashSet<u32> = [10, 20].into();
+        let opts = ViewOptions { mode: ViewMode::Group, sort_key: SortKey::Pid, descending: false, ..Default::default() };
+        let view = build_group_view(&snapshot, &apps, &opts);
+        (snapshot, view)
+    }
+
+    #[test]
+    fn group_view_has_header_rows_with_out_of_range_index() {
+        let (_, view) = group();
+        assert_eq!(view.len(), 5);
+        assert!(view[0].header.is_some() && view[3].header.is_some());
+        assert_eq!(view[0].index, tml_core::HEADER_INDEX);
+    }
+
+    #[test]
+    fn icon_event_in_group_view_skips_headers_without_panic() {
+        let (snapshot, view) = group();
+        // 所有进程的图标一起到达（含标题行下标越界的情形）：只返回进程行。
+        let all = icon_rows(&view, &snapshot.processes, |_| true);
+        let pids: Vec<(usize, u32)> = all.iter().map(|&(i, k)| (i, k.pid)).collect();
+        assert_eq!(pids, [(1, 10), (2, 20), (4, 30)]);
+        // 只刷新后台进程：行下标 4。
+        let svc = icon_rows(&view, &snapshot.processes, |k| k.pid == 30);
+        assert_eq!(svc.iter().map(|&(i, _)| i).collect::<Vec<_>>(), [4]);
+    }
+
+    #[test]
+    fn selecting_in_group_view_picks_the_row_process_and_ignores_headers() {
+        let (snapshot, view) = group();
+        let pid_at = |i| process_key_at(&view, &snapshot.processes, i).map(|k| k.pid);
+        // 标题行（应用箭头 / 右键 / 点击都走这里）不选中任何进程。
+        assert_eq!(pid_at(0), None);
+        assert_eq!(pid_at(3), None);
+        // 应用行选中的是应用本身（而不是后代或相邻行），后台行同理。
+        assert_eq!(pid_at(1), Some(10));
+        assert_eq!(pid_at(2), Some(20));
+        assert_eq!(pid_at(4), Some(30));
+        // 越界不 panic。
+        assert_eq!(pid_at(99), None);
     }
 }

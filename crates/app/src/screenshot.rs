@@ -8,7 +8,7 @@ use std::time::Duration;
 use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, LogicalSize, Model, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer};
 
-use crate::{AppWindow, Columns};
+use crate::{AppWindow, Columns, ProcessMenu};
 
 type Step = (&'static str, fn(&AppWindow));
 
@@ -85,10 +85,33 @@ const STEPS: &[Step] = &[
     }),
     ("14-性能内存-深色-900x600", |ui| resize(ui, 900.0, 600.0)),
     ("15-性能内存-深色-默认尺寸", |ui| resize(ui, 1040.0, 700.0)),
-    // 分组视图：应用 / 后台进程两组，各有标题行与数量。
-    ("16-分组视图-深色", |ui| {
+    // 进程图标：浏览器（有自己的图标）。依赖本机正在运行 chrome，没有时列表为空。
+    ("16-进程图标-chrome-深色", |ui| {
+        resize(ui, 1040.0, 700.0);
+        ui.invoke_set_dark(true);
+        ui.set_page(0);
+        ui.set_filter("chrome".into());
+        ui.invoke_filter_edited("chrome".into());
+    }),
+    // 通用图标：没有图标资源（svchost、RuntimeBroker）或拿不到路径（System）的进程都显示同一个默认图标。
+    ("17-进程图标-默认图标-svchost-深色", |ui| {
+        ui.set_filter("svchost".into());
+        ui.invoke_filter_edited("svchost".into());
+    }),
+    ("18-进程图标-默认图标-RuntimeBroker-深色", |ui| {
+        ui.set_filter("RuntimeBroker".into());
+        ui.invoke_filter_edited("RuntimeBroker".into());
+    }),
+    ("19-进程图标-默认图标-System-深色", |ui| {
+        ui.set_filter("System".into());
+        ui.invoke_filter_edited("System".into());
+    }),
+    // 分组视图：应用 / 后台进程两组，各有标题行与数量；应用行与后台行各自显示图标，标题行没有图标。
+    ("20-分组视图-深色", |ui| {
         ui.window().set_size(LogicalSize::new(1040.0, 700.0));
         ui.invoke_set_dark(true);
+        ui.set_filter("".into());
+        ui.invoke_filter_edited("".into());
         let cols = ui.global::<Columns>();
         cols.set_pid(cols.get_default_pid());
         cols.set_cpu(cols.get_default_cpu());
@@ -98,14 +121,17 @@ const STEPS: &[Step] = &[
         ui.set_view_mode(2);
         ui.invoke_view_changed(2);
     }),
-    ("17-分组视图-浅色", |ui| ui.invoke_set_dark(false)),
-    ("18-分组与搜索-深色", |ui| {
+    ("21-分组视图-浅色", |ui| {
+        ui.invoke_set_dark(false);
+        right_click_header_does_not_select(ui);
+    }),
+    ("22-分组与搜索-深色", |ui| {
         ui.invoke_set_dark(true);
         ui.set_filter("conhost".into());
         ui.invoke_filter_edited("conhost".into());
     }),
     // 键盘：从最后一个应用按 ↓，越过“后台进程”标题行，选中后台组的第一行。
-    ("19-分组键盘下移跳过标题-深色", |ui| {
+    ("23-分组键盘下移跳过标题-深色", |ui| {
         ui.set_filter("".into());
         ui.invoke_filter_edited("".into());
         // 按 PID 升序：CPU 排序下行会随采样跳动，选中项可能被挤出可视范围。
@@ -116,12 +142,29 @@ const STEPS: &[Step] = &[
         press(ui, Key::DownArrow);
     }),
     // 键盘：选中第一个应用按 ↑，停在原处而不是落到“应用”标题行。
-    ("20-分组键盘上移不选标题-深色", |ui| {
+    ("24-分组键盘上移不选标题-深色", |ui| {
         ui.set_selected(1);
         ui.invoke_select(1);
         press(ui, Key::UpArrow);
     }),
 ];
+
+/// 在第一个标题行上右键：不能选中任何行，也不能弹出进程菜单（弹出会阻塞，截图流程会卡住）。
+fn right_click_header_does_not_select(ui: &AppWindow) {
+    let rows = ui.get_rows();
+    assert!(rows.row_data(0).is_some_and(|r| r.header), "第一行应是“应用”标题行");
+    let before = ui.get_selected();
+    let w = ui.window();
+    // 顶栏 56 + 表头 34 + 半行 15；在名称列和展开箭头位置各右键一次。
+    for x in [120.0, 15.0] {
+        let at = LogicalPosition::new(x, 56.0 + 34.0 + 15.0);
+        w.dispatch_event(WindowEvent::PointerMoved { position: at });
+        w.dispatch_event(WindowEvent::PointerPressed { position: at, button: PointerEventButton::Right });
+        w.dispatch_event(WindowEvent::PointerReleased { position: at, button: PointerEventButton::Right });
+    }
+    assert_eq!(ui.get_selected(), before, "右键标题行不应改变选中项");
+    eprintln!("右键标题行：未选中、未弹出菜单");
+}
 
 /// 第二个标题行（“后台进程”）在列表中的下标。
 fn group_boundary(ui: &AppWindow) -> usize {
@@ -135,6 +178,81 @@ fn press(ui: &AppWindow, key: Key) {
     let text: slint::SharedString = key.into();
     w.dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
     w.dispatch_event(WindowEvent::KeyReleased { text });
+}
+
+
+/// `--menu-shot <过滤>[:pid]:<dark|light>`：切换主题、过滤并（`:pid` 时按 PID 升序，PID 4 排第一）
+/// 在第一行右键，弹出原生右键菜单。原生菜单是系统窗口，`take_snapshot` 截不到，
+/// 由 `scripts/menu-screenshots.ps1` 从外部抓取，所以这里不退出，菜单会一直阻塞到被脚本结束进程。
+pub fn run_menu(ui: &AppWindow, spec: &str, warmup: Duration) {
+    ui.window().set_position(PhysicalPosition::new(-6000, -6000));
+    let parts: Vec<&str> = spec.split(':').collect();
+    let filter = parts.first().copied().unwrap_or("").to_string();
+    let by_pid = parts.contains(&"pid");
+    let dark = !parts.contains(&"light");
+    let weak = ui.as_weak();
+    Timer::single_shot(warmup, move || {
+        let Some(ui) = weak.upgrade() else { return };
+        // 暂停采样，列表不再重排。
+        ui.set_interval_index(3);
+        ui.invoke_interval_changed(3);
+        ui.invoke_set_dark(dark);
+        ui.set_filter(filter.as_str().into());
+        ui.invoke_filter_edited(filter.as_str().into());
+        if by_pid {
+            ui.invoke_sort_by(1);
+        }
+        // 等列表布局完成后，在第一行名称列上右键（顶栏 56 + 表头 34 + 半行 15）。
+        Timer::single_shot(Duration::from_millis(500), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let at = LogicalPosition::new(120.0, 56.0 + 34.0 + 15.0);
+            let w = ui.window();
+            w.dispatch_event(WindowEvent::PointerMoved { position: at });
+            w.dispatch_event(WindowEvent::PointerPressed { position: at, button: PointerEventButton::Right });
+            w.dispatch_event(WindowEvent::PointerReleased { position: at, button: PointerEventButton::Right });
+        });
+    });
+}
+
+/// `--menu-action <动作>:<pid>`：选中指定 PID 的进程并直接触发一个右键菜单动作
+/// （`open-location`、`properties`、`copy-path`、`copy-command-line`），用于 `scripts/test-menu-actions.ps1`
+/// 自动验收，免去点击原生菜单。末尾可加 `:group` 先切到分组视图（验证分组视图里选中的是正确的进程）。
+/// 动作执行后不退出，由脚本检查结果并结束进程。
+pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
+    ui.window().set_position(PhysicalPosition::new(-6000, -6000));
+    let parts: Vec<&str> = spec.split(':').collect();
+    let action = parts.first().copied().unwrap_or("").to_string();
+    let pid = parts.get(1).and_then(|p| p.parse::<i32>().ok()).unwrap_or(0);
+    let group = parts.contains(&"group");
+    let weak = ui.as_weak();
+    Timer::single_shot(warmup, move || {
+        let Some(ui) = weak.upgrade() else { return };
+        if group {
+            ui.set_view_mode(2);
+            ui.invoke_view_changed(2);
+        }
+        ui.set_filter(pid.to_string().as_str().into());
+        ui.invoke_filter_edited(pid.to_string().as_str().into());
+        // 分组视图要等带窗口信息的快照回来才会出现，多等一会儿。
+        let settle = if group { 1500 } else { 500 };
+        Timer::single_shot(Duration::from_millis(settle), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let rows = ui.get_rows();
+            let Some(i) = (0..rows.row_count()).find(|&i| rows.row_data(i).is_some_and(|r| r.pid == pid)) else {
+                eprintln!("列表中没有 pid {pid}");
+                return;
+            };
+            ui.invoke_select(i as i32);
+            let menu = ui.global::<ProcessMenu>();
+            match action.as_str() {
+                "open-location" => menu.invoke_open_location(),
+                "properties" => menu.invoke_show_properties(),
+                "copy-path" => menu.invoke_copy_path(),
+                "copy-command-line" => menu.invoke_copy_command_line(),
+                other => eprintln!("未知动作 {other}"),
+            }
+        });
+    });
 }
 
 /// 在表头（y = 56 + 17）的 `x` 处按下并水平拖动 `dx` 逻辑像素。

@@ -2,6 +2,7 @@
 
 mod controller;
 mod format;
+mod icons;
 mod logging;
 mod placement;
 mod sampling;
@@ -25,7 +26,8 @@ thread_local! {
 const RENDERER: &str = if cfg!(feature = "renderer-software") { "software" } else { "femtovg" };
 
 /// 开发用参数：测量、截图与 `--allow-multiple` 不受单实例限制，也不占用单实例锁。
-const UNRESTRICTED_FLAGS: [&str; 3] = ["--measure-startup", "--screenshot", "--allow-multiple"];
+const UNRESTRICTED_FLAGS: [&str; 5] =
+    ["--measure-startup", "--screenshot", "--menu-shot", "--menu-action", "--allow-multiple"];
 
 fn main() -> Result<(), slint::PlatformError> {
     // 单实例：已有实例则通知它把窗口带到前台，本进程直接退出。须在打开日志等之前完成。
@@ -45,7 +47,7 @@ fn main() -> Result<(), slint::PlatformError> {
     log.line(format!("进入 main {entered:.1} ms"));
 
     // 设置在创建窗口前读取（一个很小的文件）；开发模式不读写用户设置，保证截图与测量可复现。
-    let dev_mode = measure || std::env::args().any(|a| a == "--screenshot");
+    let dev_mode = measure || std::env::args().any(|a| a == "--screenshot" || a == "--menu-shot" || a == "--menu-action");
     let store = if dev_mode { None } else { settings::Store::from_env() };
     let (loaded, outcome) = store.as_ref().map_or((settings::Settings::default(), None), |s| {
         let (settings, outcome) = s.load();
@@ -126,6 +128,14 @@ fn main() -> Result<(), slint::PlatformError> {
 
     if let Some(dir) = std::env::args().skip_while(|a| a != "--screenshot").nth(1) {
         screenshot::run(&ui, dir.into(), Duration::from_secs(8));
+    }
+
+    if let Some(spec) = std::env::args().skip_while(|a| a != "--menu-shot").nth(1) {
+        screenshot::run_menu(&ui, &spec, Duration::from_secs(5));
+    }
+
+    if let Some(spec) = std::env::args().skip_while(|a| a != "--menu-action").nth(1) {
+        screenshot::run_menu_action(&ui, &spec, Duration::from_secs(4));
     }
 
     // 其他实例请求唤起时，在界面线程还原并前置窗口；最小化期间暂停的采样由下面的可见性轮询恢复。

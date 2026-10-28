@@ -158,7 +158,14 @@ fn notepad_is_app_and_windowless_child_is_background() {
 #[ignore = "需要交互式桌面，用 scripts/test-apps.ps1 运行"]
 fn uwp_calculator_is_app_through_core_window() {
     let mut sampler = Sampler::default();
-    let before: HashSet<u32> = sampler.sample().snapshot.processes.iter().map(|p| p.key.pid).collect();
+    let before_snap = sampler.sample().snapshot;
+    let is_calc = |name: &str| name.eq_ignore_ascii_case("CalculatorApp.exe") || name.eq_ignore_ascii_case("Calculator.exe");
+    // 已有计算器进程时，新启动会被并入已有实例的框架窗口（尤其是挂起 / 无响应的实例），结果不可靠，直接跳过。
+    if before_snap.processes.iter().any(|p| is_calc(&p.name)) {
+        eprintln!("跳过：已有计算器进程在运行，关闭它们后再运行本测试");
+        return;
+    }
+    let before: HashSet<u32> = before_snap.processes.iter().map(|p| p.key.pid).collect();
 
     // 用协议启动：不依赖 calc.exe 在不同系统版本上的行为。
     let launcher = Command::new("cmd").args(["/c", "start", "", "calculator:"]).creation_flags(CREATE_NO_WINDOW).status();
@@ -166,7 +173,6 @@ fn uwp_calculator_is_app_through_core_window() {
         eprintln!("跳过：无法启动计算器");
         return;
     }
-    let is_calc = |name: &str| name.eq_ignore_ascii_case("CalculatorApp.exe") || name.eq_ignore_ascii_case("Calculator.exe");
     let mut mine = None;
     wait_until(Duration::from_secs(15), || {
         let snap = sampler.sample().snapshot;
