@@ -181,7 +181,43 @@ const STEPS: &[Step] = &[
         ui.invoke_select(1);
         press(ui, Key::UpArrow);
     }),
+    // 工具栏在窄窗口下的收缩。提权状态显式设置，不依赖运行者的权限（未提权才有“以管理员身份重启”）。
+    ("33-工具栏-进程-未提权-深色-760x600", |ui| toolbar(ui, 0, false, true, 760.0)),
+    ("34-工具栏-进程-未提权-深色-900x600", |ui| toolbar(ui, 0, false, true, 900.0)),
+    ("35-工具栏-进程-未提权-深色-1000x600", |ui| toolbar(ui, 0, false, true, 1000.0)),
+    ("36-工具栏-进程-未提权-深色-1040x600", |ui| toolbar(ui, 0, false, true, 1040.0)),
+    ("37-工具栏-进程-已提权-深色-760x600", |ui| toolbar(ui, 0, true, true, 760.0)),
+    ("38-工具栏-进程-已提权-深色-1000x600", |ui| toolbar(ui, 0, true, true, 1000.0)),
+    ("39-工具栏-性能-未提权-深色-760x600", |ui| toolbar(ui, 1, false, true, 760.0)),
+    ("40-工具栏-进程-未提权-浅色-760x600", |ui| toolbar(ui, 0, false, false, 760.0)),
+    ("41-工具栏-进程-未提权-浅色-900x600", |ui| toolbar(ui, 0, false, false, 900.0)),
+    // 指针停在收起后的提权按钮上：先是悬停态，约 0.5 秒后出现完整文字的提示（下一步截图）。放在最后，免得悬停影响其他步骤。
+    ("42-工具栏-提权图标悬停-深色-900x600", |ui| {
+        toolbar(ui, 0, false, true, 900.0);
+        hover_compact_elevate(ui);
+    }),
+    ("43-工具栏-提权图标提示-深色-900x600", |_| {}),
 ];
+
+/// 工具栏截图的统一设定：页面、提权状态、主题与窗口宽度（高 600），平铺视图、无搜索词。
+fn toolbar(ui: &AppWindow, page: i32, elevated: bool, dark: bool, width: f32) {
+    ui.invoke_set_dark(dark);
+    ui.set_elevated(elevated);
+    ui.set_page(page);
+    ui.set_view_mode(0);
+    ui.invoke_view_changed(0);
+    ui.set_filter("".into());
+    ui.invoke_filter_edited("".into());
+    resize(ui, width, 600.0);
+}
+
+/// 把指针移到收起后的提权按钮中心：顶栏高 56，右内边距 12，按钮 32×32。
+fn hover_compact_elevate(ui: &AppWindow) {
+    assert!(ui.get_toolbar_elevate_compact(), "900 宽时提权按钮应已收成图标");
+    let width = ui.window().size().to_logical(ui.window().scale_factor()).width;
+    let at = LogicalPosition::new(width - 12.0 - 16.0, 28.0);
+    ui.window().dispatch_event(WindowEvent::PointerMoved { position: at });
+}
 
 /// 在第一个标题行上右键：不能选中任何行，也不能弹出进程菜单（弹出会阻塞，截图流程会卡住）。
 fn right_click_header_does_not_select(ui: &AppWindow) {
@@ -349,6 +385,17 @@ fn step(weak: slint::Weak<AppWindow>, dir: Rc<PathBuf>, i: usize) {
                 panic!("截图步骤 {name}：{e}");
             }
         });
+        // 工具栏的最小宽度超过窗口宽度时，右侧控件会被窗口裁掉。
+        let width = ui.window().size().to_logical(ui.window().scale_factor()).width;
+        let need = ui.get_toolbar_min_width();
+        if need > width + 0.5 {
+            crate::CONTROLLER.with(|c| {
+                if let Some(c) = c.borrow().as_ref() {
+                    c.log.borrow_mut().line(format!("截图步骤 {name}：工具栏最小宽度 {need} 超出窗口宽度 {width}"));
+                }
+            });
+            panic!("截图步骤 {name}：工具栏最小宽度 {need} 超出窗口宽度 {width}");
+        }
         match ui.window().take_snapshot() {
             Ok(buf) => {
                 let path = dir.join(format!("{name}.bmp"));

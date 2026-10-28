@@ -84,6 +84,32 @@ component SegmentedControl inherits Rectangle {
     }
 }
 
+// 盾牌图标：表示需要管理员权限的操作（与 Windows 的 UAC 盾牌同义），左半实心、右半描边。
+component ShieldIcon inherits Rectangle {
+    in property <brush> tint;
+    width: 16px;
+    height: 16px;
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        fill: root.tint;
+        commands: "M 8 1.6 L 8 14.6 C 4.9 13.7 2.6 11 2.6 7.6 L 2.6 3.6 Z";
+    }
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        stroke: root.tint;
+        stroke-width: 1.3px;
+        commands: "M 8 1.6 L 13.4 3.6 L 13.4 7.6 C 13.4 11 11.1 13.7 8 14.6 C 4.9 13.7 2.6 11 2.6 7.6 L 2.6 3.6 Z";
+    }
+}
+
 // 需要用户确认的操作：1 = 结束关键进程，2 = 结束进程树。
 component ConfirmDialog inherits Rectangle {
     in property <int> kind;
@@ -211,6 +237,29 @@ export component AppWindow inherits Window {
     out property <length> graph-width: perf-page.graph-width;
     out property <length> graph-height: perf-page.graph-height;
 
+    // 工具栏随窗口变窄依次收缩：
+    // 1. 搜索框从 220px 缩到“舒适宽度”，即恰好放下完整的占位文字（由布局完成）；
+    // 2. 仍放不下时，“以管理员身份重启”收成盾牌图标按钮（悬停显示提示）；
+    // 3. 还放不下时隐藏品牌字样（窗口标题栏仍显示应用名）。
+    // 档位按搜索框的舒适宽度判断，常规字体下最窄的 760 也放得下；搜索框另可再缩到只放下简短占位文字，
+    // 作为字体偏宽时的余量。判断只用不随档位变化的量（各部分的首选/最小宽度），避免绑定循环。
+    private property <string> search-hint: @tr("搜索名称或 PID（Ctrl+F）");
+    private property <string> search-hint-short: @tr("搜索名称或 PID");
+    private property <string> elevate-text: @tr("以管理员身份重启");
+    // Fluent 输入框左右内边距各 12px，另留 4px 光标余量。
+    private property <length> search-comfort: min(220px, search-measure.preferred-width + 28px);
+    private property <length> search-floor: min(root.search-comfort, max(140px, search-short-measure.preferred-width + 28px));
+    // 左右内边距 16 + 12，左侧组、伸缩空白、右侧组之间两个 8px 间距。
+    private property <length> toolbar-room: root.width - 44px;
+    // Fluent 按钮左右内边距各 12px；提权按钮的需求含它与左侧控件的 8px 间距。
+    private property <length> elevate-text-need: root.elevated ? 0px : max(32px, elevate-measure.preferred-width + 24px) + 8px;
+    private property <length> elevate-icon-need: root.elevated ? 0px : 32px + 8px;
+    private property <length> toolbar-core-need: tabs.preferred-width + toolbar-core.min-width + (root.page == 0 ? root.search-comfort - root.search-floor : 0px);
+    out property <bool> toolbar-elevate-compact: brand.preferred-width + root.toolbar-core-need + root.elevate-text-need > root.toolbar-room;
+    out property <bool> toolbar-brand-shown: brand.preferred-width + root.toolbar-core-need + (root.toolbar-elevate-compact ? root.elevate-icon-need : root.elevate-text-need) <= root.toolbar-room;
+    // 截图模式与单元测试据此断言工具栏没有被挤出窗口（最小宽度不超过窗口宽度即没有控件被裁剪）。
+    out property <length> toolbar-min-width: toolbar.min-width;
+
     // 供截图模式切换深浅色。
     public function set-dark(dark: bool) {
         Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
@@ -272,49 +321,92 @@ export component AppWindow inherits Window {
         VerticalLayout {
             Rectangle {
                 height: 56px;
-                HorizontalLayout {
+                // 只用于测量宽度的隐藏文字，字体字号与搜索框占位文字、按钮文字相同。
+                // 子元素都显式定位：这样它们的尺寸约束不会传给窗口，否则“档位 → 工具栏最小宽度 →
+                // 窗口布局约束 → 窗口宽度 → 档位”会形成绑定循环。
+                search-measure := Text {
+                    x: 0px;
+                    y: 0px;
+                    visible: false;
+                    text: root.search-hint;
+                }
+
+                search-short-measure := Text {
+                    x: 0px;
+                    y: 0px;
+                    visible: false;
+                    text: root.search-hint-short;
+                }
+
+                elevate-measure := Text {
+                    x: 0px;
+                    y: 0px;
+                    visible: false;
+                    text: root.elevate-text;
+                }
+
+                toolbar := HorizontalLayout {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: parent.height;
                     padding-left: 16px;
                     padding-right: 12px;
                     spacing: 8px;
 
-                    Text {
-                        text: "TaskManager";
-                        vertical-alignment: center;
-                        font-size: 15px;
-                        font-weight: 700;
-                        color: Palette.foreground;
-                    }
+                    // 左侧：品牌字样与页面 Tab。品牌始终参与测量，隐藏时占位宽度为 0。
+                    HorizontalLayout {
+                        horizontal-stretch: 0;
+                        Rectangle {
+                            width: root.toolbar-brand-shown ? brand.preferred-width : 0px;
+                            visible: root.toolbar-brand-shown;
+                            brand := HorizontalLayout {
+                                x: 0px;
+                                width: self.preferred-width;
+                                height: parent.height;
+                                spacing: 8px;
+                                // 与 Tab 之间留 32px。
+                                padding-right: 32px;
+                                Text {
+                                    text: "TaskManager";
+                                    vertical-alignment: center;
+                                    font-size: 15px;
+                                    font-weight: 700;
+                                    color: Palette.foreground;
+                                }
 
-                    Text {
-                        text: "Lite";
-                        vertical-alignment: center;
-                        font-size: 15px;
-                        font-weight: 400;
-                        color: Palette.accent-background;
-                    }
-
-                    Rectangle {
-                        width: 16px;
-                    }
-
-                    VerticalLayout {
-                        alignment: center;
-                        Tab {
-                            text: @tr("进程");
-                            active: root.page == 0;
-                            clicked => {
-                                root.page = 0;
+                                Text {
+                                    text: "Lite";
+                                    vertical-alignment: center;
+                                    font-size: 15px;
+                                    font-weight: 400;
+                                    color: Palette.accent-background;
+                                }
                             }
                         }
-                    }
 
-                    VerticalLayout {
-                        alignment: center;
-                        Tab {
-                            text: @tr("性能");
-                            active: root.page == 1;
-                            clicked => {
-                                root.page = 1;
+                        tabs := HorizontalLayout {
+                            spacing: 8px;
+                            VerticalLayout {
+                                alignment: center;
+                                Tab {
+                                    text: @tr("进程");
+                                    active: root.page == 0;
+                                    clicked => {
+                                        root.page = 0;
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                Tab {
+                                    text: @tr("性能");
+                                    active: root.page == 1;
+                                    clicked => {
+                                        root.page = 1;
+                                    }
+                                }
                             }
                         }
                     }
@@ -323,63 +415,113 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 1;
                     }
 
-                    VerticalLayout {
-                        alignment: center;
-                        search := LineEdit {
-                            visible: root.page == 0;
-                            width: root.page == 0 ? 220px : 0px;
-                            placeholder-text: @tr("搜索名称或 PID（Ctrl+F）");
-                            text <=> root.filter;
-                            edited(text) => {
-                                root.filter-edited(text);
+                    // 右侧除提权按钮外的控件；变窄时其中只有搜索框收缩。
+                    toolbar-core := HorizontalLayout {
+                        horizontal-stretch: 0;
+                        spacing: 8px;
+                        VerticalLayout {
+                            alignment: center;
+                            search := LineEdit {
+                                visible: root.page == 0;
+                                min-width: root.page == 0 ? root.search-floor : 0px;
+                                preferred-width: root.page == 0 ? 220px : 0px;
+                                max-width: root.page == 0 ? 220px : 0px;
+                                // 窄于舒适宽度时换成简短占位文字，避免文字被截断。
+                                placeholder-text: self.width >= root.search-comfort - 0.5px ? root.search-hint : root.search-hint-short;
+                                text <=> root.filter;
+                                edited(text) => {
+                                    root.filter-edited(text);
+                                }
+                                accepted => {
+                                    keys.focus();
+                                }
                             }
-                            accepted => {
-                                keys.focus();
+                        }
+
+                        if root.page == 0: VerticalLayout {
+                            alignment: center;
+                            SegmentedControl {
+                                model: [@tr("平铺"), @tr("树形"), @tr("分组")];
+                                current-index <=> root.view-mode;
+                                selected(i) => {
+                                    root.view-changed(i);
+                                    keys.focus();
+                                }
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            ComboBox {
+                                width: 104px;
+                                model: [@tr("0.5 秒"), @tr("1 秒"), @tr("2 秒"), @tr("暂停")];
+                                current-index <=> root.interval-index;
+                                selected => {
+                                    root.interval-changed(self.current-index);
+                                }
+                            }
+                        }
+
+                        if root.page == 0: VerticalLayout {
+                            alignment: center;
+                            Button {
+                                text: @tr("结束进程");
+                                enabled: root.selected >= 0;
+                                clicked => {
+                                    root.end-process();
+                                }
                             }
                         }
                     }
 
-                    if root.page == 0: VerticalLayout {
-                        alignment: center;
-                        SegmentedControl {
-                            model: [@tr("平铺"), @tr("树形"), @tr("分组")];
-                            current-index <=> root.view-mode;
-                            selected(i) => {
-                                root.view-changed(i);
-                                keys.focus();
-                            }
-                        }
-                    }
-
-                    VerticalLayout {
-                        alignment: center;
-                        ComboBox {
-                            width: 104px;
-                            model: [@tr("0.5 秒"), @tr("1 秒"), @tr("2 秒"), @tr("暂停")];
-                            current-index <=> root.interval-index;
-                            selected => {
-                                root.interval-changed(self.current-index);
-                            }
-                        }
-                    }
-
-                    if root.page == 0: VerticalLayout {
+                    if !root.elevated && !root.toolbar-elevate-compact: VerticalLayout {
                         alignment: center;
                         Button {
-                            text: @tr("结束进程");
-                            enabled: root.selected >= 0;
-                            clicked => {
-                                root.end-process();
-                            }
-                        }
-                    }
-
-                    if !root.elevated: VerticalLayout {
-                        alignment: center;
-                        Button {
-                            text: @tr("以管理员身份重启");
+                            text: root.elevate-text;
                             clicked => {
                                 root.elevate();
+                            }
+                        }
+                    }
+
+                    // 收起后的提权按钮：盾牌图标；悬停提示与无障碍名称保留完整文字。
+                    if !root.elevated && root.toolbar-elevate-compact: VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+                            Button {
+                                width: 100%;
+                                height: 100%;
+                                accessible-label: root.elevate-text;
+                                clicked => {
+                                    root.elevate();
+                                }
+                                Tooltip {
+                                    Rectangle {
+                                        background: Theme.surface-raised;
+                                        border-radius: 4px;
+                                        border-width: 1px;
+                                        border-color: Theme.dark ? #ffffff24 : #0000001f;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            padding-top: 4px;
+                                            padding-bottom: 5px;
+                                            Text {
+                                                text: root.elevate-text;
+                                                font-size: 12px;
+                                                color: Palette.foreground;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            ShieldIcon {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                tint: Palette.foreground;
                             }
                         }
                     }
