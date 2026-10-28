@@ -417,8 +417,8 @@ export component AppWindow inherits Window {
                                 width: self.preferred-width;
                                 height: parent.height;
                                 spacing: 8px;
-                                // 与 Tab 之间留 32px。
-                                padding-right: 32px;
+                                // 与 Tab 之间留 16px（Tab 自带内边距，视觉间距更大）；再宽会让默认 1040 宽度下提权按钮收成图标。
+                                padding-right: 16px;
                                 Text {
                                     text: "TaskManager";
                                     vertical-alignment: center;
@@ -535,9 +535,9 @@ export component AppWindow inherits Window {
                                     width: 100%;
                                     height: 100%;
                                     accessible-label: root.pin-text;
+                                    // 与“结束进程”一致不转移焦点：键盘用户 Tab 到这里后可以继续按空格切换。
                                     clicked => {
                                         root.pinned = !root.pinned;
-                                        keys.focus();
                                     }
                                     Tooltip {
                                         TipBox {
