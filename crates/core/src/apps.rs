@@ -2,22 +2,34 @@
 //!
 //! 每次调用用 `EnumWindows` 遍历全部顶层窗口（约 1 ms，放在采样线程），窗口同时满足下列条件时，
 //! 其所属进程记为应用：可见、没有所有者窗口（带 `WS_EX_APPWINDOW` 的除外：它会被强制显示在任务栏上）、
-//! 不是工具窗口、有标题、没有被 DWM 隐藏。
+//! 不是工具窗口、有标题、没有被 DWM 隐藏。其他虚拟桌面上的窗口也被 DWM 隐藏（`DWM_CLOAKED_SHELL`），
+//! 与挂起的 UWP 窗口无法靠 cloaked 值区分，所以对“被外壳隐藏”的候选窗口再问一次
+//! `IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop`：明确不在当前桌面的仍算应用。
+//! 第一次调用该接口会把 `twinapi.dll` 及其依赖拉进进程（常驻工作集约 +4 MB），所以只有注册表显示
+//! 用户确实有至少两个虚拟桌面时才去问：只有一个桌面的机器（绝大多数）完全不会触碰 COM。
 //! UWP 应用的顶层窗口属于 `ApplicationFrameHost.exe`，真实进程要从它的
 //! `Windows.UI.Core.CoreWindow` 子窗口取得。
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 
-use windows::Win32::Foundation::{HWND, LPARAM};
+use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HWND, LPARAM, RPC_E_CHANGED_MODE};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize};
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RegGetValueW};
+use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GWL_EXSTYLE, GW_OWNER, GetClassNameW, GetWindow, GetWindowLongPtrW,
     GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
-use windows::core::BOOL;
+use windows::core::{BOOL, w};
 
 const UWP_FRAME_CLASS: &str = "ApplicationFrameWindow";
 const UWP_CORE_CLASS: &str = "Windows.UI.Core.CoreWindow";
+/// `DWM_CLOAKED_SHELL`：被外壳隐藏（其他虚拟桌面、挂起的 UWP）。
+const DWM_CLOAKED_SHELL: u32 = 2;
+/// 创建 `IVirtualDesktopManager` 最多尝试的次数，之后放弃并退回“cloaked 一律不是应用”。
+const MAX_CREATE_ATTEMPTS: u32 = 3;
 
 /// 判定一个顶层窗口用到的事实。
 #[derive(Debug, Clone, Copy, Default)]
@@ -30,11 +42,13 @@ struct WindowFacts {
     has_title: bool,
     /// `DWMWA_CLOAKED` 非 0：在其他虚拟桌面上，或是被挂起的 UWP 窗口。
     cloaked: bool,
+    /// 被外壳隐藏、并且虚拟桌面管理器明确说不在当前桌面：只是在别的桌面上，窗口本身是正常的。
+    other_desktop: bool,
 }
 
 /// 窗口是否算作“应用窗口”。
 fn is_app_window(f: WindowFacts) -> bool {
-    f.visible && (f.app_window || (!f.has_owner && !f.tool_window)) && f.has_title && !f.cloaked
+    f.visible && (f.app_window || (!f.has_owner && !f.tool_window)) && f.has_title && (!f.cloaked || f.other_desktop)
 }
 
 fn class_name(hwnd: HWND) -> String {
@@ -49,10 +63,103 @@ fn window_pid(hwnd: HWND) -> u32 {
     pid
 }
 
-fn cloaked(hwnd: HWND) -> bool {
+/// `DWMWA_CLOAKED` 的取值，读不到时为 0。
+fn cloaked_value(hwnd: HWND) -> u32 {
     let mut value = 0u32;
     unsafe { DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut value as *mut u32 as *mut _, size_of::<u32>() as u32) }
-        .is_ok_and(|()| value != 0)
+        .map_or(0, |()| value)
+}
+
+/// 采样线程上的虚拟桌面查询：COM 与 `IVirtualDesktopManager` 都在第一次需要时才创建，
+/// 且每个线程只创建一次（接口跟着线程的套间走）。没有 cloaked 的候选窗口时永远不会触碰 COM，
+/// 所以不用分组视图、或没有被隐藏窗口的机器上不会多加载任何 DLL。
+#[derive(Default)]
+struct DesktopProbe {
+    /// 先于 `com_initialized` 的清理释放（`Drop` 里显式按顺序处理）。
+    manager: Option<IVirtualDesktopManager>,
+    com_initialized: bool,
+    attempts: u32,
+    /// 本轮枚举里“是否存在多个虚拟桌面”的缓存；每轮 `app_pids` 开头清空，第一次需要时才读注册表。
+    multiple_desktops: Option<bool>,
+}
+
+impl DesktopProbe {
+    fn manager(&mut self) -> Option<&IVirtualDesktopManager> {
+        if self.manager.is_none() && self.attempts < MAX_CREATE_ATTEMPTS {
+            self.attempts += 1;
+            // 多线程套间：没有消息泵也能用。线程已用别的模型初始化过（RPC_E_CHANGED_MODE）时沿用，不由我们反初始化。
+            let init = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+            if init.is_ok() {
+                self.com_initialized = true;
+            }
+            if init.is_ok() || init == RPC_E_CHANGED_MODE {
+                self.manager = unsafe { CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_INPROC_SERVER) }.ok();
+            }
+        }
+        self.manager.as_ref()
+    }
+
+    /// 窗口是否明确不在当前虚拟桌面。查询失败（窗口已销毁、外壳重启、没有管理器）一律当作“不是”。
+    fn on_other_desktop(&mut self, hwnd: HWND) -> bool {
+        if !*self.multiple_desktops.get_or_insert_with(multiple_desktops) {
+            return false;
+        }
+        let Some(manager) = self.manager() else { return false };
+        match unsafe { manager.IsWindowOnCurrentVirtualDesktop(hwnd) } {
+            Ok(on_current) => !on_current.as_bool(),
+            Err(_) => {
+                // 外壳重启后旧接口会一直失败：丢弃它，下次重新创建。窗口已销毁之类的错误也走这里，代价只是重建一次。
+                self.manager = None;
+                false
+            }
+        }
+    }
+}
+
+impl Drop for DesktopProbe {
+    fn drop(&mut self) {
+        self.manager = None;
+        if self.com_initialized {
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
+thread_local! {
+    static DESKTOP: RefCell<DesktopProbe> = RefCell::new(DesktopProbe::default());
+}
+
+/// 用户是否有至少两个虚拟桌面。资源管理器把桌面 ID 按 16 字节 GUID 依次写在
+/// `HKCU\...\Explorer\VirtualDesktops\VirtualDesktopIDs`；没有这个值说明从未创建过额外的桌面。
+/// 读取出错（不是“不存在”）时无从判断，按“有”处理，交给虚拟桌面管理器回答。
+fn multiple_desktops() -> bool {
+    let mut bytes = 0u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VirtualDesktops"),
+            w!("VirtualDesktopIDs"),
+            RRF_RT_REG_BINARY,
+            None,
+            None,
+            Some(&mut bytes),
+        )
+    };
+    desktops_from_registry(status == ERROR_SUCCESS, status == ERROR_FILE_NOT_FOUND, bytes)
+}
+
+/// `multiple_desktops` 的判断部分：值存在时看 GUID 个数，不存在为单桌面，其他错误按多桌面处理。
+fn desktops_from_registry(found: bool, missing: bool, bytes: u32) -> bool {
+    if found {
+        bytes / 16 >= 2
+    } else {
+        !missing
+    }
+}
+
+/// 被外壳隐藏的窗口是否只是在别的虚拟桌面上。
+fn on_other_desktop(hwnd: HWND) -> bool {
+    DESKTOP.with(|d| d.borrow_mut().on_other_desktop(hwnd))
 }
 
 fn facts(hwnd: HWND) -> WindowFacts {
@@ -68,14 +175,11 @@ fn facts(hwnd: HWND) -> WindowFacts {
     if (has_owner || tool_window) && !app_window {
         return WindowFacts { visible, has_owner, tool_window, ..Default::default() };
     }
-    WindowFacts {
-        visible,
-        has_owner,
-        tool_window,
-        app_window,
-        has_title: unsafe { GetWindowTextLengthW(hwnd) } > 0,
-        cloaked: cloaked(hwnd),
-    }
+    let has_title = unsafe { GetWindowTextLengthW(hwnd) } > 0;
+    let cloaked = if has_title { cloaked_value(hwnd) } else { 0 };
+    // 只对“被外壳隐藏”的候选窗口问虚拟桌面管理器：其余窗口完全不涉及 COM。
+    let other_desktop = cloaked == DWM_CLOAKED_SHELL && on_other_desktop(hwnd);
+    WindowFacts { visible, has_owner, tool_window, app_window, has_title, cloaked: cloaked != 0, other_desktop }
 }
 
 /// UWP 框架窗口里承载应用内容的 `CoreWindow` 所属进程。
@@ -120,6 +224,7 @@ pub fn app_pids() -> HashSet<u32> {
         true.into()
     }
     let mut pids = HashSet::new();
+    DESKTOP.with(|d| d.borrow_mut().multiple_desktops = None);
     let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut pids as *mut HashSet<u32> as isize)) };
     pids
 }
@@ -129,7 +234,7 @@ mod tests {
     use super::*;
 
     fn shown() -> WindowFacts {
-        WindowFacts { visible: true, has_owner: false, tool_window: false, app_window: false, has_title: true, cloaked: false }
+        WindowFacts { visible: true, has_owner: false, tool_window: false, app_window: false, has_title: true, cloaked: false, other_desktop: false }
     }
 
     #[test]
@@ -144,6 +249,51 @@ mod tests {
         assert!(!is_app_window(WindowFacts { tool_window: true, ..shown() }));
         assert!(!is_app_window(WindowFacts { has_title: false, ..shown() }));
         assert!(!is_app_window(WindowFacts { cloaked: true, ..shown() }));
+    }
+
+    #[test]
+    fn desktop_probe_creates_manager_and_reports_current_desktop() {
+        // 绕过“只有一个桌面就不问”的门槛，直接验证 COM 路径：创建管理器、正常查询、无效窗口。
+        let mut probe = DesktopProbe::default();
+        probe.multiple_desktops = Some(true);
+        let shell = unsafe { windows::Win32::UI::WindowsAndMessaging::GetShellWindow() };
+        let on_current = shell.is_invalid() || !probe.on_other_desktop(shell);
+        assert!(on_current, "外壳窗口在当前桌面上，不应判为在其他桌面");
+        assert!(probe.manager.is_some(), "应已创建 IVirtualDesktopManager");
+        // 无效句柄：系统回答“在当前桌面”（Ok(TRUE)），同样不会被当成其他桌面上的应用。
+        assert!(!probe.on_other_desktop(HWND(0x7777_7777 as _)));
+        assert_eq!(probe.attempts, 1, "管理器只创建一次");
+        // 只有一个桌面时完全不触碰 COM。
+        let mut single = DesktopProbe::default();
+        single.multiple_desktops = Some(false);
+        assert!(!single.on_other_desktop(HWND(0x7777_7777 as _)));
+        assert!(single.manager.is_none() && single.attempts == 0 && !single.com_initialized);
+    }
+
+    #[test]
+    fn registry_value_decides_whether_other_desktops_exist() {
+        // 值存在：按 16 字节一个桌面计数。
+        assert!(!desktops_from_registry(true, false, 0));
+        assert!(!desktops_from_registry(true, false, 16));
+        assert!(desktops_from_registry(true, false, 32));
+        assert!(desktops_from_registry(true, false, 48));
+        // 值不存在：从未创建过额外桌面。
+        assert!(!desktops_from_registry(false, true, 0));
+        // 其他读取错误（拒绝访问等）：无法判断，交给虚拟桌面管理器。
+        assert!(desktops_from_registry(false, false, 0));
+    }
+
+    #[test]
+    fn cloaked_window_on_another_desktop_is_still_app() {
+        let elsewhere = WindowFacts { cloaked: true, other_desktop: true, ..shown() };
+        assert!(is_app_window(elsewhere));
+        // 其他条件照常适用：别的桌面上不可见 / 无标题 / 工具窗口 / 有所有者的窗口仍不是应用。
+        assert!(!is_app_window(WindowFacts { visible: false, ..elsewhere }));
+        assert!(!is_app_window(WindowFacts { has_title: false, ..elsewhere }));
+        assert!(!is_app_window(WindowFacts { tool_window: true, ..elsewhere }));
+        assert!(!is_app_window(WindowFacts { has_owner: true, ..elsewhere }));
+        // 挂起的 UWP：cloaked 但在当前桌面上，仍不是应用。
+        assert!(!is_app_window(WindowFacts { cloaked: true, other_desktop: false, ..shown() }));
     }
 
     #[test]
