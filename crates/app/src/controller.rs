@@ -100,6 +100,7 @@ struct State {
     system: SystemMetrics,
     disks: Vec<tml_core::PhysicalDisk>,
     networks: Vec<tml_core::NetworkAdapter>,
+    gpus: Vec<tml_core::Gpu>,
     memory: MemoryStatus,
     /// 内存硬件信息只读取一次，首个快照之后才有。
     memory_hardware: Option<MemoryHardware>,
@@ -737,6 +738,9 @@ impl Controller {
             let m = sample.system;
             s.resources
                 .sync_devices(&sample.disks, &sample.networks);
+            s.resources.sync_gpus(&sample.gpus);
+            let gpu_gap = s.gap;
+            s.resources.push_gpu_memory(&sample.gpus, now, gpu_gap);
             let resumed = std::mem::take(&mut s.gap);
             if resumed {
                 s.resources.push_gap(now);
@@ -761,6 +765,7 @@ impl Controller {
             s.system = m;
             s.disks = sample.disks;
             s.networks = sample.networks;
+            s.gpus = sample.gpus;
             s.memory = sample.memory;
             if sample.memory_hardware.is_some() {
                 s.memory_hardware = sample.memory_hardware;
@@ -883,6 +888,7 @@ impl Controller {
                     .disks
                     .iter()
                     .find(|d| resources::disk_id(d.number) == inst.id);
+                let gpu = s.gpus.iter().find(|g| g.id == inst.id);
                 let network = s.networks.iter().find(|n| n.id == inst.id);
                 let history = s.resources.history(&inst.id);
                 // (纵轴顶端取值, 卡片摘要, 纵轴标注, 统计项取值)
@@ -915,6 +921,13 @@ impl Controller {
                         })
                         .unwrap_or_default(),
                     ),
+                    ResourceKind::Gpu => {
+                        let g = gpu.unwrap();
+                        (100.0, g.usage.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "—".into()), "100%".into(),
+                         vec![g.usage.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "—".into()),
+                              g.dedicated.map(|v| format::gigabytes(v as u64)).unwrap_or_else(|| "—".into()),
+                              g.shared.map(|v| format::gigabytes(v as u64)).unwrap_or_else(|| "—".into())])
+                    }
                     ResourceKind::Network => {
                         let scale = format::nice_scale(history.max(), 100.0 * 1024.0);
                         (
@@ -936,13 +949,17 @@ impl Controller {
                     history.paths(now, scale, detail)
                 };
                 let (mini_line, mini_area) = history.paths(now, scale, Self::MINI);
+                let memory_graphs = s.resources.gpu_memory_paths(&inst.id, now, (detail.0, 64.0));
                 let detail = match (&mem_text, inst.kind) {
                     (Some(t), ResourceKind::Memory) => t.header.clone(),
                     _ => network.map(|n| format!("{} · 链路 {:.0} Mbps{}\n{}\n{}", n.connection, n.link_speed as f64 / 1e6,
                         if n.ssid.is_empty() { String::new() } else { format!(" · SSID {}", n.ssid) },
                         if n.addresses.is_empty() { "地址不可用" } else { &n.addresses }, s.resources.network_stats(&n.id, now))).unwrap_or_default(),
                 };
+
                 Resource {
+                    gpu_lines: ModelRc::new(VecModel::from(memory_graphs.iter().map(|p| SharedString::from(p.0.clone())).collect::<Vec<_>>())),
+                    gpu_scales: ModelRc::new(VecModel::from(memory_graphs.iter().map(|p| SharedString::from(p.1.clone())).collect::<Vec<_>>())),
                     adapter_name: network.map(|n| n.name.clone()).unwrap_or_default().into(),
                     adapter_description: network.map(|n| n.description.clone()).unwrap_or_default().into(),
                     disk_info: disk

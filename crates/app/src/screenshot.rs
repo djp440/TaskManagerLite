@@ -59,6 +59,16 @@ const STEPS: &[Step] = &[
     }),
     ("05c-性能磁盘-窄窗口", |ui| resize(ui, 760.0, 600.0)),
     ("05d-性能磁盘-恢复窗口", |ui| resize(ui, 1080.0, 700.0)),
+    ("05e-性能GPU-深色", |ui| {
+        let resources = ui.get_resources();
+        for i in (0..resources.row_count()).rev() {
+            let row = resources.row_data(i).unwrap();
+            if row.kind == crate::ResourceKind::Gpu {
+                ui.invoke_resource_selected(row.id);
+                break;
+            }
+        }
+    }),
     ("06-结束进程树确认-深色", |ui| {
         ui.set_page(0);
         ui.set_confirm_name("chrome.exe".into());

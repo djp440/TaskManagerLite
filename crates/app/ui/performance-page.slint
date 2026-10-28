@@ -253,6 +253,17 @@ export component PerformancePage inherits Rectangle {
                     }
                 }
 
+                if root.data.kind == ResourceKind.gpu: VerticalLayout {
+                    spacing: 4px;
+                    for line[i] in root.data.gpu-lines: VerticalLayout {
+                        Text {
+                            text: (i == 0 ? "专用显存" : "共享显存") + " · " + root.data.gpu-scales[i];
+                            color: Theme.subtle-text;
+                            font-size: 12px;
+                        }
+                        Graph { height: 64px; line: line; tint: root.tint; grid: true; }
+                    }
+                }
                 // 详情区目前对所有类型通用；需要按类型定制时（CPU、内存等），
                 // 在这里按 root.data.kind 分支，并让通用统计项排除这些类型。
                 if root.data.kind == ResourceKind.memory: MemoryDetail {

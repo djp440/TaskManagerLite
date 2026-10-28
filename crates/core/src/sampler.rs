@@ -34,6 +34,7 @@ pub enum DiskSource {
 }
 
 pub struct Sample {
+    pub gpus: Vec<crate::Gpu>,
     /// 卡片曲线读数，按稳定实例 id 关联；None 表示尚无有效基线。
     pub readings: Vec<(String, Option<f64>)>,
     pub networks: Vec<crate::NetworkAdapter>,
@@ -56,6 +57,8 @@ pub struct Sample {
 
 #[derive(Default)]
 pub struct Sampler {
+    gpu: Option<crate::gpu::GpuProbe>,
+    gpu_tried: bool,
     physical: Option<crate::disks::PhysicalCounters>,
     query: ProcessQuery,
     baseline: Baseline,
@@ -193,6 +196,11 @@ impl Sampler {
             .as_mut()
             .map(|p| p.sample())
             .unwrap_or_default();
+        if !first && !self.gpu_tried {
+            self.gpu_tried = true;
+            self.gpu = crate::gpu::GpuProbe::open();
+        }
+        let gpus = self.gpu.as_mut().map(|p| p.sample()).unwrap_or_default();
         let networks = self.net.sample(elapsed);
         // 汇总保持物理网卡口径，虚拟隧道与承载它的物理网卡不能重复累加。
         let net_recv = networks.iter().filter(|n| n.hardware).filter_map(|n| n.recv).sum();
@@ -206,7 +214,9 @@ impl Sampler {
         ];
         readings.extend(disks.iter().map(|d| (format!("disk:{}", d.number), d.active.map(f64::from))));
         readings.extend(networks.iter().map(|n| (n.id.clone(), n.recv.zip(n.send).map(|(r,s)| r+s))));
+        readings.extend(gpus.iter().map(|g| (g.id.clone(), g.usage)));
         Sample {
+            gpus,
             readings,
             networks,
             disks,
