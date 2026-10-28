@@ -72,10 +72,21 @@ struct State {
     gap: bool,
     paused: bool,
     visible: bool,
+    /// 后台继续采样：窗口不可见时只采系统指标，见 `sampling::plan`。
+    background: bool,
+    /// 恢复可见后的下一次完整采样把曲线连续性写进日志（供自动化验收核对）。
+    report_history: bool,
     /// 等待用户确认要结束的进程，按结束顺序排列。
     pending: Vec<ProcessKey>,
     first_data: bool,
     icons: IconCache<Image>,
+}
+
+impl State {
+    /// 当前是否在采样（见 `sampling::plan`）；它的变化意味着曲线上要留断点。
+    fn sampling(&self) -> bool {
+        crate::sampling::plan(self.visible, self.background, self.paused) != crate::sampling::Plan::Idle
+    }
 }
 
 fn sort_key(i: i32) -> SortKey {
@@ -130,7 +141,8 @@ impl Controller {
         ui.set_rows(ModelRc::from(rows.clone()));
         ui.set_resources(ModelRc::from(resources.clone()));
         ui.set_elevated(tml_core::is_elevated());
-        let mut state = State { visible: true, resources: set, ..Default::default() };
+        let mut state =
+            State { visible: true, background: settings.background_sampling, resources: set, ..Default::default() };
         state.opts.sort_key = settings.sort_key;
         state.opts.descending = settings.descending;
         state.opts.mode = settings.view;
@@ -383,10 +395,32 @@ impl Controller {
         if s.visible == visible {
             return;
         }
+        let before = s.sampling();
         s.visible = visible;
-        s.gap = true;
+        // 采样真的中断（或从中断中恢复）才在曲线上留断点；后台继续采样时曲线保持连续。
+        if before != s.sampling() {
+            s.gap = true;
+        }
+        s.report_history = visible;
         drop(s);
         self.sampler.send(Command::Visible(visible));
+    }
+
+    /// 后台继续采样开关（设置页 #16 调用；目前只能通过设置文件的 `background_sampling` 字段开启）。
+    #[allow(dead_code)]
+    pub fn set_background_sampling(&self, on: bool) {
+        let mut s = self.state.borrow_mut();
+        if s.background == on {
+            return;
+        }
+        let before = s.sampling();
+        s.background = on;
+        if before != s.sampling() {
+            s.gap = true;
+        }
+        drop(s);
+        self.settings.borrow_mut().background_sampling = on;
+        self.sampler.send(Command::Background(on));
     }
 
     /// 截图模式：逻辑处理器网格改用演示曲线。
@@ -424,14 +458,29 @@ impl Controller {
             }
             let with_history = s.first_data;
             s.cpu.record(now, sample.cpu, with_history);
-            s.snapshot = sample.snapshot;
-            s.app_pids = sample.app_pids;
+            // 只采系统指标的采样（窗口不可见）不带进程快照：保留上一份，界面也不刷新，回到前台时马上会补一次完整采样。
+            let fresh = sample.processes_fresh;
+            if fresh {
+                s.snapshot = sample.snapshot;
+                s.app_pids = sample.app_pids;
+            }
             s.system = m;
             s.memory = sample.memory;
             if sample.memory_hardware.is_some() {
                 s.memory_hardware = sample.memory_hardware;
             }
             s.first_data = true;
+            if !fresh {
+                return;
+            }
+            if std::mem::take(&mut s.report_history) {
+                let (points, gaps, step) = s.resources.history(resources::CPU).stats();
+                self.log.borrow_mut().line(format!(
+                    "恢复可见 后台采样={} CPU曲线 点数={points} 断点={gaps} 最大间隔={} ms",
+                    s.background,
+                    step.as_millis()
+                ));
+            }
             self.update_resources(&s, now);
         }
         self.track_icons();

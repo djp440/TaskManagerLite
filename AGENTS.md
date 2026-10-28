@@ -19,6 +19,7 @@
 - 右键菜单验收截图：`pwsh scripts/menu-screenshots.ps1 -Out <目录>`（原生菜单，菜单会在屏幕上短暂出现；用 `--menu-shot` 参数启动应用）
 - 右键菜单动作端到端验收：`pwsh scripts/test-menu-actions.ps1`（自己启动的子进程；用 `--menu-action <动作>:<pid>` 触发动作，检查资源管理器窗口、属性对话框与剪贴板；会临时改写剪贴板并在结束时还原）
 - 单实例限制的 Win32 自动化验收：`pwsh scripts/test-single-instance.ps1`（需先关闭已有实例）；开发时想多开用 `--allow-multiple`（`--measure-startup`、`--screenshot` 同样不受限制）
+- 后台继续采样（设置字段 `background_sampling`）端到端验收：`pwsh scripts/test-background-sampling.ps1`（最小化自己启动的实例，核对曲线连续性并测最小化期间 CPU）
 - 设置持久化：`%APPDATA%\TaskManagerLite\settings.json`（环境变量 `TML_SETTINGS_DIR` 可覆盖目录；`--screenshot`、`--measure-startup` 不读写）。端到端验收：`pwsh scripts/e2e-settings.ps1`（脚本用 `--allow-multiple` 启动，不受已运行实例影响）
 - 测试：`cargo test -p tml-core -p tml-app`
 - “应用”判定的真实桌面验收（会启动记事本、计算器并测量枚举耗时）：`pwsh scripts/test-apps.ps1`；`measure-idle.ps1 -View group` 测分组视图的常驻开销

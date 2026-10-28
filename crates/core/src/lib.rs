@@ -23,7 +23,7 @@ pub use icon::{IconBitmap, default_icon, file_icon};
 pub use instance::{Acquired, SingleInstance, acquire, activate_own_window, is_relaunch};
 pub use memory::{MemoryHardware, MemoryStatus};
 pub use procinfo::{command_line, image_path, image_path_of};
-pub use sampler::{Sample, Sampler};
+pub use sampler::{Sample, Sampler, Scope};
 pub use shellops::{ShellError, reveal_in_explorer, search_online, search_url, show_properties};
 pub use snapshot::{Process, ProcessKey, ProcessSnapshot};
 pub use system::SystemMetrics;

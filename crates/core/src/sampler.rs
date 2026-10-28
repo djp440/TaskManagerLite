@@ -11,8 +11,21 @@ use crate::nt::ProcessQuery;
 use crate::snapshot::{Baseline, ProcessKey, ProcessSnapshot};
 use crate::system::{CpuTimes, DiskCounters, SystemMetrics, cpu_times, network_octets};
 
+/// 一次采样的范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// 系统指标 + 进程快照。
+    Full,
+    /// 只采系统级指标（CPU、内存、磁盘、网络、逐核），跳过进程枚举与窗口枚举：窗口不可见但要保持曲线连续时使用。
+    /// 线程数、句柄数与压缩内存沿用最近一次完整采样的值。
+    Metrics,
+}
+
 pub struct Sample {
+    /// `Scope::Metrics` 采样时为空，此时 [`Sample::processes_fresh`] 为假，调用方应保留上一份快照。
     pub snapshot: ProcessSnapshot,
+    /// 本次采样是否带有新的进程快照。
+    pub processes_fresh: bool,
     pub system: SystemMetrics,
     /// 应用进程的 PID（见 [`crate::apps`]）；未开启 [`Sampler::track_apps`] 时为 `None`。
     pub app_pids: Option<HashSet<u32>>,
@@ -30,6 +43,10 @@ pub struct Sampler {
     cpu: CpuTimes,
     net: Option<(u64, u64)>,
     last: Option<Instant>,
+    /// 上一次进程快照的时间与当时的整机 CPU 总时间：进程占用率按两次快照之间的差计算，
+    /// 中间夹着若干次只采系统指标的采样也不影响。
+    last_processes: Option<Instant>,
+    processes_cpu_total: u64,
     disk: Option<DiskCounters>,
     disk_tried: bool,
     hardware_tried: bool,
@@ -45,6 +62,10 @@ impl Sampler {
     }
 
     pub fn sample(&mut self) -> Sample {
+        self.sample_scope(Scope::Full)
+    }
+
+    pub fn sample_scope(&mut self, scope: Scope) -> Sample {
         let now = Instant::now();
         let elapsed = self.last.map_or(0.0, |t| now.duration_since(t).as_secs_f64());
         self.last = Some(now);
@@ -57,17 +78,28 @@ impl Sampler {
         let cpu_usage =
             if total_delta > 0 { (100.0 * (1.0 - idle_delta as f64 / total_delta as f64)).clamp(0.0, 100.0) as f32 } else { 0.0 };
 
-        let raw = self.query.query().unwrap_or_default();
-        let mut seen = HashMap::with_capacity(raw.len());
-        let cache = &mut self.critical;
-        let snapshot = self.baseline.advance(raw, total_delta, elapsed, &mut |r| {
-            let key = ProcessKey { pid: r.pid, create_time: r.create_time };
-            let c = *cache.entry(key).or_insert_with(|| is_critical(r));
-            seen.insert(key, c);
-            c
-        });
-        // 只保留仍在运行的进程，避免缓存无限增长。
-        self.critical = seen;
+        let full = scope == Scope::Full;
+        let snapshot = if full {
+            // 进程基线与系统基线分开：上一次进程快照之后可能已有多次只采指标的采样。
+            let proc_elapsed = self.last_processes.map_or(0.0, |t| now.duration_since(t).as_secs_f64());
+            let proc_total_delta = if self.last_processes.is_some() { cpu.total.saturating_sub(self.processes_cpu_total) } else { 0 };
+            self.last_processes = Some(now);
+            self.processes_cpu_total = cpu.total;
+            let raw = self.query.query().unwrap_or_default();
+            let mut seen = HashMap::with_capacity(raw.len());
+            let cache = &mut self.critical;
+            let snapshot = self.baseline.advance(raw, proc_total_delta, proc_elapsed, &mut |r| {
+                let key = ProcessKey { pid: r.pid, create_time: r.create_time };
+                let c = *cache.entry(key).or_insert_with(|| is_critical(r));
+                seen.insert(key, c);
+                c
+            });
+            // 只保留仍在运行的进程，避免缓存无限增长。
+            self.critical = seen;
+            snapshot
+        } else {
+            ProcessSnapshot::default()
+        };
 
         let cpu_detail = self.cpu_probe.sample(first, self.query.totals);
 
@@ -100,10 +132,11 @@ impl Sampler {
             self.net = Some(cur);
         }
 
-        let app_pids = self.track_apps.then(app_pids);
+        let app_pids = (full && self.track_apps).then(app_pids);
 
         Sample {
             snapshot,
+            processes_fresh: full,
             app_pids,
             system: SystemMetrics {
                 cpu_usage,

@@ -80,6 +80,8 @@ pub struct Settings {
     /// 性能页选中的资源实例 id（`cpu`、`memory`、`disk`、`network`……）。
     pub resource: String,
     pub columns: ColumnWidths,
+    /// 后台继续采样：窗口最小化或隐藏时继续采系统指标，曲线不断开。默认关闭。
+    pub background_sampling: bool,
     /// 本版本不认识的顶层字段，保存时原样写回。
     extra: Map<String, Value>,
 }
@@ -96,6 +98,7 @@ impl Default for Settings {
             page: 0,
             resource: "cpu".into(),
             columns: ColumnWidths::default(),
+            background_sampling: false,
             extra: Map::new(),
         }
     }
@@ -103,7 +106,7 @@ impl Default for Settings {
 
 // 顶层字段名。新增字段时同步加入 KNOWN。
 // `tree` 是旧版的布尔视图开关，读取时迁移为 `view`，保存时不再写出。
-const KNOWN: &[&str] = &["window", "interval_index", "tree", "view", "sort", "page", "resource", "columns"];
+const KNOWN: &[&str] = &["window", "interval_index", "tree", "view", "sort", "page", "resource", "columns", "background_sampling"];
 
 fn int<T: TryFrom<i64>>(o: &Map<String, Value>, key: &str) -> Option<T> {
     T::try_from(o.get(key)?.as_i64()?).ok()
@@ -224,6 +227,9 @@ impl Settings {
                 disk: get("disk", d.disk),
             };
         }
+        if let Some(b) = o.get("background_sampling").and_then(Value::as_bool) {
+            s.background_sampling = b;
+        }
         s.extra = o.iter().filter(|(k, _)| !KNOWN.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
         s
     }
@@ -253,6 +259,7 @@ impl Settings {
         c.insert("memory".into(), number(self.columns.memory));
         c.insert("disk".into(), number(self.columns.disk));
         o.insert("columns".into(), Value::Object(c));
+        o.insert("background_sampling".into(), self.background_sampling.into());
         let mut text = serde_json::to_string_pretty(&Value::Object(o)).unwrap_or_default();
         text.push('\n');
         text
@@ -349,6 +356,7 @@ mod tests {
             page: 1,
             resource: "network".into(),
             columns: ColumnWidths { pid: 90.0, cpu: 64.5, memory: 140.0, disk: 200.0 },
+            background_sampling: true,
             extra: Map::new(),
         }
     }
@@ -367,6 +375,14 @@ mod tests {
         for bad in ["", "   ", "[1,2]", "null", "42", "{\"view\": tru", "\u{0}\u{1}垃圾"] {
             assert_eq!(Settings::parse(bad), (Settings::default(), false), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn 后台采样默认关闭且只认布尔值() {
+        assert!(!Settings::default().background_sampling);
+        assert!(parse(r#"{"background_sampling": true}"#).background_sampling);
+        assert!(!parse(r#"{"background_sampling": "yes"}"#).background_sampling);
+        assert!(!parse("{}").background_sampling);
     }
 
     #[test]

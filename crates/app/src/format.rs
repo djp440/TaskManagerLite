@@ -49,6 +49,13 @@ impl History {
         }
     }
 
+    /// 供日志核对曲线是否连续：(点数, 断点数, 相邻记录之间的最大间隔)。
+    pub fn stats(&self) -> (usize, usize, Duration) {
+        let gaps = self.points.iter().filter(|p| p.1.is_none()).count();
+        let step = self.points.iter().zip(self.points.iter().skip(1)).map(|(a, b)| b.0.duration_since(a.0)).max();
+        (self.points.len(), gaps, step.unwrap_or_default())
+    }
+
     pub fn max(&self) -> f64 {
         self.points.iter().filter_map(|p| p.1).fold(0.0, f64::max)
     }
@@ -123,6 +130,17 @@ mod tests {
         assert_eq!(line.matches('M').count(), 2, "{line}");
         assert!(line.ends_with("M 600.0 0.0 "), "{line}");
         assert_eq!(area.matches('Z').count(), 2);
+    }
+
+    #[test]
+    fn history_stats_expose_gaps_and_largest_step() {
+        let t0 = Instant::now();
+        let mut h = History::default();
+        h.push(t0, Some(1.0));
+        h.push(t0 + Duration::from_secs(1), Some(1.0));
+        assert_eq!(h.stats(), (2, 0, Duration::from_secs(1)));
+        h.push(t0 + Duration::from_secs(9), None);
+        assert_eq!(h.stats(), (3, 1, Duration::from_secs(8)));
     }
 
     #[test]
