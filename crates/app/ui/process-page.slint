@@ -1,6 +1,6 @@
 import { ListView, Palette } from "std-widgets.slint";
 import { Theme, Chevron } from "theme.slint";
-import { ColumnLayout, ProcRow } from "types.slint";
+import { ColumnLayout, DetailChoice, DetailHeader, ProcRow } from "types.slint";
 
 // 列宽：名称列伸缩，其余由用户拖动调整（启动时由设置恢复，默认值与 settings.rs 保持一致）。
 export global Columns {
@@ -22,7 +22,19 @@ export global Columns {
     // 列表可用于各列的宽度，由 ProcessPage 随窗口宽度更新。
     in-out property <length> available;
     pure callback fit(length, length, length, length, length, length) -> ColumnLayout;
-    out property <ColumnLayout> eff: self.fit(self.available, self.name-min, self.pid, self.cpu, self.memory, self.disk);
+    // 显示了“详细信息”列时表格可以横向滚动，基本列不再为了挤进窗口而缩小。
+    out property <ColumnLayout> eff: self.fit(self.extra-total > 0 ? 100000px : self.available, self.name-min, self.pid, self.cpu, self.memory, self.disk);
+
+    // “详细信息”列（由 Rust 维护）：显示中的列及其宽度总和、列选择菜单的选项（全部可选列）。
+    in-out property <[DetailHeader]> extra;
+    in-out property <length> extra-total;
+    in-out property <[DetailChoice]> choices;
+    // 参数为可选列的序号（choices 中的下标）。
+    callback toggle-detail(int);
+    callback reset-details();
+    // 把第 i 个显示中的列设为目标宽度（Rust 负责限制范围）；双击分隔线恢复默认宽度。
+    callback resize-detail(int, length);
+    callback reset-detail-width(int);
 }
 
 // 右键菜单的状态与动作：菜单弹出前由 Rust 读取所选进程的路径与命令行，决定各项是否可用。
@@ -46,14 +58,26 @@ component HeaderCell inherits Rectangle {
     in property <TextHorizontalAlignment> align: right;
     in property <bool> resizable: true;
     callback clicked;
-    // 拖动左边缘：参数为列宽的增量（向左拖为正）；双击恢复默认宽度。
+    // 拖动左边缘：参数为目标列宽（向左拖变宽）；双击恢复默认宽度。
     callback resize(length);
     callback reset();
+    // 右键按下：参数为指针的窗口坐标，由页面弹出列选择菜单。
+    callback context-menu(length, length);
+
+    // 按下分隔线时指针的窗口横坐标与当时的列宽。按指针的绝对位移求目标宽度：
+    // 横向滚动时列的左边缘不一定跟随指针移动，按相对按下点的偏移累加会失控。
+    property <length> drag-from;
+    property <length> drag-width;
 
     background: touch.has-hover ? Theme.hover : transparent;
     touch := TouchArea {
         clicked => {
             root.clicked();
+        }
+        pointer-event(e) => {
+            if e.button == PointerEventButton.right && e.kind == PointerEventKind.down {
+                root.context-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
         }
     }
 
@@ -92,10 +116,15 @@ component HeaderCell inherits Rectangle {
 
         grip := TouchArea {
             mouse-cursor: col-resize;
+            pointer-event(e) => {
+                if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                    root.drag-from = self.absolute-position.x + self.mouse-x;
+                    root.drag-width = root.width;
+                }
+            }
             moved => {
-                // 列的左边缘会随宽度变化而移动，所以每次用“指针相对按下点的偏移”修正。
                 if self.pressed {
-                    root.resize(self.pressed-x - self.mouse-x);
+                    root.resize(root.drag-width + root.drag-from - (self.absolute-position.x + self.mouse-x));
                 }
             }
             double-clicked => {
@@ -117,6 +146,24 @@ component ValueCell inherits Rectangle {
         text: root.text;
         horizontal-alignment: right;
         vertical-alignment: center;
+        color: Palette.foreground;
+    }
+}
+
+// “详细信息”列的单元格。
+component TextCell inherits Rectangle {
+    in property <string> text;
+    in property <bool> right;
+
+    Text {
+        // 右对齐时与数值列一致；左对齐时与表头文字对齐（行整体比表头右移 10px，见 ProcessPage 的 header-padding）。
+        x: root.right ? 10px : 0px;
+        width: parent.width - (root.right ? 28px : 10px);
+        height: parent.height;
+        text: root.text;
+        horizontal-alignment: root.right ? TextHorizontalAlignment.right : TextHorizontalAlignment.left;
+        vertical-alignment: center;
+        overflow: elide;
         color: Palette.foreground;
     }
 }
@@ -306,6 +353,12 @@ component ProcRowView inherits Rectangle {
             text: root.data.disk;
             heat: root.data.disk-heat;
         }
+
+        for t[i] in root.data.extra: TextCell {
+            width: Columns.extra[i].width;
+            text: t;
+            right: Columns.extra[i].right;
+        }
     }
 
     // 分组标题行：盖住整行，吃掉鼠标事件（不可选中、没有右键菜单）。
@@ -345,6 +398,8 @@ export component ProcessPage inherits Rectangle {
 
     // 表头右侧留白；其余宽度交给 Columns 分配。
     property <length> header-padding: 10px;
+    // 表格（行与表头）的宽度：放得下所有列时等于页面宽度，名称列伸缩；放不下时横向滚动，名称列保持最小宽度。
+    property <length> rows-width: max(root.width, Columns.name-min + Columns.eff.pid + Columns.eff.cpu + Columns.eff.memory + Columns.eff.disk + Columns.extra-total + root.header-padding);
 
     function sync-available() {
         Columns.available = root.width - root.header-padding;
@@ -362,17 +417,35 @@ export component ProcessPage inherits Rectangle {
         col == 1 ? Columns.eff.pid : col == 2 ? Columns.eff.cpu : col == 3 ? Columns.eff.memory : Columns.eff.disk
     }
 
-    function resize-column(col: int, delta: length) {
+    // 表格宽度变化后调整横向滚动位置，让被拖动列右侧的内容在屏幕上不动，
+    // 被拖动的左边缘因而跟随指针（与不需要横向滚动、名称列伸缩时的表现一致）。
+    function keep-right(before: length) {
+        list.content-x = max(min(0px, list.visible-width - root.rows-width), min(0px, list.content-x - (root.rows-width - before)));
+    }
+
+    function resize-detail(i: int, target: length) {
+        let before = root.rows-width;
+        Columns.resize-detail(i, target);
+        root.keep-right(before);
+    }
+
+    function show-header-menu(x: length, y: length) {
+        header-menu.show({ x: x - header-menu.absolute-position.x, y: y - header-menu.absolute-position.y });
+    }
+
+    function resize-column(col: int, target: length) {
         // 拖动前先把各列当前的有效宽度固化为设定值，避免总和受限时其他列跟着重新缩放。
-        let current = root.column-width(col);
+        let before = root.rows-width;
         let e = Columns.eff;
         Columns.pid = e.pid;
         Columns.cpu = e.cpu;
         Columns.memory = e.memory;
         Columns.disk = e.disk;
+        let current = root.column-width(col);
         let others = Columns.pid + Columns.cpu + Columns.memory + Columns.disk - current;
-        let upper = max(Columns.min, min(Columns.max, Columns.available - Columns.name-min - others));
-        let w = max(Columns.min, min(upper, current + delta));
+        // 显示了详细信息列时表格可以横向滚动，列宽不受窗口宽度限制。
+        let upper = Columns.extra-total > 0 ? Columns.max : max(Columns.min, min(Columns.max, Columns.available - Columns.name-min - others));
+        let w = max(Columns.min, min(upper, target));
         if col == 1 {
             Columns.pid = w;
         } else if col == 2 {
@@ -382,6 +455,7 @@ export component ProcessPage inherits Rectangle {
         } else {
             Columns.disk = w;
         }
+        root.keep-right(before);
     }
 
     function reset-column(col: int) {
@@ -408,8 +482,39 @@ export component ProcessPage inherits Rectangle {
     VerticalLayout {
         Rectangle {
             height: 34px;
+            clip: true;
+            // 列选择菜单：在任意列标题上右键弹出（标题的 TouchArea 会吞掉右键，由它们转发坐标）。
+            header-menu := ContextMenuArea {
+                width: 100%;
+                height: 100%;
+                Menu {
+                    for c[i] in Columns.choices: MenuItem {
+                        title: c.title;
+                        checkable: true;
+                        // 双向绑定：原生菜单激活勾选项时会直接改写 checked，单向绑定会因此失效，之后“恢复默认列”等改动就不再反映到勾选状态上。
+                        checked <=> c.shown;
+                        activated => {
+                            Columns.toggle-detail(i);
+                        }
+                    }
+                    MenuSeparator {}
+
+                    MenuItem {
+                        title: @tr("恢复默认列");
+                        activated => {
+                            Columns.reset-details();
+                        }
+                    }
+                }
+            }
+
+            // 与列表一起横向滚动；显式的 x/width 让表头的尺寸约束不传给页面。
             HorizontalLayout {
-                padding-right: 10px;
+                x: list.content-x;
+                y: 0px;
+                width: root.rows-width;
+                height: parent.height;
+                padding-right: root.header-padding;
                 HeaderCell {
                     horizontal-stretch: 1;
                     resizable: false;
@@ -419,6 +524,9 @@ export component ProcessPage inherits Rectangle {
                     descending: root.sort-descending;
                     clicked => {
                         root.sort-by(0);
+                    }
+                    context-menu(x, y) => {
+                        root.show-header-menu(x, y);
                     }
                 }
 
@@ -436,6 +544,9 @@ export component ProcessPage inherits Rectangle {
                     clicked => {
                         root.sort-by(1);
                     }
+                    context-menu(x, y) => {
+                        root.show-header-menu(x, y);
+                    }
                 }
 
                 HeaderCell {
@@ -451,6 +562,9 @@ export component ProcessPage inherits Rectangle {
                     descending: root.sort-descending;
                     clicked => {
                         root.sort-by(2);
+                    }
+                    context-menu(x, y) => {
+                        root.show-header-menu(x, y);
                     }
                 }
 
@@ -468,6 +582,9 @@ export component ProcessPage inherits Rectangle {
                     clicked => {
                         root.sort-by(3);
                     }
+                    context-menu(x, y) => {
+                        root.show-header-menu(x, y);
+                    }
                 }
 
                 HeaderCell {
@@ -484,6 +601,31 @@ export component ProcessPage inherits Rectangle {
                     clicked => {
                         root.sort-by(4);
                     }
+                    context-menu(x, y) => {
+                        root.show-header-menu(x, y);
+                    }
+                }
+
+                for c[i] in Columns.extra: HeaderCell {
+                    width: c.width;
+                    text: c.title;
+                    align: c.right ? TextHorizontalAlignment.right : TextHorizontalAlignment.left;
+                    active: root.sort-key == c.sort;
+                    descending: root.sort-descending;
+                    clicked => {
+                        root.sort-by(c.sort);
+                    }
+                    resize(w) => {
+                        root.resize-detail(i, w);
+                    }
+                    reset => {
+                        let before = root.rows-width;
+                        Columns.reset-detail-width(i);
+                        root.keep-right(before);
+                    }
+                    context-menu(x, y) => {
+                        root.show-header-menu(x, y);
+                    }
                 }
             }
 
@@ -497,7 +639,9 @@ export component ProcessPage inherits Rectangle {
         Rectangle {
             vertical-stretch: 1;
             list := ListView {
+                content-width: root.rows-width;
                 for row[i] in root.rows: ProcRowView {
+                    width: root.rows-width;
                     data: row;
                     selected: i == root.selected;
                     select => {

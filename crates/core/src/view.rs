@@ -3,6 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
+use crate::details::{self, DetailColumn};
 use crate::snapshot::{Process, ProcessKey, ProcessSnapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,6 +13,8 @@ pub enum SortKey {
     Cpu,
     Memory,
     Disk,
+    /// “详细信息”列。
+    Detail(DetailColumn),
 }
 
 /// 进程列表的视图模式。
@@ -135,6 +138,7 @@ fn compare(a: &Process, b: &Process, key: SortKey) -> Ordering {
         SortKey::Cpu => a.cpu_usage.total_cmp(&b.cpu_usage),
         SortKey::Memory => a.private_working_set.cmp(&b.private_working_set),
         SortKey::Disk => a.disk_rate.total_cmp(&b.disk_rate),
+        SortKey::Detail(col) => details::compare(a, b, col),
     };
     primary.then_with(|| a.key.pid.cmp(&b.key.pid))
 }
@@ -386,6 +390,8 @@ mod tests {
             private_working_set: 0,
             disk_rate: 0.0,
             critical: false,
+            counters: Default::default(),
+            info: None,
         }
     }
 

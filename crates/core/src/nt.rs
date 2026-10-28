@@ -20,6 +20,15 @@ pub struct RawProcess {
     /// 累计读写字节数。
     pub io_bytes: u64,
     pub session_id: u32,
+    pub base_priority: i32,
+    pub handles: u32,
+    pub threads: u32,
+    pub working_set: u64,
+    pub peak_working_set: u64,
+    /// 提交大小（私有页面），字节。
+    pub commit: u64,
+    /// 所有线程都因挂起而等待（与原生任务管理器的“已挂起”一致）。
+    pub suspended: bool,
 }
 
 #[repr(C)]
@@ -68,6 +77,33 @@ struct SystemProcessInfo {
     other_transfer_count: i64,
 }
 
+/// SYSTEM_THREAD_INFORMATION：紧跟在每个进程条目之后，共 `number_of_threads` 个。
+#[repr(C)]
+struct SystemThreadInfo {
+    kernel_time: i64,
+    user_time: i64,
+    create_time: i64,
+    wait_time: u32,
+    start_address: usize,
+    unique_process: usize,
+    unique_thread: usize,
+    priority: i32,
+    base_priority: i32,
+    context_switches: u32,
+    thread_state: u32,
+    wait_reason: u32,
+}
+
+/// KTHREAD_STATE::Waiting 与 KWAIT_REASON::Suspended。
+const THREAD_STATE_WAITING: u32 = 5;
+const WAIT_REASON_SUSPENDED: u32 = 5;
+
+/// 进程是否处于挂起状态：至少有一个线程，且所有线程都在因挂起而等待。
+fn all_suspended(threads: &[SystemThreadInfo]) -> bool {
+    !threads.is_empty()
+        && threads.iter().all(|t| t.thread_state == THREAD_STATE_WAITING && t.wait_reason == WAIT_REASON_SUSPENDED)
+}
+
 /// 复用缓冲区的进程枚举器。
 pub struct ProcessQuery {
     buffer: Vec<u64>,
@@ -109,6 +145,7 @@ impl ProcessQuery {
 
     fn parse(&mut self) -> Vec<RawProcess> {
         self.compressed_working_set = 0;
+        let buffer_end = self.buffer.len() * 8;
         let mut out = Vec::with_capacity(512);
         let mut totals = ProcessTotals::default();
         let base = self.buffer.as_ptr().cast::<u8>();
@@ -130,6 +167,12 @@ impl ProcessQuery {
             if name == "Memory Compression" {
                 self.compressed_working_set = info.working_set_size as u64;
             }
+            // 线程数组紧跟在进程条目之后；条目链里的下一项（或缓冲区末尾）是它的上界。
+            let threads_at = offset + size_of::<SystemProcessInfo>();
+            let limit = if info.next_entry_offset == 0 { buffer_end } else { offset + info.next_entry_offset as usize };
+            let count = (info.number_of_threads as usize).min(limit.saturating_sub(threads_at) / size_of::<SystemThreadInfo>());
+            // SAFETY: 上面已把线程数截断到条目边界之内；条目 8 字节对齐，线程结构大小是 8 的倍数。
+            let threads = unsafe { std::slice::from_raw_parts(base.add(threads_at).cast::<SystemThreadInfo>(), count) };
             out.push(RawProcess {
                 pid,
                 parent_pid: info.inherited_from_unique_process_id as u32,
@@ -139,6 +182,13 @@ impl ProcessQuery {
                 private_working_set: info.working_set_private_size.max(0) as u64,
                 io_bytes: (info.read_transfer_count + info.write_transfer_count).max(0) as u64,
                 session_id: info.session_id,
+                base_priority: info.base_priority,
+                handles: info.handle_count,
+                threads: info.number_of_threads,
+                working_set: info.working_set_size as u64,
+                peak_working_set: info.peak_working_set_size as u64,
+                commit: info.private_page_count as u64,
+                suspended: all_suspended(threads),
             });
             if info.next_entry_offset == 0 {
                 break;
@@ -147,5 +197,80 @@ impl ProcessQuery {
         }
         self.totals = totals;
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layouts_match_the_64_bit_abi() {
+        assert_eq!(size_of::<SystemProcessInfo>(), 256);
+        assert_eq!(size_of::<SystemThreadInfo>(), 80);
+        assert_eq!(std::mem::offset_of!(SystemThreadInfo, thread_state), 0x44);
+    }
+
+    #[test]
+    fn own_process_has_threads_handles_and_is_running() {
+        let me = std::process::id();
+        let procs = ProcessQuery::default().query().unwrap();
+        let p = procs.iter().find(|p| p.pid == me).expect("快照里应有本进程");
+        assert!(p.threads >= 1 && p.handles > 0, "{p:?}");
+        assert!(p.working_set > 0 && p.peak_working_set >= p.working_set && p.commit > 0, "{p:?}");
+        assert!(!p.suspended);
+        // CI 的执行器可能以非正常优先级运行测试，按本进程实际的优先级类核对。
+        // SAFETY: 伪句柄，无需关闭。
+        let class = unsafe {
+            windows::Win32::System::Threading::GetPriorityClass(windows::Win32::System::Threading::GetCurrentProcess())
+        };
+        let expected = match class {
+            0x40 => 4,
+            0x4000 => 6,
+            0x8000 => 10,
+            0x80 => 13,
+            0x100 => 24,
+            _ => 8,
+        };
+        assert_eq!(p.base_priority, expected, "基本优先级应与本进程的优先级类 {class:#x} 一致");
+    }
+
+    #[test]
+    fn process_created_suspended_is_reported_suspended() {
+        use std::os::windows::process::CommandExt;
+        const CREATE_SUSPENDED: u32 = 0x4;
+        let mut child = std::process::Command::new("ping.exe")
+            .args(["-n", "30", "127.0.0.1"])
+            .creation_flags(CREATE_SUSPENDED)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let procs = ProcessQuery::default().query().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        let p = procs.iter().find(|p| p.pid == child.id()).expect("快照里应有子进程");
+        assert!(p.suspended, "{p:?}");
+    }
+
+    #[test]
+    fn suspended_means_every_thread_waits_for_suspension() {
+        let t = |state, reason| SystemThreadInfo {
+            kernel_time: 0,
+            user_time: 0,
+            create_time: 0,
+            wait_time: 0,
+            start_address: 0,
+            unique_process: 0,
+            unique_thread: 0,
+            priority: 0,
+            base_priority: 0,
+            context_switches: 0,
+            thread_state: state,
+            wait_reason: reason,
+        };
+        assert!(all_suspended(&[t(5, 5), t(5, 5)]));
+        assert!(!all_suspended(&[t(5, 5), t(5, 6)]));
+        assert!(!all_suspended(&[t(2, 0)]));
+        assert!(!all_suspended(&[]));
     }
 }

@@ -10,7 +10,9 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use serde_json::{Map, Number, Value};
-use tml_core::{SortKey, ViewMode};
+use tml_core::{DetailColumn, SortKey, ViewMode};
+
+use crate::details::{self, Shown};
 
 const FILE_NAME: &str = "settings.json";
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -80,6 +82,8 @@ pub struct Settings {
     /// 性能页选中的资源实例 id（`cpu`、`memory`、`disk`、`network`……）。
     pub resource: String,
     pub columns: ColumnWidths,
+    /// 显示中的“详细信息”列，按显示顺序。
+    pub details: Vec<Shown>,
     /// 用 ETW 统计进程磁盘速率（需要管理员权限，默认关闭，见 ADR-0004）。
     pub accurate_disk_io: bool,
     /// 窗口置顶。
@@ -106,6 +110,7 @@ impl Default for Settings {
             page: 0,
             resource: "cpu".into(),
             columns: ColumnWidths::default(),
+            details: Vec::new(),
             accurate_disk_io: false,
             always_on_top: false,
             replace_taskmgr: false,
@@ -119,8 +124,20 @@ impl Default for Settings {
 // 顶层字段名。新增字段时同步加入 KNOWN。
 // `tree` 是旧版的布尔视图开关，读取时迁移为 `view`，保存时不再写出。
 const KNOWN: &[&str] = &[
-    "window", "interval_index", "tree", "view", "sort", "page", "resource", "columns", "always_on_top",
-    "replace_taskmgr", "accurate_disk_io", "background_sampling", "close_to_tray",
+    "window",
+    "interval_index",
+    "tree",
+    "view",
+    "sort",
+    "page",
+    "resource",
+    "columns",
+    "detail_columns",
+    "always_on_top",
+    "replace_taskmgr",
+    "accurate_disk_io",
+    "background_sampling",
+    "close_to_tray",
 ];
 
 fn int<T: TryFrom<i64>>(o: &Map<String, Value>, key: &str) -> Option<T> {
@@ -148,13 +165,15 @@ fn view_mode_from_name(s: &str) -> Option<ViewMode> {
     })
 }
 
-fn sort_key_name(k: SortKey) -> &'static str {
+/// 排序列的名字；详细信息列写作 `detail:<列名>`。
+fn sort_key_name(k: SortKey) -> String {
     match k {
-        SortKey::Name => "name",
-        SortKey::Pid => "pid",
-        SortKey::Cpu => "cpu",
-        SortKey::Memory => "memory",
-        SortKey::Disk => "disk",
+        SortKey::Name => "name".into(),
+        SortKey::Pid => "pid".into(),
+        SortKey::Cpu => "cpu".into(),
+        SortKey::Memory => "memory".into(),
+        SortKey::Disk => "disk".into(),
+        SortKey::Detail(c) => format!("detail:{}", c.id()),
     }
 }
 
@@ -165,8 +184,17 @@ fn sort_key_from_name(s: &str) -> Option<SortKey> {
         "cpu" => SortKey::Cpu,
         "memory" => SortKey::Memory,
         "disk" => SortKey::Disk,
-        _ => return None,
+        _ => SortKey::Detail(DetailColumn::from_id(s.strip_prefix("detail:")?)?),
     })
+}
+
+/// 排序列的默认方向（设置里缺少方向时使用）。
+pub fn default_descending(k: SortKey) -> bool {
+    match k {
+        SortKey::Name | SortKey::Pid => false,
+        SortKey::Cpu | SortKey::Memory | SortKey::Disk => true,
+        SortKey::Detail(c) => details::default_descending(c),
+    }
 }
 
 /// 保留两位小数，避免把 f32 的二进制误差写进文件。
@@ -211,7 +239,7 @@ impl Settings {
             if let Some(k) = sort.get("key").and_then(Value::as_str).and_then(sort_key_from_name) {
                 s.sort_key = k;
                 // 方向缺失时用该列的默认方向（名称、PID 升序，其余降序）。
-                s.descending = !matches!(k, SortKey::Name | SortKey::Pid);
+                s.descending = default_descending(k);
             }
             if let Some(d) = sort.get("descending").and_then(Value::as_bool) {
                 s.descending = d;
@@ -254,6 +282,20 @@ impl Settings {
         if let Some(b) = o.get("always_on_top").and_then(Value::as_bool) {
             s.always_on_top = b;
         }
+        // 未知的列名、重复项与非法宽度被跳过；宽度缺失时用该列的默认宽度。
+        if let Some(list) = o.get("detail_columns").and_then(Value::as_array) {
+            for item in list.iter().filter_map(Value::as_object) {
+                let Some(column) = item.get("id").and_then(Value::as_str).and_then(DetailColumn::from_id) else { continue };
+                if s.details.iter().any(|d| d.column == column) {
+                    continue;
+                }
+                let width = match item.get("width").and_then(Value::as_f64) {
+                    Some(v) if v.is_finite() => (v as f32).clamp(details::MIN_WIDTH, details::MAX_WIDTH),
+                    _ => details::default_width(column),
+                };
+                s.details.push(Shown { column, width });
+            }
+        }
         if let Some(b) = o.get("replace_taskmgr").and_then(Value::as_bool) {
             s.replace_taskmgr = b;
         }
@@ -286,6 +328,17 @@ impl Settings {
         c.insert("memory".into(), number(self.columns.memory));
         c.insert("disk".into(), number(self.columns.disk));
         o.insert("columns".into(), Value::Object(c));
+        let shown: Vec<Value> = self
+            .details
+            .iter()
+            .map(|d| {
+                let mut m = Map::new();
+                m.insert("id".into(), d.column.id().into());
+                m.insert("width".into(), number(d.width));
+                Value::Object(m)
+            })
+            .collect();
+        o.insert("detail_columns".into(), Value::Array(shown));
         o.insert("accurate_disk_io".into(), self.accurate_disk_io.into());
         o.insert("always_on_top".into(), self.always_on_top.into());
         o.insert("replace_taskmgr".into(), self.replace_taskmgr.into());
@@ -387,6 +440,10 @@ mod tests {
             page: 1,
             resource: "network".into(),
             columns: ColumnWidths { pid: 90.0, cpu: 64.5, memory: 140.0, disk: 200.0 },
+            details: vec![
+                Shown { column: DetailColumn::CommandLine, width: 420.5 },
+                Shown { column: DetailColumn::Handles, width: 76.0 },
+            ],
             accurate_disk_io: true,
             always_on_top: true,
             replace_taskmgr: true,
@@ -451,6 +508,30 @@ mod tests {
         assert!(!s.accurate_disk_io);
         assert_eq!(s.columns, ColumnWidths { cpu: 100.0, ..ColumnWidths::default() });
         assert!(!s.always_on_top);
+    }
+
+    #[test]
+    fn 详细信息列保持顺序并跳过非法项() {
+        let s = parse(
+            r#"{"detail_columns": [{"id": "user", "width": 5000}, {"id": "nope"}, 3, {"id": "threads"},
+                {"id": "user", "width": 90}, {"id": "path", "width": "wide"}],
+                "sort": {"key": "detail:handles"}}"#,
+        );
+        assert_eq!(
+            s.details,
+            vec![
+                Shown { column: DetailColumn::User, width: details::MAX_WIDTH },
+                Shown { column: DetailColumn::Threads, width: details::default_width(DetailColumn::Threads) },
+                Shown { column: DetailColumn::Path, width: details::default_width(DetailColumn::Path) },
+            ]
+        );
+        assert_eq!(s.sort_key, SortKey::Detail(DetailColumn::Handles));
+        assert!(s.descending, "数值列默认降序");
+        assert_eq!(parse(r#"{"sort": {"key": "detail:nope"}}"#).sort_key, SortKey::Cpu);
+        assert_eq!(parse(r#"{"detail_columns": {"id": "user"}}"#).details, vec![]);
+        // 详细信息列排序也能往返。
+        let t = Settings { sort_key: SortKey::Detail(DetailColumn::CommandLine), ..Settings::default() };
+        assert_eq!(parse(&t.to_json()).sort_key, t.sort_key);
     }
 
     #[test]

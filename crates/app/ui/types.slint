@@ -14,6 +14,8 @@ export struct ProcRow {
     // 分组视图的标题行（名称里是“应用 (5)”这样的标题文字），不可选中。
     header: bool,
     icon: image,
+    // 显示中的“详细信息”列的单元格文字，与 Columns.extra 一一对应。
+    extra: [string],
 }
 
 // 进程列表各数值列的有效宽度。
@@ -22,6 +24,22 @@ export struct ColumnLayout {
     cpu: length,
     memory: length,
     disk: length,
+}
+
+// 显示中的一个“详细信息”列。
+export struct DetailHeader {
+    title: string,
+    width: length,
+    // 数值列右对齐，文字列左对齐。
+    right: bool,
+    // 排序编号：100 + 该列在全部可选列中的序号。
+    sort: int,
+}
+
+// 列选择菜单中的一项（全部可选列，按固定顺序）。
+export struct DetailChoice {
+    title: string,
+    shown: bool,
 }
 
 // 资源类型：右侧详情区按类型分支，便于为某类资源定制详情。

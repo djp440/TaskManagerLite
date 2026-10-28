@@ -46,7 +46,7 @@ impl Drop for ProcessHandle {
     }
 }
 
-fn query_image_path(h: &ProcessHandle) -> Option<PathBuf> {
+pub(crate) fn query_image_path(h: &ProcessHandle) -> Option<PathBuf> {
     // 32768 个 UTF-16 单元是 Windows 路径的上限，一次读够。
     let mut buf = vec![0u16; 32768];
     let mut len = buf.len() as u32;
@@ -84,7 +84,7 @@ const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
 const STATUS_BUFFER_OVERFLOW: i32 = 0x8000_0005_u32 as i32;
 const STATUS_BUFFER_TOO_SMALL: i32 = 0xC000_0023_u32 as i32;
 
-fn query_command_line(h: &ProcessHandle) -> Option<String> {
+pub(crate) fn query_command_line(h: &ProcessHandle) -> Option<String> {
     let mut needed = 0u32;
     let first = unsafe { NtQueryInformationProcess(h.0, ProcessCommandLineInformation, std::ptr::null_mut(), 0, &mut needed) };
     if ![STATUS_INFO_LENGTH_MISMATCH, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL].contains(&first.0) {
