@@ -9,6 +9,12 @@
 - 托盘自动化：向托盘窗口 `PostMessage(WM_APP+1, uID=1, WM_LBUTTONUP/WM_RBUTTONUP)` 等价于真实点击；右键会进入模态菜单，截图后用 `WM_CANCELMODE` 取消；菜单命令可直接 `PostMessage(WM_COMMAND, 1002)`。`Shell_NotifyIconGetRect` 返回 S_OK 或 S_FALSE（在溢出区）都说明图标已登记，NIM_ADD 是异步的，要轮询。PowerShell 双引号字符串里的弯引号 “ ” 会被当成引号，脚本里用「」。
 - `command_line` 集成测试 `quoted_arguments_are_preserved` 偶发失败：ping 无效主机名会立刻退出，读命令行有竞态（与本改动无关）。
 
+## 2026-10-28 12:30 其他虚拟桌面上的应用（#40）
+- 其他桌面上的窗口和挂起的 UWP 窗口一样是 `DWMWA_CLOAKED=2`。区分靠 `IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop`：挂起的 UWP（计算器、Cortana、Text Input）都回答“在当前桌面”，无效句柄也回答 TRUE，所以“明确 FALSE”才算在其他桌面，不会误把挂起 UWP 算成应用。
+- 第一次调用该接口就会把 `twinapi.dll` 等拉进进程：常驻工作集约 +4 MB（私有基本不变），而且任何 Win10 上几乎总有被 cloak 的挂起 UWP 窗口，会无条件触发。所以先读 `HKCU\...\Explorer\VirtualDesktops\VirtualDesktopIDs`（16 字节一个桌面）：不足 2 个桌面（含值不存在）就不碰 COM；读取出错才按多桌面处理。单桌面机器的分组视图内存与 main 无差别。
+- COM 在采样线程第一次需要时用 MTA 初始化，`IVirtualDesktopManager` 存在 thread_local 里只创建一次；创建或查询失败后按 1s 起翻倍（最长 60s）的退避重试，只计连续失败、成功清零、没有永久放弃的上限（开机自启时外壳未就绪、资源管理器重启都能恢复）；线程已用别的模型初始化（`RPC_E_CHANGED_MODE`）时沿用且不反初始化。
+- `MoveWindowToDesktop` 通常只允许移动调用方进程自己的窗口：测试用自己创建的窗口，记事本只尝试一次，被拒绝就说明并跳过。
+
 ## 2026-10-28 11:02 窄窗口工具栏
 - 档位（提权按钮收成图标、隐藏品牌）由各部分的首选/最小宽度与 `root.width` 算出。被测量的元素如果参与窗口布局，会形成“档位 → 布局约束 → 窗口约束 → 窗口宽度 → 档位”的绑定循环。给工具栏布局和隐藏的测量 `Text` 显式设置 `x/y`，它们的约束就不再传给父元素。判断只用不随档位变化的量。
 - `Text` 在 clip、不换行时最小宽度等于首选宽度，所以“布局 min-width ≤ 窗口宽度”就等价于没有控件被裁剪。截图模式和单元测试都断言 `toolbar-min-width`。
@@ -24,7 +30,7 @@
 - 详情页放进 `ScrollView`，统计项用 `stats-panel.slint` 的 `StatsPanel`（按宽度自动定列数）；截图步骤固定包含 760×480 和 900×600 两种尺寸。
 - 逐核曲线和 CPU 统计只在 CPU 被选中、并且处于“逻辑处理器”视图时才计算。基准速度取 `CallNtPowerInformation(ProcessorInformation)` 的 MaxMhz：注册表 `~MHz` 是 3893，会显示成 3.89 GHz。超过 64 个逻辑处理器（多个处理器组）时，`SystemProcessorPerformanceInformation` 只返回当前组的核，这是已知限制。
 - 内存：已缓存 = 备用 + 已修改（`SystemMemoryListInformation`，class 80）；已压缩取 Memory Compression 进程的工作集。SMBIOS Type 17 通过 `GetSystemFirmwareTable('RSMB')` 在首个快照之后读一次，不用 WMI。
-- 分组视图：“应用”的判定是 `visible && (WS_EX_APPWINDOW || (!owner && !toolwindow)) && 有标题 && !cloaked`。`DWMWA_CLOAKED=2` 同时覆盖挂起的 UWP 和其他虚拟桌面上的窗口，所以其他桌面上的应用会被归入后台，这是已知限制。EnumWindows 只在分组视图下每次采样运行，单次约 0.08 ms。应用行显示整棵进程树的合计。
+- 分组视图：“应用”的判定是 `visible && (WS_EX_APPWINDOW || (!owner && !toolwindow)) && 有标题 && !cloaked`。`DWMWA_CLOAKED=2` 同时覆盖挂起的 UWP 和其他虚拟桌面上的窗口（#40 起用 `IVirtualDesktopManager` 区分，见上）。EnumWindows 只在分组视图下每次采样运行，单次约 0.08 ms。应用行显示整棵进程树的合计。
 - 分组标题行的 `index` 是 `HEADER_INDEX`（`usize::MAX`）：凡是按行号去取 `snapshot.processes` 的代码，都必须先经过 `ViewRow::process()`，否则会越界 panic，而且 git 合并时不会报冲突。
 - 测试里 `cmd /c ping -t` 只结束 cmd 会留下孤儿 ping：直接启动 ping.exe，或者用 Drop 守卫结束整棵进程树。
 - 合并流程：仓库没有必需检查，`gh pr merge --auto` 会立即合并，所以要等 CI 跑完再手动合并。agent 没有 force push 权限，feature 分支用合并提交并入 main，不用 rebase。堆叠的 PR 在基础 PR squash 合并后会出现 add/add 冲突；先确认 `git diff <基础 PR head> origin/main` 为空，再取堆叠分支一侧解决冲突。

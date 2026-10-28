@@ -11,11 +11,16 @@ use std::time::{Duration, Instant};
 use tml_core::{
     EndError, Group, ProcessKey, Sampler, ViewMode, ViewOptions, app_pids, build_group_view, end_process, tree_from,
 };
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{ERROR_SUCCESS, HWND, LPARAM, WPARAM};
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RegGetValueW};
+use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE,
+    CreateWindowExW, DestroyWindow, EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
+    WINDOW_EX_STYLE, WM_CLOSE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
-use windows::core::BOOL;
+use windows::core::{BOOL, GUID, w};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -230,4 +235,166 @@ fn guard_cleans_up_when_the_test_panics() {
     for k in &seen {
         assert!(!after.processes.iter().any(|p| p.key == *k), "panic 后进程 {} 仍在运行", k.pid);
     }
+}
+
+// ---- 其他虚拟桌面（#40）----
+
+/// 当前用户已存在的虚拟桌面 ID（注册表里按 16 字节 GUID 顺序排列）；读不到时为空。
+fn existing_desktops() -> Vec<GUID> {
+    let mut bytes = 0u32;
+    let key = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VirtualDesktops");
+    let value = w!("VirtualDesktopIDs");
+    unsafe {
+        if RegGetValueW(HKEY_CURRENT_USER, key, value, RRF_RT_REG_BINARY, None, None, Some(&mut bytes)) != ERROR_SUCCESS {
+            return Vec::new();
+        }
+        let mut buf = vec![0u8; bytes as usize];
+        if RegGetValueW(HKEY_CURRENT_USER, key, value, RRF_RT_REG_BINARY, None, Some(buf.as_mut_ptr().cast()), Some(&mut bytes))
+            != ERROR_SUCCESS
+        {
+            return Vec::new();
+        }
+        buf[..bytes as usize]
+            .chunks_exact(16)
+            .map(|c| {
+                GUID::from_values(
+                    u32::from_le_bytes(c[0..4].try_into().unwrap()),
+                    u16::from_le_bytes(c[4..6].try_into().unwrap()),
+                    u16::from_le_bytes(c[6..8].try_into().unwrap()),
+                    c[8..16].try_into().unwrap(),
+                )
+            })
+            .collect()
+    }
+}
+
+fn desktop_manager() -> IVirtualDesktopManager {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_INPROC_SERVER).expect("创建 IVirtualDesktopManager")
+    }
+}
+
+fn is_cloaked(hwnd: HWND) -> u32 {
+    let mut v = 0u32;
+    let _ = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, (&mut v as *mut u32).cast(), 4) };
+    v
+}
+
+/// 测试进程自己创建的可见顶层窗口（算应用窗口）；离开作用域时销毁。
+struct OwnWindow(HWND);
+
+impl OwnWindow {
+    fn create() -> Self {
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("TML 虚拟桌面测试窗口"),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                100,
+                100,
+                320,
+                200,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("创建测试窗口");
+        Self(hwnd)
+    }
+}
+
+impl Drop for OwnWindow {
+    fn drop(&mut self) {
+        let _ = unsafe { DestroyWindow(self.0) };
+    }
+}
+
+/// 虚拟桌面管理器本身可用，并且当前桌面上的普通窗口被判定为在当前桌面、不是 cloaked。
+/// 不需要多个桌面，验证 COM 路径在本机能创建、调用成功。
+#[test]
+#[ignore = "需要交互式桌面，用 scripts/test-apps.ps1 运行"]
+fn desktop_manager_reports_own_window_on_current_desktop() {
+    let win = OwnWindow::create();
+    let mgr = desktop_manager();
+    let on_current = unsafe { mgr.IsWindowOnCurrentVirtualDesktop(win.0) }.expect("查询当前桌面");
+    assert!(on_current.as_bool());
+    assert_eq!(is_cloaked(win.0), 0);
+    let pid = std::process::id();
+    assert!(app_pids().contains(&pid), "当前桌面上的测试窗口应让本进程成为应用");
+}
+
+/// 把窗口移到另一个已存在的虚拟桌面后：窗口被 DWM 隐藏，但仍是应用。
+/// 只用用户已经存在的桌面，只移动测试自己创建的窗口，不新建 / 删除 / 切换桌面；只有一个桌面时跳过。
+#[test]
+#[ignore = "需要交互式桌面，用 scripts/test-apps.ps1 运行"]
+fn window_on_another_virtual_desktop_is_still_app() {
+    let desktops = existing_desktops();
+    if desktops.len() < 2 {
+        eprintln!("跳过：当前只有 {} 个虚拟桌面。需要至少 2 个桌面时才能验证（脚本不会替你新建桌面）", desktops.len());
+        return;
+    }
+    let mgr = desktop_manager();
+    let pid = std::process::id();
+
+    // 1) 测试进程自己的窗口：MoveWindowToDesktop 只允许移动调用方进程自己的窗口。
+    let win = OwnWindow::create();
+    let here = unsafe { mgr.GetWindowDesktopId(win.0) }.expect("取窗口所在桌面");
+    let other = *desktops.iter().find(|d| **d != here).expect("另一个桌面");
+    unsafe { mgr.MoveWindowToDesktop(win.0, &other) }.expect("移动自己的窗口到另一个桌面");
+    assert!(
+        wait_until(Duration::from_secs(5), || is_cloaked(win.0) != 0),
+        "移到另一个桌面后窗口应被 DWM 隐藏"
+    );
+    assert!(unsafe { !mgr.IsWindowOnCurrentVirtualDesktop(win.0).unwrap().as_bool() });
+    assert!(app_pids().contains(&pid), "另一个桌面上的窗口所属进程仍应是应用");
+    // 移回当前桌面后回到原状。
+    unsafe { mgr.MoveWindowToDesktop(win.0, &here) }.expect("移回");
+    assert!(wait_until(Duration::from_secs(5), || is_cloaked(win.0) == 0));
+    drop(win);
+    assert!(wait_until(Duration::from_secs(5), || !app_pids().contains(&pid)), "窗口销毁后本进程不应再是应用");
+
+    // 2) 自己启动的记事本：系统通常只允许移动调用方进程自己的窗口（拒绝访问），移不动就说明原因并跳过这一段。
+    let notepad = Owned(Command::new("notepad.exe").spawn().expect("启动记事本"));
+    let np = notepad.id();
+    assert!(wait_until(Duration::from_secs(10), || app_pids().contains(&np)));
+    let hwnd = find_window_of(np).expect("记事本窗口");
+    let here = unsafe { mgr.GetWindowDesktopId(hwnd) }.expect("记事本所在桌面");
+    let other = *desktops.iter().find(|d| **d != here).expect("另一个桌面");
+    match unsafe { mgr.MoveWindowToDesktop(hwnd, &other) } {
+        Ok(()) => {
+            assert!(wait_until(Duration::from_secs(5), || is_cloaked(hwnd) != 0));
+            assert!(app_pids().contains(&np), "另一个桌面上的记事本 {np} 应是应用");
+            close_windows_of(np);
+            assert!(
+                wait_until(Duration::from_secs(10), || !app_pids().contains(&np)),
+                "关闭后记事本 {np} 应正常移除"
+            );
+        }
+        Err(e) => eprintln!("记事本跨进程移动被系统拒绝（{e}），只验证了测试进程自己的窗口"),
+    }
+}
+
+/// 进程的第一个可见顶层窗口。
+fn find_window_of(pid: u32) -> Option<HWND> {
+    struct Ctx {
+        pid: u32,
+        found: Option<HWND>,
+    }
+    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = unsafe { &mut *(lparam.0 as *mut Ctx) };
+        let mut owner = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
+        if owner == ctx.pid && unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            ctx.found = Some(hwnd);
+            return false.into();
+        }
+        true.into()
+    }
+    let mut ctx = Ctx { pid, found: None };
+    let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut ctx as *mut Ctx as isize)) };
+    ctx.found
 }
