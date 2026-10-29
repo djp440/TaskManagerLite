@@ -24,7 +24,7 @@ const STEPS: &[Step] = &[
         for i in 0..data.get_rows().row_count() {
             if data.get_rows().row_data(i).is_some_and(|r| r.admin) { data.set_selected(i as i32); break; }
         }
-        ui.window().dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(100.0, 105.0) });
+        ui.window().dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(sidebar_w(ui) + 100.0, 105.0) });
         ui.invoke_set_dark(false);
     }),
     ("00b1-启动项-命令行悬停", |_| {}),
@@ -38,7 +38,7 @@ const STEPS: &[Step] = &[
         for i in 0..data.get_rows().row_count() {
             if data.get_rows().row_data(i).is_some_and(|r| r.can_stop && r.pid > 0) { data.set_selected(i as i32); break; }
         }
-        ui.window().dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(300.0, 105.0) });
+        ui.window().dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(sidebar_w(ui) + 300.0, 105.0) });
         ui.invoke_set_dark(false);
     }),
     ("00e3-服务-描述悬停-深色", |ui| { ui.invoke_set_dark(true); }),
@@ -314,24 +314,24 @@ const STEPS: &[Step] = &[
         toolbar(ui, 1, true, true, 760.0)
     }),
     // 指针停在收起后的提权按钮上：先是悬停态，约 0.5 秒后出现完整文字的提示（下一步截图）。放在最后，免得悬停影响其他步骤。
-    ("45-工具栏-提权图标悬停-深色-900x600", |ui| {
-        toolbar(ui, 0, false, true, 900.0);
+    ("45-工具栏-提权图标悬停-深色-760x600", |ui| {
+        toolbar(ui, 0, false, true, 760.0);
         ui.set_pinned(false);
         hover_compact_elevate(ui);
     }),
-    ("46-工具栏-提权图标提示-深色-900x600", |_| {}),
-    // 指针移到置顶按钮上（提权图标左侧 32 + 8，提权图标右边是设置按钮）：约 0.5 秒后出现提示。
-    ("47-工具栏-置顶按钮悬停-深色-900x600", |ui| {
+    ("46-工具栏-提权图标提示-深色-760x600", |_| {}),
+    // 指针移到置顶按钮上（提权图标左侧 32 + 8，提权图标在最右）：约 0.5 秒后出现提示。
+    ("47-工具栏-置顶按钮悬停-深色-760x600", |ui| {
         let width = ui
             .window()
             .size()
             .to_logical(ui.window().scale_factor())
             .width;
-        let at = LogicalPosition::new(width - 12.0 - 40.0 - 40.0 - 16.0, 28.0);
+        let at = LogicalPosition::new(width - 12.0 - 40.0 - 16.0, 28.0);
         ui.window()
             .dispatch_event(WindowEvent::PointerMoved { position: at });
     }),
-    ("48-工具栏-置顶按钮提示-深色-900x600", |_| {}),
+    ("48-工具栏-置顶按钮提示-深色-760x600", |_| {}),
     // 详细信息列：依次勾选状态、用户名、句柄、线程、描述、映像路径、命令行（按勾选顺序追加在最右），
     // 总宽超出窗口，表格横向滚动。静态信息由后台读取，下一步再截图，等结果到达。
     ("49-详细信息列-读取中-深色", |ui| {
@@ -458,7 +458,7 @@ const STEPS: &[Step] = &[
         with_mini(|m| press(m, Key::Escape));
         with_controller(|c| assert!(!c.is_mini(), "Esc 应回到完整模式"));
     }),
-    // 设置页：点工具栏最右侧的齿轮进入。开机启动与接管任务管理器只在脚本设置了测试键时才真的切换。
+    // 设置页：点侧边栏底部的设置进入。开机启动与接管任务管理器只在脚本设置了测试键时才真的切换。
     ("59-设置页-深色", |ui| {
         click_settings(ui);
         assert_eq!(ui.get_page(), 2, "点设置按钮应进入设置页");
@@ -524,24 +524,72 @@ const STEPS: &[Step] = &[
     // 再点一次设置按钮回到进入之前的页面（性能页）。
     ("62-设置页返回-深色", |ui| {
         let need = ui.get_toolbar_min_width();
+        let room = 760.5 - ui.get_sidebar_width();
         assert!(
-            need <= 760.5,
-            "760 宽设置页的工具栏最小宽度 {need} 超出窗口"
+            need <= room,
+            "760 宽设置页的工具栏最小宽度 {need} 超出侧边栏右侧的 {room}"
         );
         resize(ui, 1080.0, 700.0);
         click_settings(ui);
         assert_eq!(ui.get_page(), 1, "再点设置按钮应回到性能页");
     }),
+    // 侧边栏：点导航项切换页面（项高 38、间距 2、上内边距 6，第一项是折叠按钮）。
+    ("63-侧边栏-点击切换页面-深色", |ui| {
+        assert_eq!(ui.get_sidebar_width(), 160.0, "1080 宽默认展开");
+        click(ui, 80.0, 185.0);
+        assert_eq!(ui.get_page(), 4, "点“服务”应进入服务页");
+        click(ui, 80.0, 145.0);
+        assert_eq!(ui.get_page(), 3, "点“启动项”应进入启动项页");
+        click(ui, 80.0, 65.0);
+        assert_eq!(ui.get_page(), 0, "点“进程”应回到进程页");
+    }),
+    // 折叠为仅图标；窗口再窄时不论偏好都只有图标。
+    ("64-侧边栏-折叠-深色", |ui| {
+        click(ui, 24.0, 25.0);
+        assert!(!ui.get_sidebar_expanded(), "点菜单按钮应折叠");
+        assert_eq!(ui.get_sidebar_width(), 48.0);
+        // 指针移到“性能”图标上：约 0.5 秒后出现文字提示。
+        click(ui, 24.0, 105.0);
+        assert_eq!(ui.get_page(), 1, "折叠后点图标仍能切换页面");
+    }),
+    ("65-侧边栏-折叠悬停提示-深色", |_| {}),
+    ("66-侧边栏-展开-浅色", |ui| {
+        click(ui, 24.0, 25.0);
+        assert!(ui.get_sidebar_expanded(), "再点菜单按钮应展开");
+        assert_eq!(ui.get_sidebar_width(), 160.0);
+        ui.invoke_set_dark(false);
+        ui.set_page(0);
+    }),
 ];
 
-/// 点工具栏最右侧的设置按钮：右内边距 12，按钮 32×32，顶栏高 56。
+/// 在 (x, y) 处单击左键。
+fn click(ui: &AppWindow, x: f32, y: f32) {
+    let at = LogicalPosition::new(x, y);
+    let w = ui.window();
+    w.dispatch_event(WindowEvent::PointerMoved { position: at });
+    w.dispatch_event(WindowEvent::PointerPressed {
+        position: at,
+        button: PointerEventButton::Left,
+    });
+    w.dispatch_event(WindowEvent::PointerReleased {
+        position: at,
+        button: PointerEventButton::Left,
+    });
+}
+
+/// 侧边栏宽度：窗口宽度达 900 且没有折叠时 160，否则只有图标的 48。
+fn sidebar_w(ui: &AppWindow) -> f32 {
+    ui.get_sidebar_width()
+}
+
+/// 点侧边栏底部的设置项：状态栏高 28，侧边栏下内边距 6，项高 38。
 fn click_settings(ui: &AppWindow) {
-    let width = ui
+    let height = ui
         .window()
         .size()
         .to_logical(ui.window().scale_factor())
-        .width;
-    let at = LogicalPosition::new(width - 12.0 - 16.0, 28.0);
+        .height;
+    let at = LogicalPosition::new(24.0, height - 28.0 - 6.0 - 19.0);
     let w = ui.window();
     w.dispatch_event(WindowEvent::PointerMoved { position: at });
     w.dispatch_event(WindowEvent::PointerPressed {
@@ -606,18 +654,23 @@ fn toolbar(ui: &AppWindow, page: i32, elevated: bool, dark: bool, width: f32) {
     resize(ui, width, 600.0);
 }
 
-/// 把指针移到收起后的提权按钮中心：顶栏高 56，右内边距 12，按钮 32×32，右边还有设置按钮（32 + 间距 8）。
+/// 把指针移到收起后的提权按钮中心：顶栏高 56，右内边距 12，按钮 32×32，它在最右。
 fn hover_compact_elevate(ui: &AppWindow) {
+    // `if` 条件元素要在处理输入时才按新页面增删实例，先触发一次再读布局结果。
+    ui.window().dispatch_event(WindowEvent::PointerExited);
     assert!(
         ui.get_toolbar_elevate_compact(),
-        "900 宽时提权按钮应已收成图标"
+        "760 宽时提权按钮应已收成图标（窗口 {:?}，侧边栏 {}，工具栏 {}）",
+        ui.window().size(),
+        ui.get_sidebar_width(),
+        ui.get_toolbar_min_width()
     );
     let width = ui
         .window()
         .size()
         .to_logical(ui.window().scale_factor())
         .width;
-    let at = LogicalPosition::new(width - 12.0 - 40.0 - 16.0, 28.0);
+    let at = LogicalPosition::new(width - 12.0 - 16.0, 28.0);
     ui.window()
         .dispatch_event(WindowEvent::PointerMoved { position: at });
 }
@@ -633,7 +686,7 @@ fn right_click_header_does_not_select(ui: &AppWindow) {
     let w = ui.window();
     // 顶栏 56 + 表头 34 + 半行 15；在名称列和展开箭头位置各右键一次。
     for x in [120.0, 15.0] {
-        let at = LogicalPosition::new(x, 56.0 + 34.0 + 15.0);
+        let at = LogicalPosition::new(sidebar_w(ui) + x, 56.0 + 34.0 + 15.0);
         w.dispatch_event(WindowEvent::PointerMoved { position: at });
         w.dispatch_event(WindowEvent::PointerPressed {
             position: at,
@@ -708,7 +761,7 @@ pub fn run_menu(ui: &AppWindow, spec: &str, warmup: Duration) {
         Timer::single_shot(Duration::from_millis(500), move || {
             let Some(ui) = weak.upgrade() else { return };
             let at = LogicalPosition::new(
-                120.0,
+                sidebar_w(&ui) + 120.0,
                 if header {
                     56.0 + 17.0
                 } else {
@@ -842,15 +895,16 @@ fn step(weak: slint::Weak<AppWindow>, dir: Rc<PathBuf>, i: usize) {
             .to_logical(ui.window().scale_factor())
             .width;
         let need = ui.get_toolbar_min_width();
+        let width = width - ui.get_sidebar_width();
         if need > width + 0.5 {
             crate::CONTROLLER.with(|c| {
                 if let Some(c) = c.borrow().as_ref() {
                     c.log.borrow_mut().line(format!(
-                        "截图步骤 {name}：工具栏最小宽度 {need} 超出窗口宽度 {width}"
+                        "截图步骤 {name}：工具栏最小宽度 {need} 超出侧边栏右侧的宽度 {width}"
                     ));
                 }
             });
-            panic!("截图步骤 {name}：工具栏最小宽度 {need} 超出窗口宽度 {width}");
+            panic!("截图步骤 {name}：工具栏最小宽度 {need} 超出侧边栏右侧的宽度 {width}");
         }
         // 迷你模式下截迷你窗口。
         let mini = crate::CONTROLLER.with(|c| {

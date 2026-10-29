@@ -6,7 +6,8 @@ import { PerformancePage } from "performance-page.slint";
 import { MiniWindow, OpacityChoice } from "mini-window.slint";
 import { MemoryView } from "memory-detail.slint";
 import { StatItem } from "stats-panel.slint";
-import { SegmentedControl, ShieldIcon } from "controls.slint";
+import { SegmentedControl, ShieldIcon, TipBox } from "controls.slint";
+import { Sidebar } from "sidebar.slint";
 import { SettingsPage, SettingsData } from "settings-page.slint";
 import { StartupPage, StartupData, StartupRow } from "startup-page.slint";
 export { StartupData, StartupRow }
@@ -15,43 +16,6 @@ export { ServiceData, ServiceRow }
 
 export { ColumnLayout, MemoryView, ProcRow, Resource, ResourceKind, ResourceTint, StatItem, Columns, ProcessMenu, MiniWindow, OpacityChoice, SettingsData }
 export { CoreGraph, CpuData, GridLayout } from "cpu-detail.slint";
-
-component Tab inherits Rectangle {
-    in property <string> text;
-    in property <bool> active;
-    callback clicked;
-
-    height: 34px;
-    border-radius: 6px;
-    background: touch.has-hover && !root.active ? Theme.hover : transparent;
-    touch := TouchArea {
-        clicked => {
-            root.clicked();
-        }
-    }
-
-    HorizontalLayout {
-        padding-left: 3px;
-        padding-right: 3px;
-        Text {
-            text: root.text;
-            vertical-alignment: center;
-            font-size: 14px;
-            font-weight: root.active ? 600 : 400;
-            color: root.active ? Palette.foreground : Theme.subtle-text;
-        }
-    }
-
-    Rectangle {
-        y: parent.height - 3px;
-        x: (parent.width - self.width) / 2;
-        width: root.active ? 18px : 0px;
-        height: 3px;
-        border-radius: 1.5px;
-        background: Palette.accent-background;
-        animate width { duration: 150ms; easing: ease-out; }
-    }
-}
 
 // 图钉图标：窗口置顶。未置顶时描边，置顶时实心。
 component PinIcon inherits Rectangle {
@@ -82,33 +46,6 @@ component PinIcon inherits Rectangle {
     }
 }
 
-// 设置图标：齿轮轮廓与中心圆孔。
-component GearIcon inherits Rectangle {
-    in property <brush> tint;
-    width: 16px;
-    height: 16px;
-
-    Path {
-        width: 100%;
-        height: 100%;
-        viewbox-width: 16;
-        viewbox-height: 16;
-        stroke: root.tint;
-        stroke-width: 1.3px;
-        commands: "M 6.42 3.15 L 6.8 1.2 L 9.2 1.2 L 9.58 3.15 L 10.32 3.46 L 11.96 2.35 L 13.65 4.04 L 12.54 5.68 L 12.85 6.42 L 14.8 6.8 L 14.8 9.2 L 12.85 9.58 L 12.54 10.32 L 13.65 11.96 L 11.96 13.65 L 10.32 12.54 L 9.58 12.85 L 9.2 14.8 L 6.8 14.8 L 6.42 12.85 L 5.68 12.54 L 4.04 13.65 L 2.35 11.96 L 3.46 10.32 L 3.15 9.58 L 1.2 9.2 L 1.2 6.8 L 3.15 6.42 L 3.46 5.68 L 2.35 4.04 L 4.04 2.35 L 5.68 3.46 Z";
-    }
-
-    Path {
-        width: 100%;
-        height: 100%;
-        viewbox-width: 16;
-        viewbox-height: 16;
-        stroke: root.tint;
-        stroke-width: 1.3px;
-        commands: "M 10.2 8 A 2.2 2.2 0 1 0 5.8 8 A 2.2 2.2 0 1 0 10.2 8 Z";
-    }
-}
-
 // 迷你模式图标：大窗口的轮廓里，右上角一个实心小窗口。
 component MiniIcon inherits Rectangle {
     in property <brush> tint;
@@ -132,26 +69,6 @@ component MiniIcon inherits Rectangle {
         viewbox-height: 16;
         fill: root.tint;
         commands: "M 9 2 L 14 2 L 14 7 L 9 7 Z";
-    }
-}
-
-// 图标按钮的悬停提示内容。
-component TipBox inherits Rectangle {
-    in property <string> text;
-    background: Theme.surface-raised;
-    border-radius: 4px;
-    border-width: 1px;
-    border-color: Theme.dark ? #ffffff24 : #0000001f;
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        padding-top: 4px;
-        padding-bottom: 5px;
-        Text {
-            text: root.text;
-            font-size: 12px;
-            color: Palette.foreground;
-        }
     }
 }
 
@@ -248,6 +165,8 @@ export component AppWindow inherits Window {
     in-out property <int> view-mode: 0;
     in-out property <string> filter;
     in-out property <int> page: 0;
+    // 侧边栏折叠偏好，由 Rust 按设置恢复，退出时保存。
+    in-out property <bool> sidebar-expanded: true;
     in-out property <int> interval-index: 1;
     in property <bool> elevated;
     // 窗口置顶，由 Rust 按设置恢复，退出时保存。
@@ -287,36 +206,36 @@ export component AppWindow inherits Window {
     out property <length> graph-width: perf-page.graph-width;
     out property <length> graph-height: perf-page.graph-height;
 
+    // 页面导航在左侧边栏：窗口够宽且用户没有折叠时图标加文字，否则只有图标。
+    out property <bool> sidebar-wide: root.sidebar-expanded && root.width >= 900px;
+    out property <length> sidebar-width: root.sidebar-wide ? 160px : 48px;
     // 工具栏随窗口变窄依次收缩：
     // 1. 搜索框从 220px 缩到“舒适宽度”，即恰好放下完整的占位文字（由布局完成）；
     // 2. 仍放不下时，“以管理员身份重启”收成盾牌图标按钮（悬停显示提示）；
-    // 3. 还放不下时隐藏品牌字样（窗口标题栏仍显示应用名）；
-    // 4. 仍放不下时收起置顶按钮（设置页里可以切换置顶）。
+    // 3. 仍放不下时收起置顶按钮（设置页里可以切换置顶）。
     // 档位按搜索框的舒适宽度判断；最窄时（约 800 以下）搜索框再缩到只放下简短占位文字。判断只用不随档位变化的量（各部分的首选/最小宽度），避免绑定循环。
     private property <string> search-hint: @tr("搜索名称或 PID（Ctrl+F）");
     private property <string> search-hint-short: @tr("搜索进程");
     private property <string> elevate-text: @tr("以管理员身份重启");
     private property <string> mini-text: @tr("迷你模式（Ctrl+M）");
     private property <string> pin-text: root.pinned ? @tr("取消置顶") : @tr("窗口置顶");
-    private property <string> settings-text: @tr("设置");
-    // 进入设置页之前的页面：再点齿轮时回到它，在设置页里保存设置时也记录它。
+    // 进入设置页之前的页面：再点设置入口时回到它，在设置页里保存设置时也记录它。
     out property <int> page-before-settings: 0;
     // Fluent 输入框左右内边距各 12px，另留 4px 光标余量。
     private property <length> search-comfort: min(176px, search-measure.preferred-width + 28px);
     private property <length> search-floor: min(root.search-comfort, max(104px, search-short-measure.preferred-width + 28px));
-    // 左右内边距 16 + 12，左侧组、伸缩空白、右侧组之间两个 8px 间距。
-    private property <length> toolbar-room: root.width - 44px;
+    // 侧边栏右侧的工具栏：左右内边距 16 + 12，伸缩空白与右侧组之间一个 8px 间距。
+    private property <length> toolbar-room: root.width - root.sidebar-width - 36px;
     // Fluent 按钮左右内边距各 12px；提权按钮的需求含它与左侧控件的 8px 间距。
     private property <length> elevate-text-need: root.elevated ? 0px : max(32px, elevate-measure.preferred-width + 24px) + 8px;
     private property <length> elevate-icon-need: root.elevated ? 0px : 32px + 8px;
-    // 设置按钮与置顶按钮各 32px，加上与左侧控件的 8px 间距。
+    // 置顶按钮 32px，加上与左侧控件的 8px 间距。
     private property <length> icon-button-need: 32px + 8px;
-    private property <length> toolbar-core-need: tabs.preferred-width + toolbar-core.min-width + root.icon-button-need + (root.page == 0 ? root.search-comfort - root.search-floor : 0px);
-    out property <bool> toolbar-elevate-compact: brand.preferred-width + root.toolbar-core-need + root.icon-button-need + root.elevate-text-need > root.toolbar-room;
+    private property <length> toolbar-core-need: toolbar-core.min-width + (root.page == 0 ? root.search-comfort - root.search-floor : 0px);
+    out property <bool> toolbar-elevate-compact: root.toolbar-core-need + root.icon-button-need + root.elevate-text-need > root.toolbar-room;
     private property <length> elevate-need: root.toolbar-elevate-compact ? root.elevate-icon-need : root.elevate-text-need;
-    out property <bool> toolbar-brand-shown: brand.preferred-width + root.toolbar-core-need + root.icon-button-need + root.elevate-need <= root.toolbar-room;
     out property <bool> toolbar-pin-shown: root.toolbar-core-need + root.icon-button-need + root.elevate-need <= root.toolbar-room;
-    // 截图模式与单元测试据此断言工具栏没有被挤出窗口（最小宽度不超过窗口宽度即没有控件被裁剪）。
+    // 截图模式与单元测试据此断言工具栏没有被挤出窗口（最小宽度不超过侧边栏右侧的宽度即没有控件被裁剪）。
     out property <length> toolbar-min-width: toolbar.min-width;
 
     // 供截图模式切换深浅色。
@@ -402,364 +321,292 @@ export component AppWindow inherits Window {
         }
 
         VerticalLayout {
+            // 侧边栏与右侧内容用显式位置排布，而不是 HorizontalLayout：侧边栏宽度取决于窗口宽度，
+            // 放进布局会让“侧边栏宽度 → 窗口布局约束 → 窗口宽度 → 侧边栏宽度”形成绑定循环。
             Rectangle {
-                height: 56px;
-                // 只用于测量宽度的隐藏文字，字体字号与搜索框占位文字、按钮文字相同。
-                // 子元素都显式定位：这样它们的尺寸约束不会传给窗口，否则“档位 → 工具栏最小宽度 →
-                // 窗口布局约束 → 窗口宽度 → 档位”会形成绑定循环。
-                search-measure := Text {
+                vertical-stretch: 1;
+                Sidebar {
                     x: 0px;
                     y: 0px;
-                    visible: false;
-                    text: root.search-hint;
-                }
-
-                search-short-measure := Text {
-                    x: 0px;
-                    y: 0px;
-                    visible: false;
-                    text: root.search-hint-short;
-                }
-
-                elevate-measure := Text {
-                    x: 0px;
-                    y: 0px;
-                    visible: false;
-                    text: root.elevate-text;
-                }
-
-                toolbar := HorizontalLayout {
-                    x: 0px;
-                    y: 0px;
-                    width: parent.width;
+                    width: root.sidebar-width;
                     height: parent.height;
-                    padding-left: 16px;
-                    padding-right: 12px;
-                    spacing: 8px;
-
-                    // 左侧：品牌字样与页面 Tab。品牌始终参与测量，隐藏时占位宽度为 0。
-                    HorizontalLayout {
-                        horizontal-stretch: 0;
-                        Rectangle {
-                            width: root.toolbar-brand-shown ? brand.preferred-width : 0px;
-                            visible: root.toolbar-brand-shown;
-                            brand := HorizontalLayout {
-                                x: 0px;
-                                width: self.preferred-width;
-                                height: parent.height;
-                                // 收紧品牌字样，为五个页面标签留出空间，默认宽度 1080 仍完整显示提权按钮。
-                                spacing: 4px;
-                                padding-right: 8px;
-                                Text {
-                                    text: "TaskManager";
-                                    vertical-alignment: center;
-                                    font-size: 15px;
-                                    font-weight: 700;
-                                    color: Palette.foreground;
-                                }
-
-                                Text {
-                                    text: "Lite";
-                                    vertical-alignment: center;
-                                    font-size: 15px;
-                                    font-weight: 400;
-                                    color: Palette.accent-background;
-                                }
-                            }
-                        }
-
-                        tabs := HorizontalLayout {
-                            // 五个页面标签：最窄窗口下进程页工具栏仍要放得下。
-                            spacing: 2px;
-                            VerticalLayout {
-                                alignment: center;
-                                Tab {
-                                    text: @tr("进程");
-                                    active: root.page == 0;
-                                    clicked => {
-                                        root.page = 0;
-                                    }
-                                }
-                            }
-
-                            VerticalLayout {
-                                alignment: center;
-                                Tab {
-                                    text: @tr("性能");
-                                    active: root.page == 1;
-                                    clicked => {
-                                        root.page = 1;
-                                    }
-                                }
-                            }
-                            VerticalLayout {
-                                alignment: center;
-                                Tab {
-                                    text: @tr("启动项");
-                                    active: root.page == 3;
-                                    clicked => { root.page = 3; }
-                                }
-                            }
-                            VerticalLayout {
-                                alignment: center;
-                                Tab {
-                                    text: @tr("服务");
-                                    active: root.page == 4;
-                                    clicked => { root.page = 4; }
-                                }
-                            }
-                        }
+                    page: root.page;
+                    wide: root.sidebar-wide;
+                    can-toggle: root.width >= 900px;
+                    page-selected(p) => {
+                        root.page = p;
                     }
+                    settings-clicked => {
+                        root.toggle-settings();
+                    }
+                    toggle-clicked => {
+                        root.sidebar-expanded = !root.sidebar-expanded;
+                    }
+                }
 
+                VerticalLayout {
+                    x: root.sidebar-width;
+                    y: 0px;
+                    width: parent.width - root.sidebar-width;
+                    height: parent.height;
                     Rectangle {
-                        horizontal-stretch: 1;
-                    }
-
-                    // 右侧除提权按钮外的控件；变窄时其中只有搜索框收缩。
-                    toolbar-core := HorizontalLayout {
-                        horizontal-stretch: 0;
-                        spacing: 8px;
-                        VerticalLayout {
-                            alignment: center;
-                            search := LineEdit {
-                                visible: root.page == 0;
-                                min-width: root.page == 0 ? root.search-floor : 0px;
-                                preferred-width: root.page == 0 ? 220px : 0px;
-                                max-width: root.page == 0 ? 220px : 0px;
-                                // 窄于舒适宽度时换成简短占位文字，避免文字被截断。
-                                placeholder-text: self.width >= 219.5px ? root.search-hint : root.search-hint-short;
-                                text <=> root.filter;
-                                edited(text) => {
-                                    root.filter-edited(text);
-                                }
-                                accepted => {
-                                    keys.focus();
-                                }
-                            }
+                        height: 56px;
+                        // 只用于测量宽度的隐藏文字，字体字号与搜索框占位文字、按钮文字相同。
+                        // 子元素都显式定位：这样它们的尺寸约束不会传给窗口，否则“档位 → 工具栏最小宽度 →
+                        // 窗口布局约束 → 窗口宽度 → 档位”会形成绑定循环。
+                        search-measure := Text {
+                            x: 0px;
+                            y: 0px;
+                            visible: false;
+                            text: root.search-hint;
                         }
 
-                        if root.page == 0: VerticalLayout {
-                            alignment: center;
-                            SegmentedControl {
-                                model: [@tr("平铺"), @tr("树形"), @tr("分组")];
-                                current-index <=> root.view-mode;
-                                selected(i) => {
-                                    root.view-changed(i);
-                                    keys.focus();
-                                }
-                            }
+                        search-short-measure := Text {
+                            x: 0px;
+                            y: 0px;
+                            visible: false;
+                            text: root.search-hint-short;
                         }
 
-                        VerticalLayout {
-                            alignment: center;
-                            ComboBox {
-                                width: 96px;
-                                model: [@tr("0.5 秒"), @tr("1 秒"), @tr("2 秒"), @tr("暂停")];
-                                current-index <=> root.interval-index;
-                                selected => {
-                                    root.interval-changed(self.current-index);
-                                }
-                            }
+                        elevate-measure := Text {
+                            x: 0px;
+                            y: 0px;
+                            visible: false;
+                            text: root.elevate-text;
                         }
 
-                        if root.page == 0: VerticalLayout {
-                            alignment: center;
-                            Button {
-                                text: @tr("结束进程");
-                                enabled: root.selected >= 0;
-                                clicked => {
-                                    root.end-process();
-                                }
-                            }
-                        }
+                        toolbar := HorizontalLayout {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.width;
+                            height: parent.height;
+                            padding-left: 16px;
+                            padding-right: 12px;
+                            spacing: 8px;
 
-                        // 迷你模式入口（性能页）：与置顶按钮同样是图标按钮。
-                        if root.page == 1: VerticalLayout {
-                            alignment: center;
                             Rectangle {
-                                width: 32px;
-                                height: 32px;
-                                Button {
-                                    width: 100%;
-                                    height: 100%;
-                                    accessible-label: root.mini-text;
-                                    clicked => {
-                                        root.mini-mode();
-                                    }
-                                    Tooltip {
-                                        TipBox {
-                                            text: root.mini-text;
+                                horizontal-stretch: 1;
+                            }
+
+                            // 右侧除提权按钮外的控件；变窄时其中只有搜索框收缩。
+                            toolbar-core := HorizontalLayout {
+                                horizontal-stretch: 0;
+                                spacing: 8px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    search := LineEdit {
+                                        visible: root.page == 0;
+                                        min-width: root.page == 0 ? root.search-floor : 0px;
+                                        preferred-width: root.page == 0 ? 220px : 0px;
+                                        max-width: root.page == 0 ? 220px : 0px;
+                                        // 窄于舒适宽度时换成简短占位文字，避免文字被截断。
+                                        placeholder-text: self.width >= 219.5px ? root.search-hint : root.search-hint-short;
+                                        text <=> root.filter;
+                                        edited(text) => {
+                                            root.filter-edited(text);
+                                        }
+                                        accepted => {
+                                            keys.focus();
                                         }
                                     }
                                 }
 
-                                MiniIcon {
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                    tint: Palette.foreground;
+                                if root.page == 0: VerticalLayout {
+                                    alignment: center;
+                                    SegmentedControl {
+                                        model: [@tr("平铺"), @tr("树形"), @tr("分组")];
+                                        current-index <=> root.view-mode;
+                                        selected(i) => {
+                                            root.view-changed(i);
+                                            keys.focus();
+                                        }
+                                    }
                                 }
-                            }
-                        }
-                    }
 
-                    // 置顶开关：图钉图标，置顶时换成强调色的实心图钉（按钮本身保持普通样式，避免整块强调色过于醒目）。
-                    // 最窄时收起（设置页里仍可切换置顶）。
-                    if root.toolbar-pin-shown: VerticalLayout {
-                        alignment: center;
-                        Rectangle {
-                            width: 32px;
-                            height: 32px;
-                            Button {
-                                width: 100%;
-                                height: 100%;
-                                accessible-label: root.pin-text;
-                                // 与“结束进程”一致不转移焦点：键盘用户 Tab 到这里后可以继续按空格切换。
-                                clicked => {
-                                    root.pinned = !root.pinned;
+                                VerticalLayout {
+                                    alignment: center;
+                                    ComboBox {
+                                        width: 96px;
+                                        model: [@tr("0.5 秒"), @tr("1 秒"), @tr("2 秒"), @tr("暂停")];
+                                        current-index <=> root.interval-index;
+                                        selected => {
+                                            root.interval-changed(self.current-index);
+                                        }
+                                    }
                                 }
-                                Tooltip {
-                                    TipBox {
-                                        text: root.pin-text;
+
+                                if root.page == 0: VerticalLayout {
+                                    alignment: center;
+                                    Button {
+                                        text: @tr("结束进程");
+                                        enabled: root.selected >= 0;
+                                        clicked => {
+                                            root.end-process();
+                                        }
+                                    }
+                                }
+
+                                // 迷你模式入口（性能页）：与置顶按钮同样是图标按钮。
+                                if root.page == 1: VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 32px;
+                                        height: 32px;
+                                        Button {
+                                            width: 100%;
+                                            height: 100%;
+                                            accessible-label: root.mini-text;
+                                            clicked => {
+                                                root.mini-mode();
+                                            }
+                                            Tooltip {
+                                                TipBox {
+                                                    text: root.mini-text;
+                                                }
+                                            }
+                                        }
+
+                                        MiniIcon {
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                            tint: Palette.foreground;
+                                        }
                                     }
                                 }
                             }
 
-                            PinIcon {
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                                tint: root.pinned ? Palette.accent-background : Palette.foreground;
-                                filled: root.pinned;
-                            }
-                        }
-                    }
+                            // 置顶开关：图钉图标，置顶时换成强调色的实心图钉（按钮本身保持普通样式，避免整块强调色过于醒目）。
+                            // 最窄时收起（设置页里仍可切换置顶）。
+                            if root.toolbar-pin-shown: VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 32px;
+                                    height: 32px;
+                                    Button {
+                                        width: 100%;
+                                        height: 100%;
+                                        accessible-label: root.pin-text;
+                                        // 与“结束进程”一致不转移焦点：键盘用户 Tab 到这里后可以继续按空格切换。
+                                        clicked => {
+                                            root.pinned = !root.pinned;
+                                        }
+                                        Tooltip {
+                                            TipBox {
+                                                text: root.pin-text;
+                                            }
+                                        }
+                                    }
 
-                    if !root.elevated && !root.toolbar-elevate-compact: VerticalLayout {
-                        alignment: center;
-                        Button {
-                            text: root.elevate-text;
-                            clicked => {
-                                root.elevate();
-                            }
-                        }
-                    }
-
-                    // 收起后的提权按钮：盾牌图标；悬停提示与无障碍名称保留完整文字。
-                    if !root.elevated && root.toolbar-elevate-compact: VerticalLayout {
-                        alignment: center;
-                        Rectangle {
-                            width: 32px;
-                            height: 32px;
-                            Button {
-                                width: 100%;
-                                height: 100%;
-                                accessible-label: root.elevate-text;
-                                clicked => {
-                                    root.elevate();
-                                }
-                                Tooltip {
-                                    TipBox {
-                                        text: root.elevate-text;
+                                    PinIcon {
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        tint: root.pinned ? Palette.accent-background : Palette.foreground;
+                                        filled: root.pinned;
                                     }
                                 }
                             }
 
-                            ShieldIcon {
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                                tint: Palette.foreground;
-                            }
-                        }
-                    }
-
-                    // 设置入口：再点一次回到进入设置页之前的页面。
-                    VerticalLayout {
-                        alignment: center;
-                        Rectangle {
-                            width: 32px;
-                            height: 32px;
-                            Button {
-                                width: 100%;
-                                height: 100%;
-                                accessible-label: root.settings-text;
-                                clicked => {
-                                    root.toggle-settings();
-                                }
-                                Tooltip {
-                                    TipBox {
-                                        text: root.settings-text;
+                            if !root.elevated && !root.toolbar-elevate-compact: VerticalLayout {
+                                alignment: center;
+                                Button {
+                                    text: root.elevate-text;
+                                    clicked => {
+                                        root.elevate();
                                     }
                                 }
                             }
 
-                            GearIcon {
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                                tint: root.page == 2 ? Palette.accent-background : Palette.foreground;
+                            // 收起后的提权按钮：盾牌图标；悬停提示与无障碍名称保留完整文字。
+                            if !root.elevated && root.toolbar-elevate-compact: VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 32px;
+                                    height: 32px;
+                                    Button {
+                                        width: 100%;
+                                        height: 100%;
+                                        accessible-label: root.elevate-text;
+                                        clicked => {
+                                            root.elevate();
+                                        }
+                                        Tooltip {
+                                            TipBox {
+                                                text: root.elevate-text;
+                                            }
+                                        }
+                                    }
+
+                                    ShieldIcon {
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        tint: Palette.foreground;
+                                    }
+                                }
                             }
                         }
-                    }
-                }
 
-                Rectangle {
-                    y: parent.height - 1px;
-                    height: 1px;
-                    background: Theme.divider;
-                }
-            }
+                        Rectangle {
+                            y: parent.height - 1px;
+                            height: 1px;
+                            background: Theme.divider;
+                        }
+                    }
 
-            Rectangle {
-                vertical-stretch: 1;
-                process-page := ProcessPage {
-                    visible: root.page == 0;
-                    rows: root.rows;
-                    selected: root.selected;
-                    sort-key: root.sort-key;
-                    sort-descending: root.sort-descending;
-                    filtering: root.filter != "";
-                    sort-by(k) => {
-                        root.sort-by(k);
-                    }
-                    select(i) => {
-                        root.selected = i;
-                        root.select(i);
-                        keys.focus();
-                    }
-                    toggle(i) => {
-                        root.toggle(i);
-                    }
-                    end-process => {
-                        root.end-process();
-                    }
-                    end-tree => {
-                        root.end-tree();
-                    }
-                }
+                    Rectangle {
+                        vertical-stretch: 1;
+                        process-page := ProcessPage {
+                            visible: root.page == 0;
+                            rows: root.rows;
+                            selected: root.selected;
+                            sort-key: root.sort-key;
+                            sort-descending: root.sort-descending;
+                            filtering: root.filter != "";
+                            sort-by(k) => {
+                                root.sort-by(k);
+                            }
+                            select(i) => {
+                                root.selected = i;
+                                root.select(i);
+                                keys.focus();
+                            }
+                            toggle(i) => {
+                                root.toggle(i);
+                            }
+                            end-process => {
+                                root.end-process();
+                            }
+                            end-tree => {
+                                root.end-tree();
+                            }
+                        }
 
-                perf-page := PerformancePage {
-                    visible: root.page == 1;
-                    resources: root.resources;
-                    memory: root.memory-view;
-                    selected-resource: root.selected-resource;
-                    selected-index: root.resource-index;
-                    resource-selected(id) => {
-                        root.resource-selected(id);
-                    }
-                    graph-resized => {
-                        root.graph-resized();
-                    }
-                    mini-mode => {
-                        root.mini-mode();
-                    }
-                }
+                        perf-page := PerformancePage {
+                            visible: root.page == 1;
+                            resources: root.resources;
+                            memory: root.memory-view;
+                            selected-resource: root.selected-resource;
+                            selected-index: root.resource-index;
+                            resource-selected(id) => {
+                                root.resource-selected(id);
+                            }
+                            graph-resized => {
+                                root.graph-resized();
+                            }
+                            mini-mode => {
+                                root.mini-mode();
+                            }
+                        }
 
-                if root.page == 3: StartupPage { }
-                if root.page == 4: ServicesPage { }
-                if root.page == 2: SettingsPage {
-                    elevated: root.elevated;
-                    pinned <=> root.pinned;
-                    interval-index <=> root.interval-index;
-                    interval-changed(i) => {
-                        root.interval-changed(i);
+                        if root.page == 3: StartupPage { }
+                        if root.page == 4: ServicesPage { }
+                        if root.page == 2: SettingsPage {
+                            elevated: root.elevated;
+                            pinned <=> root.pinned;
+                            interval-index <=> root.interval-index;
+                            interval-changed(i) => {
+                                root.interval-changed(i);
+                            }
+                        }
                     }
                 }
             }

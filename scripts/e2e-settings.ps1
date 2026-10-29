@@ -214,16 +214,15 @@ try {
     '== 5g. 窗口置顶：按设置恢复，点击图钉切换，退出时写回 =='
     $dir = New-Dir 'pin'
     $settingsFile = Join-Path $dir 'settings.json'
-    # 进程页、900 宽：显示图钉但收起品牌，提权按钮（未提权时）收成 32px 图标；从右往左依次是设置齿轮、提权按钮、图钉。
-    # 800 宽时图钉也会被收起（未提权时 830 宽以上才显示）。
-    '{ "window": { "x": 140, "y": 110, "width": 900, "height": 560, "maximized": false }, "page": 0, "always_on_top": true }' | Set-Content -Encoding utf8 $settingsFile
+    # 进程页、760 宽：侧边栏只有图标，提权按钮（未提权时）收成 32px 图标；从右往左依次是提权按钮、图钉。
+    '{ "window": { "x": 140, "y": 110, "width": 760, "height": 560, "maximized": false }, "page": 0, "always_on_top": true }' | Set-Content -Encoding utf8 $settingsFile
     $topmost = { param($a) ([Win]::GetWindowLong($a.Handle, -20) -band 0x8) -ne 0 } # GWL_EXSTYLE, WS_EX_TOPMOST
     $app = Start-App $dir
     Check (& $topmost $app) '设置 always_on_top = true 时窗口置顶'
     $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     $s = Scale $app
     $w = Window-State $app
-    $px = [int]($w.W - ($(if ($elevated) { 12 + 40 + 16 } else { 12 + 40 + 40 + 16 }) * $s))
+    $px = [int]($w.W - ($(if ($elevated) { 12 + 16 } else { 12 + 40 + 16 }) * $s))
     $py = [int](28 * $s)
     $lp = [IntPtr](($py -shl 16) -bor $px)
     [void][Win]::PostMessage($app.Handle, 0x0200, [IntPtr]::Zero, $lp) # WM_MOUSEMOVE
