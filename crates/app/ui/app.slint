@@ -8,6 +8,8 @@ import { MemoryView } from "memory-detail.slint";
 import { StatItem } from "stats-panel.slint";
 import { SegmentedControl, ShieldIcon } from "controls.slint";
 import { SettingsPage, SettingsData } from "settings-page.slint";
+import { StartupPage, StartupData, StartupRow } from "startup-page.slint";
+export { StartupData, StartupRow }
 
 export { ColumnLayout, MemoryView, ProcRow, Resource, ResourceKind, ResourceTint, StatItem, Columns, ProcessMenu, MiniWindow, OpacityChoice, SettingsData }
 export { CoreGraph, CpuData, GridLayout } from "cpu-detail.slint";
@@ -27,8 +29,8 @@ component Tab inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 14px;
-        padding-right: 14px;
+        padding-left: 4px;
+        padding-right: 4px;
         Text {
             text: root.text;
             vertical-alignment: center;
@@ -290,7 +292,7 @@ export component AppWindow inherits Window {
     // 4. 仍放不下时收起置顶按钮（设置页里可以切换置顶）。
     // 档位按搜索框的舒适宽度判断；最窄时（约 800 以下）搜索框再缩到只放下简短占位文字。判断只用不随档位变化的量（各部分的首选/最小宽度），避免绑定循环。
     private property <string> search-hint: @tr("搜索名称或 PID（Ctrl+F）");
-    private property <string> search-hint-short: @tr("搜索名称或 PID");
+    private property <string> search-hint-short: @tr("搜索进程");
     private property <string> elevate-text: @tr("以管理员身份重启");
     private property <string> mini-text: @tr("迷你模式（Ctrl+M）");
     private property <string> pin-text: root.pinned ? @tr("取消置顶") : @tr("窗口置顶");
@@ -298,8 +300,8 @@ export component AppWindow inherits Window {
     // 进入设置页之前的页面：再点齿轮时回到它，在设置页里保存设置时也记录它。
     out property <int> page-before-settings: 0;
     // Fluent 输入框左右内边距各 12px，另留 4px 光标余量。
-    private property <length> search-comfort: min(220px, search-measure.preferred-width + 28px);
-    private property <length> search-floor: min(root.search-comfort, max(140px, search-short-measure.preferred-width + 28px));
+    private property <length> search-comfort: min(176px, search-measure.preferred-width + 28px);
+    private property <length> search-floor: min(root.search-comfort, max(120px, search-short-measure.preferred-width + 28px));
     // 左右内边距 16 + 12，左侧组、伸缩空白、右侧组之间两个 8px 间距。
     private property <length> toolbar-room: root.width - 44px;
     // Fluent 按钮左右内边距各 12px；提权按钮的需求含它与左侧控件的 8px 间距。
@@ -438,8 +440,8 @@ export component AppWindow inherits Window {
                                 width: self.preferred-width;
                                 height: parent.height;
                                 spacing: 8px;
-                                // 与 Tab 之间留 16px（Tab 自带内边距，视觉间距更大）；再宽会让默认 1080 宽度下提权按钮收成图标。
-                                padding-right: 16px;
+                                // 为三个页面标签预留空间，默认宽度仍完整显示提权按钮。
+                                padding-right: 8px;
                                 Text {
                                     text: "TaskManager";
                                     vertical-alignment: center;
@@ -459,7 +461,7 @@ export component AppWindow inherits Window {
                         }
 
                         tabs := HorizontalLayout {
-                            spacing: 8px;
+                            spacing: 4px;
                             VerticalLayout {
                                 alignment: center;
                                 Tab {
@@ -481,6 +483,14 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
+                            VerticalLayout {
+                                alignment: center;
+                                Tab {
+                                    text: @tr("启动项");
+                                    active: root.page == 3;
+                                    clicked => { root.page = 3; }
+                                }
+                            }
                         }
                     }
 
@@ -500,7 +510,7 @@ export component AppWindow inherits Window {
                                 preferred-width: root.page == 0 ? 220px : 0px;
                                 max-width: root.page == 0 ? 220px : 0px;
                                 // 窄于舒适宽度时换成简短占位文字，避免文字被截断。
-                                placeholder-text: self.width >= root.search-comfort - 0.5px ? root.search-hint : root.search-hint-short;
+                                placeholder-text: self.width >= 219.5px ? root.search-hint : root.search-hint-short;
                                 text <=> root.filter;
                                 edited(text) => {
                                     root.filter-edited(text);
@@ -725,6 +735,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                if root.page == 3: StartupPage { }
                 if root.page == 2: SettingsPage {
                     elevated: root.elevated;
                     pinned <=> root.pinned;

@@ -1,0 +1,98 @@
+import { Button, Palette, ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { ShieldIcon } from "controls.slint";
+import { HeaderCell } from "process-page.slint";
+export struct StartupRow { icon: image, name: string, publisher: string, source: string, command: string, enabled: bool, admin: bool }
+export global StartupData {
+    in property <[StartupRow]> rows;
+    in-out property <int> selected: -1;
+    in-out property <int> sort-key;
+    in-out property <bool> descending;
+    in property <bool> busy;
+    in property <string> note;
+    callback refresh();
+    callback toggle();
+    callback sort(int);
+}
+component Cell inherits Rectangle {
+    in property <string> text;
+    Text { x: 10px; width: parent.width - 20px; height: 100%; text: root.text; overflow: elide; vertical-alignment: center; color: Palette.foreground; }
+}
+export component StartupPage inherits Rectangle {
+    private property <int> hovered: -1;
+    private property <length> hover-y;
+    private property <bool> show-tip;
+    changed hovered => { root.show-tip = false; }
+    Timer { interval: 500ms; running: root.hovered >= 0 && !root.show-tip; triggered => { root.show-tip = true; } }
+    init => { StartupData.refresh(); }
+    background: Theme.surface;
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            height: 34px;
+            background: Theme.surface-raised;
+            HorizontalLayout {
+                padding-left: 10px; padding-right: 10px; spacing: 0px;
+                HeaderCell { text: @tr("名称"); horizontal-stretch: 1; align: left; resizable: false; active: StartupData.sort-key == 0; descending: StartupData.descending; clicked => { StartupData.sort(0); } }
+                HeaderCell { text: @tr("发布者"); width: 180px; align: left; resizable: false; active: StartupData.sort-key == 1; descending: StartupData.descending; clicked => { StartupData.sort(1); } }
+                HeaderCell { text: @tr("状态"); width: 80px; align: left; resizable: false; active: StartupData.sort-key == 2; descending: StartupData.descending; clicked => { StartupData.sort(2); } }
+                HeaderCell { text: @tr("来源"); width: 200px; align: left; resizable: false; active: StartupData.sort-key == 3; descending: StartupData.descending; clicked => { StartupData.sort(3); } }
+            }
+        }
+        ListView {
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+            for row[i] in StartupData.rows: Rectangle {
+                height: Theme.row-height;
+                background: StartupData.selected == i ? Theme.selected : touch.has-hover ? Theme.hover : transparent;
+                HorizontalLayout {
+                    padding-left: 10px; padding-right: 10px; spacing: 0px;
+                    Image { y: (parent.height - self.height) / 2; width: 16px; height: 16px; source: row.icon; image-fit: contain; }
+                    Cell { text: row.name; horizontal-stretch: 1; }
+                    Cell { text: row.publisher == "" ? @tr("未知") : row.publisher; width: 180px; }
+                    Cell { text: row.enabled ? @tr("已启用") : @tr("已禁用"); width: 80px; }
+                    Cell { text: row.source; width: 200px; }
+                }
+                touch := TouchArea {
+                    clicked => { StartupData.selected = i; StartupData.refresh(); }
+                    changed has-hover => {
+                        if self.has-hover { root.hovered = i; root.hover-y = self.absolute-position.y - root.absolute-position.y + self.height; }
+                        else if root.hovered == i { root.hovered = -1; }
+                    }
+                }
+            }
+        }
+        Rectangle {
+            height: 52px;
+            Rectangle { x: 0px; y: 0px; width: 100%; height: 1px; background: Theme.divider; }
+            HorizontalLayout {
+                padding: 10px; spacing: 12px;
+                Text { text: StartupData.busy ? @tr("正在更新…") : StartupData.note; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; color: Theme.subtle-text; }
+                Rectangle {
+                    width: 100px; height: 32px;
+                    Button {
+                        width: 100%; height: 100%;
+                        accessible-label: StartupData.selected >= 0 && StartupData.rows[StartupData.selected].enabled ? @tr("禁用") : @tr("启用");
+                        enabled: !StartupData.busy && StartupData.selected >= 0;
+                        clicked => { StartupData.toggle(); }
+                    }
+                    HorizontalLayout {
+                        alignment: center; spacing: 6px;
+                        if StartupData.selected >= 0 && StartupData.rows[StartupData.selected].admin: Rectangle {
+                            width: 16px;
+                            ShieldIcon { y: (parent.height - self.height) / 2; tint: Palette.foreground; }
+                        }
+                        Text { text: StartupData.selected >= 0 && StartupData.rows[StartupData.selected].enabled ? @tr("禁用") : @tr("启用"); vertical-alignment: center; color: StartupData.busy || StartupData.selected < 0 ? Theme.faint-text : Palette.foreground; }
+                    }
+                }
+            }
+        }
+    }
+    if root.show-tip && root.hovered >= 0: Rectangle {
+        x: 20px; y: min(root.hover-y + 4px, root.height - self.height - 8px);
+        width: min(620px, root.width - 40px); height: tip.preferred-height + 20px;
+        background: Theme.popup; border-width: 1px; border-color: Theme.popup-border; border-radius: 4px;
+        drop-shadow-blur: 8px; drop-shadow-offset-y: 2px; drop-shadow-color: #00000040;
+        tip := Text { x: 10px; y: 10px; width: parent.width - 20px; text: StartupData.rows[root.hovered].command; wrap: word-wrap; color: Palette.foreground; }
+    }
+}

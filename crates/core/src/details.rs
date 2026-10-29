@@ -318,7 +318,7 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 /// 文件版本信息里的（文件说明, 公司名称），优先取系统界面语言的本地化资源。
-fn version_strings(path: &Path) -> (Option<String>, Option<String>) {
+pub(crate) fn version_strings(path: &Path) -> (Option<String>, Option<String>) {
     let file: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let file = PCWSTR(file.as_ptr());
     let size = unsafe { GetFileVersionInfoSizeExW(FILE_VER_GET_LOCALISED, file, &mut 0) };
