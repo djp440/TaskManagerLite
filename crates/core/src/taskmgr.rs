@@ -81,7 +81,7 @@ impl fmt::Display for IfeoError {
             Self::Occupied(v) => write!(f, "已被其他程序登记：{v}"),
             Self::Cancelled => write!(f, "已取消管理员授权"),
             Self::UnsafeLocation(why) => {
-                write!(f, "exe 所在位置可被其他用户改写（{why}）。请移到 Program Files 等受保护目录，或使用 --force")
+                write!(f, "exe 所在位置可被其他用户改写（{why}）。请用安装包安装（默认装到 Program Files）或移到受保护目录，或使用 --force")
             }
             Self::Registry(code) => write!(f, "注册表操作失败（错误码 {code}）"),
             Self::Other(msg) => f.write_str(msg),

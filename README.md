@@ -40,7 +40,7 @@
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/djp440/TaskManagerLite/releases) 下载 `TaskManagerLite-<版本>.exe`，同目录下的 `.sha256` 文件可用于校验。无需安装，直接运行。
+从 [GitHub Releases](https://github.com/djp440/TaskManagerLite/releases) 下载安装包 `TaskManagerLite-<版本>-setup.exe`，同目录下的 `.sha256` 文件可用于校验。安装包默认装到 `Program Files`，需要管理员授权；安装时可以勾选“替换系统任务管理器”。卸载时会自动撤销接管。
 
 ## 从源码构建
 
