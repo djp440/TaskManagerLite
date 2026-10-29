@@ -11,6 +11,7 @@ use slint::{
     SharedPixelBuffer, Timer,
 };
 
+use crate::controller::SERVICES_PAGE;
 use crate::{AppWindow, Columns, CpuData, MiniWindow, ProcessMenu, SettingsData};
 
 type Step = (&'static str, fn(&AppWindow));
@@ -29,6 +30,22 @@ const STEPS: &[Step] = &[
     ("00b1-启动项-命令行悬停", |_| {}),
     ("00b2-启动项-命令行悬停-深色", |ui| { ui.invoke_set_dark(true); }),
     ("00c-启动项-窄窗口", |ui| { ui.window().dispatch_event(WindowEvent::PointerExited); resize(ui, 760.0, 600.0); }),
+    ("00e-服务-窄窗口", |ui| { ui.set_page(SERVICES_PAGE); }),
+    ("00e1-服务-深色", |ui| { resize(ui, 1080.0, 700.0); }),
+    ("00e2-服务-浅色选中悬停", |ui| {
+        let data = ui.global::<crate::ServiceData>();
+        assert!(data.get_rows().row_count() > 0, "服务应已读取完毕");
+        for i in 0..data.get_rows().row_count() {
+            if data.get_rows().row_data(i).is_some_and(|r| r.can_stop && r.pid > 0) { data.set_selected(i as i32); break; }
+        }
+        ui.window().dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(300.0, 105.0) });
+        ui.invoke_set_dark(false);
+    }),
+    ("00e3-服务-描述悬停-深色", |ui| { ui.invoke_set_dark(true); }),
+    ("00e4-服务-按状态排序", |ui| {
+        ui.window().dispatch_event(WindowEvent::PointerExited);
+        ui.global::<crate::ServiceData>().invoke_sort(3);
+    }),
     ("00d-启动项-恢复", |ui| { resize(ui, 1080.0, 700.0); ui.invoke_set_dark(true); ui.set_page(0); }),
     ("01-进程列表-深色", |_| {}),
     ("02-树形与搜索-深色", |ui| {
