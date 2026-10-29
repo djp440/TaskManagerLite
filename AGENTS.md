@@ -31,7 +31,9 @@
 - “应用”判定的真实桌面验收（会启动记事本、计算器并测量枚举耗时）：`pwsh scripts/test-apps.ps1`；`measure-idle.ps1 -View group` 测分组视图的常驻开销，`-Mini` 测迷你模式的常驻开销
 - 内存页数据核对（与 WMI、`\Memory\*` 计数器对比插槽、速度、可用、提交、分页池等）：`pwsh scripts/verify-memory.ps1`
 - CI：推送到 main 或开 PR 时自动跑测试与 release 构建（`.github/workflows/ci.yml`）
-- 发布：先改 `Cargo.toml` 的 workspace 版本，再推送同名 tag（如 `v0.1.0`，带 `-` 的视为预发布），`release.yml` 会构建并上传 exe 与 sha256 到 GitHub Releases
+- 安装包（Inno Setup，见 ADR 0005）：`pwsh scripts/build-installer.ps1 [-Build]` → `target/installer/TaskManagerLite-<版本>-setup.exe`（本机需 `winget install JRSoftware.InnoSetup`）；端到端验收 `pwsh scripts/test-installer.ps1`（按用户安装到临时目录，不提权，只读写 HKCU 测试键）
+- winget 清单：`pwsh scripts/winget-manifest.ps1 [-Version x.y.z] [-Installer <本地安装包>]` 生成到 `target/winget/<版本>/` 并校验；只生成不提交
+- 发布：先改 `Cargo.toml` 的 workspace 版本，再推送同名 tag（如 `v0.1.0`，带 `-` 的视为预发布），`release.yml` 会构建并上传安装包与 sha256 到 GitHub Releases
 
 ## Agent skills
 

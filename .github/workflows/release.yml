@@ -35,14 +35,24 @@ jobs:
       - name: release 构建
         run: cargo build --locked -p tml-app --release
 
+      - name: 准备 Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: 编译安装包
+        shell: pwsh
+        run: ./scripts/build-installer.ps1 -Version ('${{ github.ref_name }}'.TrimStart('v'))
+
       - name: 发布到 GitHub Releases
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = '${{ github.ref_name }}'
-          $asset = "TaskManagerLite-$tag.exe"
-          Copy-Item target/release/TaskManagerLite.exe $asset
+          # 文件名与 scripts/winget-manifest.ps1 里的 InstallerUrl 一致。
+          $asset = "TaskManagerLite-$($tag.TrimStart('v'))-setup.exe"
+          Copy-Item "target/installer/$asset" $asset
           $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
           "$hash  $asset" | Out-File -Encoding utf8 "$asset.sha256"
           $flags = @('--generate-notes')

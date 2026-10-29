@@ -40,7 +40,7 @@ Measured startup time and idle overhead are in [ADR 0002](docs/adr/0002-software
 
 ## Download
 
-Get `TaskManagerLite-<version>.exe` from [GitHub Releases](https://github.com/djp440/TaskManagerLite/releases); the `.sha256` file next to it can be used to verify the download. No installation needed, just run it. The UI is in Chinese.
+Get the installer `TaskManagerLite-<version>-setup.exe` from [GitHub Releases](https://github.com/djp440/TaskManagerLite/releases); the `.sha256` file next to it can be used to verify the download. It installs to `Program Files` (administrator approval required) and can optionally replace Windows Task Manager; uninstalling undoes the replacement. The UI is in Chinese.
 
 ## Build from source
 

@@ -170,7 +170,7 @@ impl Controller {
             // 核心库的说明提到命令行的 --force，界面上换成不含它的说法。
             Some(IfeoError::UnsafeLocation(why)) => (
                 format!(
-                    "程序所在位置可被其他用户改写（{why}），为安全起见不予登记。请把程序移到 Program Files 等受保护的目录后再试"
+                    "程序所在位置可被其他用户改写（{why}），为安全起见不予登记。请用安装包安装（默认装到 Program Files）后再试，或把程序移到受保护的目录"
                 ),
                 true,
             ),

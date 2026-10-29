@@ -28,6 +28,12 @@ jobs:
       - name: release 构建
         run: cargo build --locked -p tml-app --release
 
+      - name: 编译安装包
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          pwsh scripts/build-installer.ps1
+
       - name: 记录产物体积
         shell: pwsh
         run: |
