@@ -20,8 +20,11 @@ mod cpu;
 mod memory;
 mod mini;
 mod process_menu;
+mod services_page;
 mod settings_page;
 mod startup_page;
+
+pub use services_page::SERVICES_PAGE;
 
 pub use columns::sort_index as detail_sort_index;
 mod resources;
@@ -53,6 +56,7 @@ const TRAY_RETRIES: u32 = 30;
 
 pub struct Controller {
     startup_entries: RefCell<Vec<tml_core::startup::Entry>>,
+    services: services_page::ServicesState,
     ui: slint::Weak<AppWindow>,
     rows: Rc<VecModel<ProcRow>>,
     resources: Rc<VecModel<Resource>>,
@@ -250,6 +254,7 @@ impl Controller {
         });
         let c = Rc::new(Self {
             startup_entries: RefCell::new(Vec::new()),
+            services: Default::default(),
             ui: ui.as_weak(),
             rows,
             resources,
@@ -295,6 +300,7 @@ impl Controller {
         c.bind_mini(ui);
         c.bind_settings(ui);
         c.bind_startup(ui);
+        c.bind_services(ui);
         ui.set_pinned(settings.always_on_top);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
         if settings.interval_index != 1 {
@@ -794,6 +800,7 @@ impl Controller {
             self.track_icons();
             self.track_info();
             self.refresh_rows();
+            self.services_tick();
         }
     }
 
@@ -1173,6 +1180,47 @@ impl Controller {
         ui.set_selected(selected_index);
         ui.set_sort_key(sort_index(st.opts.sort_key));
         ui.set_sort_descending(st.opts.descending);
+    }
+
+    /// 在进程列表中选中指定 PID 的进程：展开它在树形/分组视图中的祖先，搜索词把它过滤掉时清空搜索。
+    /// 当前快照里没有该进程时返回 `false`。
+    fn reveal_pid(&self, pid: u32) -> bool {
+        let Some(ui) = self.ui.upgrade() else { return false };
+        let key = {
+            let mut guard = self.state.borrow_mut();
+            let s = &mut *guard;
+            let procs = &s.snapshot.processes;
+            let Some(p) = procs.iter().find(|p| p.key.pid == pid) else {
+                return false;
+            };
+            // 沿父进程向上（父进程须早于子进程创建，见术语表“进程树”），展开途经的节点。
+            let mut node = p;
+            for _ in 0..64 {
+                let Some(parent) = procs.iter().find(|q| {
+                    q.key.pid == node.parent_pid
+                        && q.key != node.key
+                        && q.key.create_time <= node.key.create_time
+                }) else {
+                    break;
+                };
+                s.opts.collapsed.remove(&parent.key);
+                s.opts.expanded.insert(parent.key);
+                node = parent;
+            }
+            s.selected = Some(p.key);
+            p.key
+        };
+        self.refresh_rows();
+        if ui.get_selected() < 0 && !self.state.borrow().opts.filter.is_empty() {
+            {
+                let mut s = self.state.borrow_mut();
+                s.opts.filter.clear();
+                s.selected = Some(key);
+            }
+            ui.set_filter("".into());
+            self.refresh_rows();
+        }
+        ui.get_selected() >= 0
     }
 
     fn selected_process(&self) -> Option<(ProcessKey, String, bool)> {

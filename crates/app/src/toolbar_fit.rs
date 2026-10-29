@@ -24,7 +24,7 @@ fn toolbar_fits_every_width() {
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     slint::platform::set_platform(Box::new(Headless(window))).expect("每个测试线程只设置一次平台");
     let ui = AppWindow::new().expect("创建界面");
-    for page in [0, 1, 2, 3] {
+    for page in [0, 1, 2, 3, 4] {
         for elevated in [false, true] {
             ui.set_page(page);
             ui.set_elevated(elevated);

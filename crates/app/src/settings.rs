@@ -280,7 +280,7 @@ impl Settings {
             }
         }
         if let Some(p) = int::<i32>(o, "page")
-            && matches!(p, 0 | 1 | 3)
+            && matches!(p, 0 | 1 | 3 | 4)
         {
             s.page = p;
         }

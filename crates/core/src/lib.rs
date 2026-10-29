@@ -18,6 +18,7 @@ mod network;
 pub use network::NetworkAdapter;
 mod procinfo;
 mod sampler;
+pub mod services;
 mod shellops;
 mod snapshot;
 mod system;

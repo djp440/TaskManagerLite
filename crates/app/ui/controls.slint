@@ -18,7 +18,7 @@ export component SegmentedControl inherits Rectangle {
         padding: 2px;
         spacing: 2px;
         for label[i] in root.model: Rectangle {
-            width: caption.preferred-width + 24px;
+            width: caption.preferred-width + 20px;
             border-radius: 5px;
             background: i == root.current-index ? Theme.selected : touch.has-hover ? Theme.hover : transparent;
             touch := TouchArea {

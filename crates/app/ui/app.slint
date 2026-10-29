@@ -10,6 +10,8 @@ import { SegmentedControl, ShieldIcon } from "controls.slint";
 import { SettingsPage, SettingsData } from "settings-page.slint";
 import { StartupPage, StartupData, StartupRow } from "startup-page.slint";
 export { StartupData, StartupRow }
+import { ServicesPage, ServiceData, ServiceRow } from "services-page.slint";
+export { ServiceData, ServiceRow }
 
 export { ColumnLayout, MemoryView, ProcRow, Resource, ResourceKind, ResourceTint, StatItem, Columns, ProcessMenu, MiniWindow, OpacityChoice, SettingsData }
 export { CoreGraph, CpuData, GridLayout } from "cpu-detail.slint";
@@ -29,8 +31,8 @@ component Tab inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 4px;
-        padding-right: 4px;
+        padding-left: 3px;
+        padding-right: 3px;
         Text {
             text: root.text;
             vertical-alignment: center;
@@ -301,7 +303,7 @@ export component AppWindow inherits Window {
     out property <int> page-before-settings: 0;
     // Fluent 输入框左右内边距各 12px，另留 4px 光标余量。
     private property <length> search-comfort: min(176px, search-measure.preferred-width + 28px);
-    private property <length> search-floor: min(root.search-comfort, max(120px, search-short-measure.preferred-width + 28px));
+    private property <length> search-floor: min(root.search-comfort, max(104px, search-short-measure.preferred-width + 28px));
     // 左右内边距 16 + 12，左侧组、伸缩空白、右侧组之间两个 8px 间距。
     private property <length> toolbar-room: root.width - 44px;
     // Fluent 按钮左右内边距各 12px；提权按钮的需求含它与左侧控件的 8px 间距。
@@ -325,6 +327,12 @@ export component AppWindow inherits Window {
     // 主题设置：0 跟随系统，1 浅色，2 深色。
     public function set-theme(mode: int) {
         Palette.color-scheme = mode == 1 ? ColorScheme.light : mode == 2 ? ColorScheme.dark : ColorScheme.unknown;
+    }
+
+    // 从其他页跳转到进程页后，把选中行滚动到可见处并让列表获得键盘焦点。
+    public function show-selected() {
+        process-page.ensure-visible(root.selected);
+        keys.focus();
     }
 
     function toggle-settings() {
@@ -439,8 +447,8 @@ export component AppWindow inherits Window {
                                 x: 0px;
                                 width: self.preferred-width;
                                 height: parent.height;
-                                spacing: 8px;
-                                // 为三个页面标签预留空间，默认宽度仍完整显示提权按钮。
+                                // 收紧品牌字样，为五个页面标签留出空间，默认宽度 1080 仍完整显示提权按钮。
+                                spacing: 4px;
                                 padding-right: 8px;
                                 Text {
                                     text: "TaskManager";
@@ -461,7 +469,8 @@ export component AppWindow inherits Window {
                         }
 
                         tabs := HorizontalLayout {
-                            spacing: 4px;
+                            // 五个页面标签：最窄窗口下进程页工具栏仍要放得下。
+                            spacing: 2px;
                             VerticalLayout {
                                 alignment: center;
                                 Tab {
@@ -489,6 +498,14 @@ export component AppWindow inherits Window {
                                     text: @tr("启动项");
                                     active: root.page == 3;
                                     clicked => { root.page = 3; }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Tab {
+                                    text: @tr("服务");
+                                    active: root.page == 4;
+                                    clicked => { root.page = 4; }
                                 }
                             }
                         }
@@ -536,7 +553,7 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             alignment: center;
                             ComboBox {
-                                width: 104px;
+                                width: 96px;
                                 model: [@tr("0.5 秒"), @tr("1 秒"), @tr("2 秒"), @tr("暂停")];
                                 current-index <=> root.interval-index;
                                 selected => {
@@ -736,6 +753,7 @@ export component AppWindow inherits Window {
                 }
 
                 if root.page == 3: StartupPage { }
+                if root.page == 4: ServicesPage { }
                 if root.page == 2: SettingsPage {
                     elevated: root.elevated;
                     pinned <=> root.pinned;

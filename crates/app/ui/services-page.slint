@@ -1,0 +1,136 @@
+import { Button, Palette, ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { ShieldIcon } from "controls.slint";
+import { HeaderCell } from "process-page.slint";
+export struct ServiceRow { name: string, display-name: string, description: string, state: string, start-type: string, pid: int, group: string, can-start: bool, can-stop: bool }
+// 服务页的数据与回调，由 Rust 维护（见 controller/services_page.rs）。
+export global ServiceData {
+    in property <[ServiceRow]> rows;
+    in-out property <int> selected: -1;
+    in-out property <int> sort-key;
+    in-out property <bool> descending;
+    // 正在执行启动/停止/重启（周期刷新不置位）。
+    in property <bool> busy;
+    in property <bool> elevated;
+    in property <string> note;
+    // 进入页面：清空配置缓存后重新枚举。
+    callback refresh();
+    callback sort(int);
+    // 0 启动，1 停止，2 重启。
+    callback act(int);
+    callback goto-process();
+}
+component Cell inherits Rectangle {
+    in property <string> text;
+    in property <bool> right;
+    Text { x: 10px; width: parent.width - 20px; height: 100%; text: root.text; overflow: elide; vertical-alignment: center; horizontal-alignment: root.right ? TextHorizontalAlignment.right : TextHorizontalAlignment.left; color: Palette.foreground; }
+}
+// 底栏按钮：需要管理员权限且未提权时在文字前显示盾牌。
+component ActionButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> shield;
+    in property <bool> enabled;
+    callback clicked();
+    width: label.preferred-width + (root.shield ? 22px : 0px) + 32px;
+    height: 32px;
+    Button { width: 100%; height: 100%; accessible-label: root.text; enabled: root.enabled; clicked => { root.clicked(); } }
+    HorizontalLayout {
+        alignment: center; spacing: 6px;
+        if root.shield: Rectangle {
+            width: 16px;
+            ShieldIcon { y: (parent.height - self.height) / 2; tint: root.enabled ? Palette.foreground : Theme.faint-text; }
+        }
+        label := Text { text: root.text; vertical-alignment: center; color: root.enabled ? Palette.foreground : Theme.faint-text; }
+    }
+}
+export component ServicesPage inherits Rectangle {
+    private property <int> hovered: -1;
+    private property <length> hover-y;
+    private property <bool> show-tip;
+    private property <bool> has-selection: ServiceData.selected >= 0 && ServiceData.selected < ServiceData.rows.length;
+    private property <ServiceRow> current: root.has-selection ? ServiceData.rows[ServiceData.selected] : { };
+    changed hovered => { root.show-tip = false; }
+    Timer { interval: 500ms; running: root.hovered >= 0 && !root.show-tip; triggered => { root.show-tip = true; } }
+    init => { ServiceData.refresh(); }
+    background: Theme.surface;
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            height: 34px;
+            background: Theme.surface-raised;
+            HorizontalLayout {
+                padding-left: 10px; padding-right: 10px; spacing: 0px;
+                HeaderCell { text: @tr("名称"); width: 170px; align: left; resizable: false; active: ServiceData.sort-key == 0; descending: ServiceData.descending; clicked => { ServiceData.sort(0); } }
+                HeaderCell { text: "PID"; width: 72px; resizable: false; active: ServiceData.sort-key == 1; descending: ServiceData.descending; clicked => { ServiceData.sort(1); } }
+                HeaderCell { text: @tr("显示名称"); horizontal-stretch: 1; align: left; resizable: false; active: ServiceData.sort-key == 2; descending: ServiceData.descending; clicked => { ServiceData.sort(2); } }
+                HeaderCell { text: @tr("状态"); width: 86px; align: left; resizable: false; active: ServiceData.sort-key == 3; descending: ServiceData.descending; clicked => { ServiceData.sort(3); } }
+                HeaderCell { text: @tr("启动类型"); width: 128px; align: left; resizable: false; active: ServiceData.sort-key == 4; descending: ServiceData.descending; clicked => { ServiceData.sort(4); } }
+                HeaderCell { text: @tr("组"); width: 150px; align: left; resizable: false; active: ServiceData.sort-key == 5; descending: ServiceData.descending; clicked => { ServiceData.sort(5); } }
+            }
+        }
+        ListView {
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+            for row[i] in ServiceData.rows: Rectangle {
+                height: Theme.row-height;
+                background: ServiceData.selected == i ? Theme.selected : touch.has-hover ? Theme.hover : transparent;
+                HorizontalLayout {
+                    padding-left: 10px; padding-right: 10px; spacing: 0px;
+                    Cell { text: row.name; width: 170px; }
+                    Cell { text: row.pid > 0 ? "\{row.pid}" : ""; width: 72px; right: true; }
+                    Cell { text: row.display-name; horizontal-stretch: 1; }
+                    Cell { text: row.state; width: 86px; }
+                    Cell { text: row.start-type; width: 128px; }
+                    Cell { text: row.group; width: 150px; }
+                }
+                touch := TouchArea {
+                    clicked => { ServiceData.selected = i; }
+                    double-clicked => { ServiceData.selected = i; ServiceData.goto-process(); }
+                    changed has-hover => {
+                        if self.has-hover { root.hovered = i; root.hover-y = self.absolute-position.y - root.absolute-position.y + self.height; }
+                        else if root.hovered == i { root.hovered = -1; }
+                    }
+                }
+            }
+        }
+        Rectangle {
+            height: 52px;
+            Rectangle { x: 0px; y: 0px; width: 100%; height: 1px; background: Theme.divider; }
+            HorizontalLayout {
+                padding: 10px; spacing: 8px;
+                Text { text: ServiceData.note; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; color: Theme.subtle-text; }
+                ActionButton {
+                    text: @tr("转到进程");
+                    enabled: root.has-selection && root.current.pid > 0;
+                    clicked => { ServiceData.goto-process(); }
+                }
+                ActionButton {
+                    text: @tr("启动"); shield: !ServiceData.elevated;
+                    enabled: !ServiceData.busy && root.has-selection && root.current.can-start;
+                    clicked => { ServiceData.act(0); }
+                }
+                ActionButton {
+                    text: @tr("停止"); shield: !ServiceData.elevated;
+                    enabled: !ServiceData.busy && root.has-selection && root.current.can-stop;
+                    clicked => { ServiceData.act(1); }
+                }
+                ActionButton {
+                    text: @tr("重启"); shield: !ServiceData.elevated;
+                    enabled: !ServiceData.busy && root.has-selection && root.current.can-stop;
+                    clicked => { ServiceData.act(2); }
+                }
+            }
+        }
+    }
+    // 悬停约 0.5 秒显示显示名称与描述。
+    if root.show-tip && root.hovered >= 0 && root.hovered < ServiceData.rows.length: Rectangle {
+        x: 20px; y: min(root.hover-y + 4px, root.height - self.height - 8px);
+        width: min(620px, root.width - 40px); height: tip.preferred-height + 20px;
+        background: Theme.popup; border-width: 1px; border-color: Theme.popup-border; border-radius: 4px;
+        drop-shadow-blur: 8px; drop-shadow-offset-y: 2px; drop-shadow-color: #00000040;
+        tip := Text {
+            x: 10px; y: 10px; width: parent.width - 20px; wrap: word-wrap; color: Palette.foreground;
+            text: ServiceData.rows[root.hovered].display-name + "\n" + (ServiceData.rows[root.hovered].description == "" ? @tr("（无描述）") : ServiceData.rows[root.hovered].description);
+        }
+    }
+}

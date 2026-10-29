@@ -390,18 +390,32 @@ pub fn set(entry: &Entry, on: bool) -> io::Result<()> {
     if !entry.needs_admin() || crate::is_elevated() {
         return set_direct(entry.source, &entry.name, on);
     }
-    let _com = Com::new();
-    let name: String = entry
-        .name
-        .as_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    let args = HSTRING::from(format!(
-        "--startup-set {} {} {name}",
+    run_elevated(&format!(
+        "--startup-set {} {} {}",
         entry.source,
-        u8::from(on)
-    ));
+        u8::from(on),
+        hex(&entry.name)
+    ))
+}
+/// 名称按 UTF-8 字节转十六进制传给提权子进程，避免引号与空格转义问题。
+pub(crate) fn hex(s: &str) -> String {
+    s.as_bytes().iter().map(|b| format!("{b:02x}")).collect()
+}
+pub(crate) fn unhex(hex: &str) -> io::Result<String> {
+    if !hex.is_ascii() || hex.len() % 2 != 0 {
+        return Err(io::Error::other("名称编码错误"));
+    }
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(io::Error::other)?;
+    String::from_utf8(bytes).map_err(io::Error::other)
+}
+/// 以固定参数启动提权的本程序子进程并等待它退出；退出码非零时按 Win32 错误码返回。
+pub(crate) fn run_elevated(args: &str) -> io::Result<()> {
+    let _com = Com::new();
+    let args = HSTRING::from(args);
     let file = HSTRING::from(std::env::current_exe()?.as_os_str());
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -451,17 +465,7 @@ pub fn run_cli(args: &[String]) -> Option<i32> {
             "1" => true,
             _ => return Err(io::Error::other("状态错误")),
         };
-        let hex = &args[4];
-        if !hex.is_ascii() || hex.len() % 2 != 0 {
-            return Err(io::Error::other("名称编码错误"));
-        }
-        let bytes = (0..hex.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(io::Error::other)?;
-        let name = String::from_utf8(bytes).map_err(io::Error::other)?;
-        set_direct(source, &name, on)
+        set_direct(source, &unhex(&args[4])?, on)
     })();
     Some(result.map_or_else(|e| e.raw_os_error().unwrap_or(1), |()| 0))
 }

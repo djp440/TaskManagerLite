@@ -27,6 +27,7 @@
 - 接管 Ctrl+Shift+Esc（IFEO，见 ADR 0003）：开关 `--register-taskmgr` / `--unregister-taskmgr` / `--taskmgr-status`（可加 `--force`）；端到端验收 `pwsh scripts/test-taskmgr-ifeo.ps1`（环境变量 `TML_IFEO_TEST_KEY` 改写到 HKCU 测试键，不碰 HKLM、不提权）
 - 测试：`cargo test -p tml-core -p tml-app`
 - 启动项页：进入页面时后台枚举 Run / Run32（HKCU、HKLM）和两个启动文件夹，状态写入 StartupApproved，系统级项通过 UAC 子进程修改；点击列表项或重新进入页面会重新枚举，以同步外部修改（页面没有刷新按钮）。定向测试：`cargo test -p tml-core startup --lib`；人工互通验收见 `docs/checklist/issue-25.md`。
+- 服务页：进入页面时后台枚举（`EnumServicesStatusExW`，启动类型/描述/组按服务名缓存，进入页面时清缓存），页面可见时随每次完整采样刷新；启动/停止/重启未提权时经 `--service-control` UAC 子进程执行。定向测试：`cargo test -p tml-core services --lib`；普通权限端到端：`pwsh scripts/test-services.ps1`（用 `--service-action <start|stop|restart|goto>:<服务名>` 启动自己的实例，不弹 UAC，不真的启停服务）；人工验收见 `docs/checklist/issue-26.md`。
 - “应用”判定的真实桌面验收（会启动记事本、计算器并测量枚举耗时）：`pwsh scripts/test-apps.ps1`；`measure-idle.ps1 -View group` 测分组视图的常驻开销，`-Mini` 测迷你模式的常驻开销
 - 内存页数据核对（与 WMI、`\Memory\*` 计数器对比插槽、速度、可用、提交、分页池等）：`pwsh scripts/verify-memory.ps1`
 - CI：推送到 main 或开 PR 时自动跑测试与 release 构建（`.github/workflows/ci.yml`）

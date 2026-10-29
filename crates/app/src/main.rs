@@ -30,11 +30,21 @@ thread_local! {
 const RENDERER: &str = if cfg!(feature = "renderer-software") { "software" } else { "femtovg" };
 
 /// 开发用参数：测量、截图与 `--allow-multiple` 不受单实例限制，也不占用单实例锁。
-const UNRESTRICTED_FLAGS: [&str; 5] =
-    ["--measure-startup", "--screenshot", "--menu-shot", "--menu-action", "--allow-multiple"];
+const UNRESTRICTED_FLAGS: [&str; 6] = [
+    "--measure-startup",
+    "--screenshot",
+    "--menu-shot",
+    "--menu-action",
+    "--service-action",
+    "--allow-multiple",
+];
 
 fn main() -> Result<(), slint::PlatformError> {
     if let Some(code) = tml_core::startup::run_cli(&std::env::args().collect::<Vec<_>>()) {
+        std::process::exit(code);
+    }
+    // 服务页的提权子进程：启动、停止或重启一个服务后退出。
+    if let Some(code) = tml_core::services::run_cli(&std::env::args().collect::<Vec<_>>()) {
         std::process::exit(code);
     }
     // 接管 Ctrl+Shift+Esc 的命令行开关（含提权子进程）：执行完直接退出，不创建窗口、不占单实例锁。
@@ -60,7 +70,7 @@ fn main() -> Result<(), slint::PlatformError> {
     log.line(format!("进入 main {entered:.1} ms"));
 
     // 设置在创建窗口前读取（一个很小的文件）；开发模式不读写用户设置，保证截图与测量可复现。
-    let dev_mode = measure || std::env::args().any(|a| a == "--screenshot" || a == "--menu-shot" || a == "--menu-action");
+    let dev_mode = measure || std::env::args().any(|a| a == "--screenshot" || a == "--menu-shot" || a == "--menu-action" || a == "--service-action");
     let store = if dev_mode { None } else { settings::Store::from_env() };
     let (loaded, outcome) = store.as_ref().map_or((settings::Settings::default(), None), |s| {
         let (settings, outcome) = s.load();
@@ -156,6 +166,11 @@ fn main() -> Result<(), slint::PlatformError> {
 
     if let Some(spec) = std::env::args().skip_while(|a| a != "--menu-action").nth(1) {
         screenshot::run_menu_action(&ui, &spec, Duration::from_secs(4));
+    }
+
+    // `--service-action <start|stop|restart|goto>:<服务名>`：自动化验收服务页（不弹 UAC，结果写日志）。
+    if let Some(spec) = std::env::args().skip_while(|a| a != "--service-action").nth(1) {
+        controller.queue_service_action(&spec);
     }
 
     // 其他实例请求唤起时，在界面线程还原并前置窗口（窗口隐藏在托盘时先重新显示）。
