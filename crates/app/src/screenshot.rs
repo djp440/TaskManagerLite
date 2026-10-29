@@ -16,6 +16,20 @@ use crate::{AppWindow, Columns, CpuData, MiniWindow, ProcessMenu, SettingsData};
 type Step = (&'static str, fn(&AppWindow));
 
 const STEPS: &[Step] = &[
+    ("00-启动项-深色", |ui| { ui.set_page(3); }),
+    ("00b-启动项-浅色", |ui| {
+        let data = ui.global::<crate::StartupData>();
+        assert!(!data.get_busy(), "启动项应已读取完毕");
+        for i in 0..data.get_rows().row_count() {
+            if data.get_rows().row_data(i).is_some_and(|r| r.admin) { data.set_selected(i as i32); break; }
+        }
+        ui.window().dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(100.0, 105.0) });
+        ui.invoke_set_dark(false);
+    }),
+    ("00b1-启动项-命令行悬停", |_| {}),
+    ("00b2-启动项-命令行悬停-深色", |ui| { ui.invoke_set_dark(true); }),
+    ("00c-启动项-窄窗口", |ui| { ui.window().dispatch_event(WindowEvent::PointerExited); resize(ui, 760.0, 600.0); }),
+    ("00d-启动项-恢复", |ui| { resize(ui, 1080.0, 700.0); ui.invoke_set_dark(true); ui.set_page(0); }),
     ("01-进程列表-深色", |_| {}),
     ("02-树形与搜索-深色", |ui| {
         ui.set_view_mode(1);

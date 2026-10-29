@@ -101,7 +101,7 @@ pub struct Settings {
     pub view: ViewMode,
     pub sort_key: SortKey,
     pub descending: bool,
-    /// 0 = 进程，1 = 性能。设置页（2）不记录：下次启动回到进入设置页之前的页面。
+    /// 0 = 进程，1 = 性能，3 = 启动项。设置页（2）不记录：恢复其之前的页面。
     pub page: i32,
     /// 性能页选中的资源实例 id（`cpu`、`memory`、`disk`、`network`……）。
     pub resource: String,
@@ -280,7 +280,7 @@ impl Settings {
             }
         }
         if let Some(p) = int::<i32>(o, "page")
-            && (0..=1).contains(&p)
+            && matches!(p, 0 | 1 | 3)
         {
             s.page = p;
         }

@@ -34,6 +34,9 @@ const UNRESTRICTED_FLAGS: [&str; 5] =
     ["--measure-startup", "--screenshot", "--menu-shot", "--menu-action", "--allow-multiple"];
 
 fn main() -> Result<(), slint::PlatformError> {
+    if let Some(code) = tml_core::startup::run_cli(&std::env::args().collect::<Vec<_>>()) {
+        std::process::exit(code);
+    }
     // 接管 Ctrl+Shift+Esc 的命令行开关（含提权子进程）：执行完直接退出，不创建窗口、不占单实例锁。
     if let Some(code) = tml_core::run_cli(&std::env::args().collect::<Vec<_>>()) {
         std::process::exit(code);

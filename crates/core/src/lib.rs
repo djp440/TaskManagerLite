@@ -2,6 +2,7 @@
 
 mod apps;
 mod autostart;
+pub mod startup;
 mod clipboard;
 mod control;
 mod cpu;

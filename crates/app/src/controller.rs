@@ -21,6 +21,7 @@ mod memory;
 mod mini;
 mod process_menu;
 mod settings_page;
+mod startup_page;
 
 pub use columns::sort_index as detail_sort_index;
 mod resources;
@@ -51,6 +52,7 @@ const CONFIRM_TREE: i32 = 2;
 const TRAY_RETRIES: u32 = 30;
 
 pub struct Controller {
+    startup_entries: RefCell<Vec<tml_core::startup::Entry>>,
     ui: slint::Weak<AppWindow>,
     rows: Rc<VecModel<ProcRow>>,
     resources: Rc<VecModel<Resource>>,
@@ -247,6 +249,7 @@ impl Controller {
             }
         });
         let c = Rc::new(Self {
+            startup_entries: RefCell::new(Vec::new()),
             ui: ui.as_weak(),
             rows,
             resources,
@@ -291,6 +294,7 @@ impl Controller {
         c.bind_columns(ui);
         c.bind_mini(ui);
         c.bind_settings(ui);
+        c.bind_startup(ui);
         ui.set_pinned(settings.always_on_top);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
         if settings.interval_index != 1 {

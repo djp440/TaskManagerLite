@@ -26,6 +26,7 @@
 - ETW 磁盘速率（设置项 `accurate_disk_io`，默认关闭，见 ADR-0004）端到端验收（**需提权终端**，未提权直接退出）：`pwsh scripts/test-etw-disk.ps1`；探针：`cargo run -p tml-core --release --example disk_probe -- --secs 20 [--no-etw] [--pid N]`（输出每进程磁盘速率 CSV，`source` 列区分 `etw`/`approx`）
 - 接管 Ctrl+Shift+Esc（IFEO，见 ADR 0003）：开关 `--register-taskmgr` / `--unregister-taskmgr` / `--taskmgr-status`（可加 `--force`）；端到端验收 `pwsh scripts/test-taskmgr-ifeo.ps1`（环境变量 `TML_IFEO_TEST_KEY` 改写到 HKCU 测试键，不碰 HKLM、不提权）
 - 测试：`cargo test -p tml-core -p tml-app`
+- 启动项页：进入页面时后台枚举 Run / Run32（HKCU、HKLM）和两个启动文件夹，状态写入 StartupApproved，系统级项通过 UAC 子进程修改；点击列表项或重新进入页面会重新枚举，以同步外部修改（页面没有刷新按钮）。定向测试：`cargo test -p tml-core startup --lib`；人工互通验收见 `docs/checklist/issue-25.md`。
 - “应用”判定的真实桌面验收（会启动记事本、计算器并测量枚举耗时）：`pwsh scripts/test-apps.ps1`；`measure-idle.ps1 -View group` 测分组视图的常驻开销，`-Mini` 测迷你模式的常驻开销
 - 内存页数据核对（与 WMI、`\Memory\*` 计数器对比插槽、速度、可用、提交、分页池等）：`pwsh scripts/verify-memory.ps1`
 - CI：推送到 main 或开 PR 时自动跑测试与 release 构建（`.github/workflows/ci.yml`）
