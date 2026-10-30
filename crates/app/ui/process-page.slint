@@ -60,6 +60,10 @@ export global ProcessMenu {
     in-out property <bool> can-eco;
     in-out property <bool> eco-checked;
     in-out property <string> eco-title;
+    in-out property <bool> can-suspend;
+    in-out property <bool> can-resume;
+    in-out property <string> suspend-title;
+    in-out property <string> resume-title;
     callback opening();
     callback open-location();
     callback copy-path();
@@ -76,6 +80,8 @@ export global ProcessMenu {
     callback set-affinity();
     // 切换所选进程（应用行为其全部后代）的效率模式；多于一个进程时由 Rust 先弹确认框。
     callback toggle-eco();
+    callback suspend();
+    callback resume();
 }
 
 export component HeaderCell inherits Rectangle {
@@ -306,6 +312,22 @@ component ProcRowView inherits Rectangle {
                 enabled: ProcessMenu.can-eco;
                 activated => {
                     ProcessMenu.toggle-eco();
+                }
+            }
+
+            MenuItem {
+                title: ProcessMenu.suspend-title;
+                enabled: ProcessMenu.can-suspend;
+                activated => {
+                    ProcessMenu.suspend();
+                }
+            }
+
+            MenuItem {
+                title: ProcessMenu.resume-title;
+                enabled: ProcessMenu.can-resume;
+                activated => {
+                    ProcessMenu.resume();
                 }
             }
 

@@ -785,7 +785,11 @@ pub fn run_menu(ui: &AppWindow, spec: &str, warmup: Duration) {
 /// `--menu-action <动作>:<pid>`：选中指定 PID 的进程并直接触发一个右键菜单动作
 /// （`open-location`、`properties`、`copy-path`、`copy-command-line`、`copy-row`，以及 #66 的
 /// `set-priority:<pid>:<优先级键>`、`set-affinity:<pid>:<十六进制掩码>`、`affinity-shot:<pid>`，以及 #68 的 `eco-mode:<pid>:<on|off>`：先走一遍菜单弹出前的探测，
-/// 当前状态与目标不同才触发“效率模式”，应用行出现确认框时自动点确认），用于 `scripts/test-menu-actions.ps1`
+/// 当前状态与目标不同才触发“效率模式”，应用行出现确认框时自动点确认；#67 的 `suspend:<pid>` / `resume:<pid>`：先走一遍菜单弹出前的探测，
+/// 菜单项置灰时仍强行触发一次（核对受保护进程被拒绝），出现确认框时自动点确认，`suspend-ask:<pid>` 只触发不点确认
+/// （核对关键进程 / 应用行先弹确认框，日志记“需要确认”），`exit-prompt:<pid>` 先挂起该进程再模拟一次退出（开发模式下也走
+/// “仍保持挂起”提示，弹出后自动点“仍然退出”；`exit-prompt-cancel:<pid>` 点“取消”后继续运行；`exit-prompt-twice:<pid>` 连续退出两次、
+/// 只应弹一次提示；`exit-noprompt:<pid>` 本程序没挂起过任何进程，应直接退出），用于 `scripts/test-menu-actions.ps1`
 /// 自动验收，免去点击原生菜单。末尾可加 `:group` 先切到分组视图（验证分组视图里选中的是正确的进程）。
 /// 动作执行后不退出，由脚本检查结果并结束进程。
 pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
@@ -873,6 +877,59 @@ pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
                             ui.invoke_confirm_accepted();
                         }
                     }
+                }
+                "suspend" | "resume" | "suspend-ask" => {
+                    let suspend = action != "resume";
+                    menu.invoke_opening();
+                    let (can, title) = if suspend {
+                        (menu.get_can_suspend(), menu.get_suspend_title())
+                    } else {
+                        (menu.get_can_resume(), menu.get_resume_title())
+                    };
+                    eprintln!("{action} 菜单项 enabled={can} 标题={title}");
+                    if suspend {
+                        menu.invoke_suspend();
+                    } else {
+                        menu.invoke_resume();
+                    }
+                    if action != "suspend-ask" && ui.get_confirm_kind() != 0 {
+                        ui.invoke_confirm_accepted();
+                    }
+                }
+                "exit-prompt" | "exit-prompt-cancel" | "exit-prompt-twice" | "exit-noprompt" => {
+                    if action != "exit-noprompt" {
+                        menu.invoke_opening();
+                        menu.invoke_suspend();
+                        if ui.get_confirm_kind() != 0 {
+                            ui.invoke_confirm_accepted();
+                        }
+                    }
+                    // 挂起是异步生效的（线程要等到下一次被调度才进入挂起等待），稍等再退出。
+                    let weak = ui.as_weak();
+                    let action = action.clone();
+                    Timer::single_shot(Duration::from_millis(1500), move || {
+                        let Some(ui) = weak.upgrade() else { return };
+                        let exit = || {
+                            crate::CONTROLLER.with(|c| {
+                                if let Some(c) = c.borrow().as_ref() {
+                                    c.exit_hook();
+                                }
+                            })
+                        };
+                        exit();
+                        if action == "exit-prompt-twice" {
+                            exit();
+                        }
+                        eprintln!("退出前提示 confirm_kind={}", ui.get_confirm_kind());
+                        if ui.get_confirm_kind() == 7 {
+                            if action == "exit-prompt" {
+                                ui.invoke_confirm_accepted();
+                            } else {
+                                // 取消：与对话框里的“取消”按钮相同，把确认框关掉。
+                                ui.set_confirm_kind(0);
+                            }
+                        }
+                    });
                 }
                 "affinity-shot" => {
                     // 打开亲和性对话框并把窗口截图写到环境变量 TML_AFFINITY_SHOT 指定的 BMP，随后退出。

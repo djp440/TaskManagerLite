@@ -179,7 +179,7 @@ pub fn process_control_error(e: &ProcessControlError) -> String {
         ProcessControlError::AccessDenied => "没有权限修改该进程（受保护进程或需要管理员权限），可以以管理员身份重启后再试".into(),
         ProcessControlError::EmptyAffinity => "至少要选择一个逻辑处理器".into(),
         ProcessControlError::OutsideProcessorGroup => "所选处理器不在该进程所在的处理器组内".into(),
-        ProcessControlError::Protected => "系统关键进程或本程序自身，不能开启效率模式".into(),
+        ProcessControlError::Protected => "系统空闲 / System 进程或本程序自身，不允许此操作".into(),
         ProcessControlError::Unsupported => "当前 Windows 版本不支持效率模式（需要 Windows 10 1709 及以上）".into(),
         ProcessControlError::System(e) => format!("系统返回错误：{e}"),
     }
@@ -223,6 +223,49 @@ pub fn eco_disabled_reason(critical: bool) -> &'static str {
         "系统关键进程或本程序自身不能开启效率模式"
     } else {
         "没有权限修改该进程的效率模式"
+    }
+}
+
+/// 挂起 / 恢复菜单项置灰的原因。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MenuBlock {
+    /// 探测得到的错误（受保护、没有权限、进程已退出）。
+    Error(ProcessControlError),
+    /// 没有符合条件的目标：挂起时目标都已挂起，恢复时目标都没有挂起。
+    NoTarget,
+}
+
+/// 右键菜单“挂起”项的标题；置灰时括号里写原因，`None` 表示可用。
+pub fn suspend_menu_title(block: Option<&MenuBlock>) -> &'static str {
+    match block {
+        None => "挂起",
+        Some(MenuBlock::NoTarget) => "挂起（已挂起）",
+        Some(MenuBlock::Error(ProcessControlError::Protected)) => "挂起（系统进程或本程序，不可挂起）",
+        Some(MenuBlock::Error(ProcessControlError::Gone)) => "挂起（进程已退出）",
+        Some(MenuBlock::Error(_)) => "挂起（没有权限）",
+    }
+}
+
+/// 右键菜单“恢复”项的标题，规则同 [`suspend_menu_title`]。
+pub fn resume_menu_title(block: Option<&MenuBlock>) -> &'static str {
+    match block {
+        None => "恢复",
+        Some(MenuBlock::NoTarget) => "恢复（未挂起）",
+        Some(MenuBlock::Error(ProcessControlError::Protected)) => "恢复（系统进程或本程序，不可操作）",
+        Some(MenuBlock::Error(ProcessControlError::Gone)) => "恢复（进程已退出）",
+        Some(MenuBlock::Error(_)) => "恢复（没有权限）",
+    }
+}
+
+/// 状态栏：挂起 / 恢复的结果；单个进程只写动作结果，多个进程写成功数与失败数。
+pub fn suspend_result(name: &str, suspend: bool, ok: usize, failed: usize) -> String {
+    let verb = if suspend { "挂起" } else { "恢复" };
+    if failed == 0 && ok == 1 {
+        format!("{name} → 已{verb}")
+    } else if failed == 0 {
+        format!("{name} → 已{verb} {ok} 个进程")
+    } else {
+        format!("{name} → 已{verb} {ok} 个进程，{failed} 个失败（权限不足或已退出）")
     }
 }
 

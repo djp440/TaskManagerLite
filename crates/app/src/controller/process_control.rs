@@ -74,20 +74,25 @@ pub fn eco_menu(
     }
 }
 
-/// 应用行的效率模式口径与“结束进程树”一致：该应用及其全部后代；桌面外壳 explorer.exe 不收纳后代，
-/// 只作用于它自己。受保护的（PID 0 / 4、本程序自身、关键进程）不参与。纯函数便于单测。
+/// 应用行的批量操作口径与“结束进程树”一致：该应用及其全部后代；桌面外壳 explorer.exe 不收纳后代，
+/// 只作用于它自己。效率模式（#68）与挂起 / 恢复（#67）共用，再各自按规则过滤。纯函数便于单测。
+pub fn app_row_keys(snapshot: &tml_core::ProcessSnapshot, root: ProcessKey, is_app_row: bool) -> Vec<ProcessKey> {
+    match snapshot.processes.iter().find(|p| p.key == root) {
+        Some(p) if is_app_row && tml_core::adopts_descendants(p) => tml_core::tree_from(snapshot, root),
+        Some(_) => vec![root],
+        None => Vec::new(),
+    }
+}
+
+/// 效率模式的目标：[`app_row_keys`] 中受保护的（PID 0 / 4、本程序自身、关键进程）不参与。
 pub fn eco_targets(
     snapshot: &tml_core::ProcessSnapshot,
     root: ProcessKey,
     is_app_row: bool,
     own_pid: u32,
 ) -> Vec<ProcessKey> {
-    let keys = match snapshot.processes.iter().find(|p| p.key == root) {
-        Some(p) if is_app_row && tml_core::adopts_descendants(p) => tml_core::tree_from(snapshot, root),
-        Some(_) => vec![root],
-        None => Vec::new(),
-    };
-    keys.into_iter()
+    app_row_keys(snapshot, root, is_app_row)
+        .into_iter()
         .filter(|k| {
             snapshot
                 .processes
@@ -188,10 +193,11 @@ impl Controller {
         menu.set_can_set_priority(m.can_set_priority);
         menu.set_can_set_affinity(m.can_set_affinity);
         menu.set_priority(m.priority);
+        self.update_suspend_menu(ui, selected.as_ref(), &state);
     }
 
     /// 所选行是不是分组视图里的应用行（效率模式作用于它及其全部后代）。
-    fn selected_is_app_row(&self, key: ProcessKey) -> bool {
+    pub(super) fn selected_is_app_row(&self, key: ProcessKey) -> bool {
         let s = self.state.borrow();
         s.opts.mode == ViewMode::Group && s.app_pids.as_ref().is_some_and(|a| a.contains(&key.pid))
     }
@@ -443,6 +449,7 @@ mod tests {
             affinity: affinity.then_some(AffinityInfo { process_mask: 0b11, system_mask: 0b1111, total_processors: 4 }),
             eco: Some(false),
             modify,
+            suspend: Ok(()),
         }
     }
 
@@ -477,7 +484,7 @@ mod tests {
 
     #[test]
     fn eco_menu_states() {
-        let ok = Ok(ControlState { priority: Some(PriorityClass::Normal), affinity: None, eco: Some(true), modify: Ok(()) });
+        let ok = Ok(ControlState { priority: Some(PriorityClass::Normal), affinity: None, eco: Some(true), modify: Ok(()), suspend: Ok(()) });
         assert_eq!(eco_menu(true, false, &ok), EcoMenu { visible: true, enabled: true, checked: true, disabled_reason: None });
         // 系统不支持：整项隐藏。
         assert!(!eco_menu(false, false, &ok).visible);
@@ -491,6 +498,7 @@ mod tests {
             affinity: None,
             eco: Some(false),
             modify: Err(ProcessControlError::AccessDenied),
+            suspend: Err(ProcessControlError::AccessDenied),
         });
         let m = eco_menu(true, false, &denied);
         assert!(m.visible && !m.enabled && !m.checked);

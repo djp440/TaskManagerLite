@@ -46,7 +46,7 @@ pub use memory::{MemoryHardware, MemoryStatus};
 pub use procctl::{
     AffinityInfo, ControlState, EcoOutcome, PriorityClass, ProcessControlError, affinity, control_state, eco_enabled,
     eco_mode, eco_protected_pid, eco_supported, eco_supported_build, mask_from_processors, processors_in_mask, set_affinity,
-    set_eco_mode, set_priority, validate_affinity,
+    set_eco_mode, set_priority, validate_affinity, resume_process, still_suspended, suspend_process, suspend_protected_pid,
 };
 pub use procinfo::{command_line, image_path, image_path_of};
 pub use sampler::{DiskSource, Sample, Sampler, Scope};

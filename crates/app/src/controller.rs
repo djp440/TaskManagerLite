@@ -26,6 +26,7 @@ mod run_task;
 mod services_page;
 mod settings_page;
 mod startup_page;
+mod suspend;
 
 pub use services_page::SERVICES_PAGE;
 
@@ -60,6 +61,10 @@ const CONFIRM_EXPORT: i32 = 3;
 const CONFIRM_REALTIME: i32 = 4;
 /// 对应用及其全部后代开启 / 关闭效率模式（`name` 为应用名，目标进程在 `pending` 里，`descendants` 为进程总数）。
 const CONFIRM_ECO: i32 = 5;
+/// 挂起关键进程或多个进程（`name` 为进程名 / 应用名，目标进程在 `pending` 里，`descendants` 为进程总数）。
+const CONFIRM_SUSPEND: i32 = 6;
+/// 退出前提示：本程序挂起的进程退出后仍保持挂起（`descendants` 为这些进程的个数）。
+const CONFIRM_EXIT_SUSPENDED: i32 = 7;
 /// 隐藏启动时托盘图标创建失败的重试次数（每秒一次）。
 const TRAY_RETRIES: u32 = 30;
 
@@ -74,6 +79,8 @@ pub struct Controller {
     affinity_target: RefCell<Option<ProcessKey>>,
     /// 效率模式的优先级联动记忆与待确认的批量操作（#68）。
     eco: process_control::EcoState,
+    /// 本程序挂起的进程与退出前提示（#67）。
+    suspend: suspend::SuspendState,
     ui: slint::Weak<AppWindow>,
     rows: Rc<VecModel<ProcRow>>,
     resources: Rc<VecModel<Resource>>,
@@ -286,6 +293,7 @@ impl Controller {
             export: Default::default(),
             affinity_target: RefCell::new(None),
             eco: Default::default(),
+            suspend: Default::default(),
             ui: ui.as_weak(),
             rows,
             resources,
@@ -334,6 +342,7 @@ impl Controller {
         c.bind_services(ui);
         c.bind_run_task(ui);
         c.bind_process_control(ui);
+        c.bind_suspend(ui);
         c.bind_export(ui);
         ui.set_pinned(settings.always_on_top);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
@@ -614,8 +623,11 @@ impl Controller {
             self.hidden.set(true);
             self.set_visible(false);
             self.log_hidden();
-        } else {
+        } else if self.try_exit() {
             let _ = slint::quit_event_loop();
+        } else {
+            // 退出前提示（#67）已弹出：窗口留着，等用户选“仍然退出”或“取消”。
+            return CloseRequestResponse::KeepWindowShown;
         }
         CloseRequestResponse::HideWindow
     }
@@ -663,8 +675,15 @@ impl Controller {
         }
     }
 
-    /// 托盘菜单“退出”：保存设置后结束事件循环。
+    /// 托盘菜单“退出”（迷你窗口的退出同）：本程序挂起的进程仍保持挂起时先提示（#67），否则保存设置后结束事件循环。
     fn quit(&self) {
+        if self.try_exit() {
+            self.quit_now();
+        }
+    }
+
+    /// 不再询问，保存设置后结束事件循环。
+    fn quit_now(&self) {
         self.save_settings();
         let _ = slint::quit_event_loop();
     }
@@ -1345,6 +1364,14 @@ impl Controller {
         }
         if kind == CONFIRM_ECO {
             self.confirm_eco();
+            return;
+        }
+        if kind == CONFIRM_SUSPEND {
+            self.confirm_suspend();
+            return;
+        }
+        if kind == CONFIRM_EXIT_SUSPENDED {
+            self.confirm_exit_suspended();
             return;
         }
         let keys = std::mem::take(&mut self.state.borrow_mut().pending);

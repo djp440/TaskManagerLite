@@ -1,4 +1,4 @@
-//! 进程操作（#66）：设置优先级类与 CPU 亲和性。
+//! 进程操作（#66）：设置优先级类与 CPU 亲和性；（#67）挂起与恢复。
 //!
 //! 与其他核心模块一样不返回显示文案：失败用 [`ProcessControlError`]（带系统错误码），
 //! 文案由界面层按枚举映射。优先级与掩码的换算是纯逻辑，可以脱离系统单测；
@@ -12,7 +12,8 @@ use std::sync::OnceLock;
 
 use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Wdk::System::Threading::{NtQueryInformationProcess, PROCESSINFOCLASS};
-use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER};
+use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, HANDLE, NTSTATUS};
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows::Win32::System::Threading::{
     ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetActiveProcessorCount, GetExitCodeProcess,
@@ -20,7 +21,7 @@ use windows::Win32::System::Threading::{
     IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_ACCESS_RIGHTS, PROCESS_CREATION_FLAGS,
     PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
     PROCESS_POWER_THROTTLING_STATE, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
-    ProcessPowerThrottling, REALTIME_PRIORITY_CLASS, SetPriorityClass, SetProcessAffinityMask,
+    PROCESS_SUSPEND_RESUME, ProcessPowerThrottling, REALTIME_PRIORITY_CLASS, SetPriorityClass, SetProcessAffinityMask,
     SetProcessInformation,
 };
 
@@ -104,7 +105,7 @@ pub enum ProcessControlError {
     EmptyAffinity,
     /// 掩码含有当前处理器组之外的位。
     OutsideProcessorGroup,
-    /// 效率模式（#68）：系统关键进程（PID 0、4）或本程序自身，不允许开启。
+    /// 效率模式（#68）、挂起（#67）：系统关键进程（PID 0、4）或本程序自身，不允许操作。
     Protected,
     /// 效率模式（#68）：系统版本低于 Windows 10 1709（build 16299），不支持进程电源节流。
     Unsupported,
@@ -217,6 +218,8 @@ pub struct ControlState {
     pub eco: Option<bool>,
     /// 能否修改：`Ok` 表示可以打开进程设置，`Err` 是预知的原因（用于置灰与提示）。
     pub modify: Result<(), ProcessControlError>,
+    /// 能否挂起/恢复（#67，需要 `PROCESS_SUSPEND_RESUME`）：`Err` 是预知的原因（用于置灰与提示）。
+    pub suspend: Result<(), ProcessControlError>,
 }
 
 /// 打开进程并核对创建时间，防止改到复用了同一 PID 的新进程。
@@ -282,11 +285,14 @@ pub fn control_state(key: ProcessKey) -> Result<ControlState, ProcessControlErro
         }
         Err(e) => return Err(e),
     };
+    // 挂起/恢复要另一种访问权限，单独探测一次（只在菜单弹出时发生，不在采样路径上）。
+    let suspend = open_checked(key, PROCESS_SUSPEND_RESUME | PROCESS_QUERY_LIMITED_INFORMATION).map(|_| ());
     Ok(ControlState {
         priority: read_priority(&h),
         affinity: read_affinity(&h).ok(),
         eco: if eco_supported() { read_eco(&h).ok() } else { None },
         modify,
+        suspend,
     })
 }
 
@@ -367,6 +373,90 @@ pub fn eco_supported() -> bool {
 /// 其余关键进程由调用方按 [`crate::Process::critical`] 判断。
 pub fn eco_protected_pid(pid: u32, own: u32) -> bool {
     pid == 0 || pid == 4 || pid == own
+}
+
+/// 挂起（#67）是否不允许操作这个 PID：与效率模式相同，Idle(0)、System(4) 与本程序自身（`own` 传本进程 PID）。
+/// 其余关键进程允许挂起，但界面需先二次确认（[`crate::Process::critical`]）。
+pub fn suspend_protected_pid(pid: u32, own: u32) -> bool {
+    eco_protected_pid(pid, own)
+}
+
+/// `NtSuspendProcess` / `NtResumeProcess` 的函数签名：参数是进程句柄，返回 NTSTATUS。
+type NtProcessFn = unsafe extern "system" fn(HANDLE) -> NTSTATUS;
+
+/// 从 ntdll 取导出函数（它们没有公开的导入库声明，所以动态绑定；只查一次）。
+fn ntdll_process_fn(name: windows::core::PCSTR) -> Option<NtProcessFn> {
+    unsafe {
+        let ntdll = GetModuleHandleW(windows::core::w!("ntdll.dll")).ok()?;
+        let f = GetProcAddress(ntdll, name)?;
+        Some(std::mem::transmute::<unsafe extern "system" fn() -> isize, NtProcessFn>(f))
+    }
+}
+
+fn nt_suspend_fn() -> Option<NtProcessFn> {
+    static F: OnceLock<Option<NtProcessFn>> = OnceLock::new();
+    *F.get_or_init(|| ntdll_process_fn(windows::core::s!("NtSuspendProcess")))
+}
+
+fn nt_resume_fn() -> Option<NtProcessFn> {
+    static F: OnceLock<Option<NtProcessFn>> = OnceLock::new();
+    *F.get_or_init(|| ntdll_process_fn(windows::core::s!("NtResumeProcess")))
+}
+
+/// NTSTATUS 失败码映射成 [`ProcessControlError`]（0xC0000022 = STATUS_ACCESS_DENIED）。
+fn nt_error(status: NTSTATUS) -> ProcessControlError {
+    if status.0 as u32 == 0xC000_0022 {
+        ProcessControlError::AccessDenied
+    } else {
+        ProcessControlError::System(SystemError::Other {
+            code: status.0,
+            message: format!("NTSTATUS 0x{:08X}", status.0 as u32),
+        })
+    }
+}
+
+fn call_nt_process(
+    key: ProcessKey,
+    f: Option<NtProcessFn>,
+) -> Result<(), ProcessControlError> {
+    let f = f.ok_or(ProcessControlError::Unsupported)?;
+    let h = open_checked(key, PROCESS_SUSPEND_RESUME | PROCESS_QUERY_LIMITED_INFORMATION)?;
+    let status = unsafe { f(h.raw()) };
+    if status.is_err() { Err(nt_error(status)) } else { Ok(()) }
+}
+
+/// 挂起整个进程（#67，`NtSuspendProcess`）。
+///
+/// 系统的挂起是计数式的：每挂起一次，之后要恢复同样的次数才会真正运行。
+/// 调用方应先依据采样里的“已挂起”状态（`Counters::suspended`）避免对已挂起的进程重复挂起。
+/// PID 0、4 与本程序自身返回 [`ProcessControlError::Protected`]。
+pub fn suspend_process(key: ProcessKey) -> Result<(), ProcessControlError> {
+    if suspend_protected_pid(key.pid, std::process::id()) {
+        return Err(ProcessControlError::Protected);
+    }
+    call_nt_process(key, nt_suspend_fn())
+}
+
+/// 恢复整个进程（#67，`NtResumeProcess`）：撤销一次挂起；多次挂起过的进程需要恢复同样的次数。
+pub fn resume_process(key: ProcessKey) -> Result<(), ProcessControlError> {
+    call_nt_process(key, nt_resume_fn())
+}
+
+/// 在 `keys` 里找出此刻仍存在且处于“已挂起”的进程（PID 与创建时间都要对上）。
+///
+/// 做一次进程枚举（`NtQuerySystemInformation`），不打开任何进程；用于退出前核对“本程序挂起的进程是否还挂着”，
+/// 不依赖界面线程手里可能已过期的快照。枚举失败时按“没有”处理。
+pub fn still_suspended(keys: &[ProcessKey]) -> Vec<ProcessKey> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let Ok(raw) = crate::nt::ProcessQuery::default().query() else {
+        return Vec::new();
+    };
+    keys.iter()
+        .copied()
+        .filter(|k| raw.iter().any(|r| r.pid == k.pid && r.create_time == k.create_time && r.suspended))
+        .collect()
 }
 
 /// 由控制/状态掩码得到“是否处于效率模式”。
@@ -896,5 +986,101 @@ mod tests {
         assert_eq!(find(&sampler.sample()), Some(Some(true)));
         set_eco_mode(key, false, None).unwrap();
         assert_eq!(find(&sampler.sample()), Some(Some(false)));
+    }
+
+    /// 采样器回读目标进程是否“已挂起”（`Counters::suspended`）。
+    fn sampled_suspended(sampler: &mut crate::Sampler, key: ProcessKey) -> Option<bool> {
+        sampler
+            .sample()
+            .snapshot
+            .processes
+            .iter()
+            .find(|p| p.key == key)
+            .map(|p| p.counters.suspended)
+    }
+
+    #[test]
+    fn suspend_and_resume_are_visible_to_the_sampler() {
+        let v = Victim::spawn();
+        let key = v.key();
+        let mut sampler = crate::Sampler::default();
+        let _ = sampler.sample();
+        assert_eq!(sampled_suspended(&mut sampler, key), Some(false));
+
+        suspend_process(key).unwrap();
+        assert_eq!(sampled_suspended(&mut sampler, key), Some(true), "挂起后下一次采样应读到已挂起");
+        resume_process(key).unwrap();
+        assert_eq!(sampled_suspended(&mut sampler, key), Some(false), "恢复后应回到未挂起");
+    }
+
+    #[test]
+    fn suspend_is_counted_so_resume_must_match() {
+        let v = Victim::spawn();
+        let key = v.key();
+        let mut sampler = crate::Sampler::default();
+        let _ = sampler.sample();
+        suspend_process(key).unwrap();
+        suspend_process(key).unwrap();
+        resume_process(key).unwrap();
+        assert_eq!(
+            sampled_suspended(&mut sampler, key),
+            Some(true),
+            "挂起两次后恢复一次仍是挂起（计数式），所以界面要避免重复挂起"
+        );
+        resume_process(key).unwrap();
+        assert_eq!(sampled_suspended(&mut sampler, key), Some(false));
+    }
+
+    #[test]
+    fn suspend_rejects_idle_system_and_self() {
+        let own = ProcessKey { pid: std::process::id(), create_time: 1 };
+        for pid in [0, 4] {
+            assert_eq!(
+                suspend_process(ProcessKey { pid, create_time: 1 }),
+                Err(ProcessControlError::Protected)
+            );
+        }
+        assert_eq!(suspend_process(own), Err(ProcessControlError::Protected));
+        assert!(suspend_protected_pid(0, 100) && suspend_protected_pid(4, 100) && suspend_protected_pid(100, 100));
+        assert!(!suspend_protected_pid(8, 100));
+    }
+
+    #[test]
+    fn suspend_and_resume_gone_process_is_gone() {
+        let key = {
+            let v = Victim::spawn();
+            v.key()
+        };
+        assert_eq!(suspend_process(key), Err(ProcessControlError::Gone));
+        assert_eq!(resume_process(key), Err(ProcessControlError::Gone));
+    }
+
+    #[test]
+    fn suspend_wrong_create_time_is_gone() {
+        let v = Victim::spawn();
+        let mut key = v.key();
+        key.create_time += 1;
+        assert_eq!(suspend_process(key), Err(ProcessControlError::Gone), "PID 被复用时不能挂起新进程");
+    }
+
+    #[test]
+    fn control_state_reports_suspend_permission() {
+        let v = Victim::spawn();
+        let state = control_state(v.key()).unwrap();
+        assert_eq!(state.suspend, Ok(()), "自己启动的子进程应可挂起");
+    }
+
+    #[test]
+    fn still_suspended_follows_the_process_state() {
+        let v = Victim::spawn();
+        let key = v.key();
+        assert_eq!(still_suspended(&[]), Vec::<ProcessKey>::new());
+        assert_eq!(still_suspended(&[key]), Vec::<ProcessKey>::new(), "未挂起");
+        suspend_process(key).unwrap();
+        assert_eq!(still_suspended(&[key]), vec![key]);
+        let reused = ProcessKey { create_time: key.create_time + 1, ..key };
+        assert_eq!(still_suspended(&[reused]), Vec::<ProcessKey>::new(), "创建时间不同视为另一个进程");
+        resume_process(key).unwrap();
+        assert_eq!(still_suspended(&[key]), Vec::<ProcessKey>::new());
     }
 }
