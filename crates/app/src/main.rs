@@ -32,12 +32,13 @@ thread_local! {
 const RENDERER: &str = if cfg!(feature = "renderer-software") { "software" } else { "femtovg" };
 
 /// 开发用参数：测量、截图与 `--allow-multiple` 不受单实例限制，也不占用单实例锁。
-const UNRESTRICTED_FLAGS: [&str; 6] = [
+const UNRESTRICTED_FLAGS: [&str; 7] = [
     "--measure-startup",
     "--screenshot",
     "--menu-shot",
     "--menu-action",
     "--service-action",
+    "--export-csv",
     "--allow-multiple",
 ];
 
@@ -173,6 +174,11 @@ fn main() -> Result<(), slint::PlatformError> {
     // `--service-action <start|stop|restart|goto>:<服务名>`：自动化验收服务页（不弹 UAC，结果写日志）。
     if let Some(spec) = std::env::args().skip_while(|a| a != "--service-action").nth(1) {
         controller.queue_service_action(&spec);
+    }
+
+    // `--export-csv <process|performance>=<路径>`：自动化验收 CSV 导出（不弹对话框，写完即退出，读写设置与正常启动相同）。
+    if let Some(spec) = std::env::args().skip_while(|a| a != "--export-csv").nth(1) {
+        controller.queue_export(&spec);
     }
 
     // 其他实例请求唤起时，在界面线程还原并前置窗口（窗口隐藏在托盘时先重新显示）。

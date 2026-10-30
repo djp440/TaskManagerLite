@@ -232,6 +232,158 @@ pub fn unsafe_location_note(why: &UnsafeReason) -> String {
     )
 }
 
+// ---- 导出为 CSV 与复制所选行（issue #82） ----
+// 进程列表的列标题复用界面已有的（基本列来自 Slint 的 `Columns.title-*`，详细信息列来自 `details::title`），
+// 这里只有导出新增的文案。
+
+/// 导出的内容种类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportKind {
+    Process,
+    Performance,
+}
+
+/// 分组视图中进程所属的组（导出的“分组”列）。
+pub fn group_name(group: tml_core::Group) -> &'static str {
+    match group {
+        tml_core::Group::Apps => "应用",
+        tml_core::Group::Background => "后台进程",
+    }
+}
+
+/// 分组视图导出的“分组”列标题。
+pub fn export_group_title() -> &'static str {
+    "分组"
+}
+
+/// 树形、分组视图导出的“层级”列标题（0 为根，1 为根的子进程，依此类推）。
+pub fn export_depth_title() -> &'static str {
+    "层级"
+}
+
+/// 默认文件名里的前缀（后面接时间戳与 `.csv`）。
+pub fn export_file_stem(kind: ExportKind) -> &'static str {
+    match kind {
+        ExportKind::Process => "进程列表",
+        ExportKind::Performance => "性能快照",
+    }
+}
+
+/// 保存对话框的标题。
+pub fn export_save_title(kind: ExportKind) -> &'static str {
+    match kind {
+        ExportKind::Process => "导出进程列表为 CSV",
+        ExportKind::Performance => "导出性能快照为 CSV",
+    }
+}
+
+/// 保存对话框的文件类型：(显示名, 通配符)。
+pub fn export_filters() -> [(&'static str, &'static str); 2] {
+    [("CSV 文件", "*.csv"), ("所有文件", "*.*")]
+}
+
+/// 状态栏里的动作名（“操作失败：{动作}（{原因}）”）。
+pub fn export_action() -> &'static str {
+    "导出 CSV"
+}
+
+/// 复制所选行的动作名。
+pub fn copy_row_action() -> &'static str {
+    "复制所选行"
+}
+
+/// 导出前无法生成表格的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportError {
+    /// 还没有采样到数据。
+    NoData,
+    /// 分组视图需要的窗口信息还没有到。
+    GroupNotReady,
+}
+
+pub fn export_error(e: ExportError) -> &'static str {
+    match e {
+        ExportError::NoData => "还没有采样到数据，请稍后再试",
+        ExportError::GroupNotReady => "分组视图的窗口信息尚未就绪，请稍后再试",
+    }
+}
+
+/// 复制所选行时没有可复制的行。
+pub fn no_selected_row() -> &'static str {
+    "没有选中的进程"
+}
+
+/// 写 CSV 文件失败的原因（系统给出的描述原样显示，见模块说明）。
+pub fn export_write_error(file: &str, e: &SystemError) -> String {
+    format!("无法写入 {file}：{e}")
+}
+
+/// 导出的敏感列名之间的分隔。
+pub fn list_separator() -> &'static str {
+    "、"
+}
+
+/// 性能快照的行类型：当前数值，或时间窗口内的曲线数据。
+pub fn perf_row_kind(series: bool) -> &'static str {
+    if series { "曲线" } else { "当前" }
+}
+
+/// 性能快照的表头。
+pub fn perf_header() -> [&'static str; 8] {
+    ["类型", "资源", "实例", "指标", "时间", "距今（秒）", "数值", "单位"]
+}
+
+/// 性能快照里的指标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerfMetric {
+    CpuUsage,
+    MemoryUsed,
+    MemoryTotal,
+    MemoryPercent,
+    DiskActive,
+    DiskResponse,
+    DiskRead,
+    DiskWrite,
+    NetReceive,
+    NetSend,
+    GpuUsage,
+    GpuDedicated,
+    GpuShared,
+}
+
+pub fn perf_metric(m: PerfMetric) -> &'static str {
+    match m {
+        PerfMetric::CpuUsage | PerfMetric::GpuUsage => "利用率",
+        PerfMetric::MemoryUsed => "已用",
+        PerfMetric::MemoryTotal => "总量",
+        PerfMetric::MemoryPercent => "使用率",
+        PerfMetric::DiskActive => "活动时间",
+        PerfMetric::DiskResponse => "平均响应时间",
+        PerfMetric::DiskRead => "读取速度",
+        PerfMetric::DiskWrite => "写入速度",
+        PerfMetric::NetReceive => "接收",
+        PerfMetric::NetSend => "发送",
+        PerfMetric::GpuDedicated => "专用显存",
+        PerfMetric::GpuShared => "共享显存",
+    }
+}
+
+/// 指标的单位（数值列是不带单位的原始数）。
+pub fn perf_unit(m: PerfMetric) -> &'static str {
+    match m {
+        PerfMetric::CpuUsage
+        | PerfMetric::MemoryPercent
+        | PerfMetric::DiskActive
+        | PerfMetric::GpuUsage => "%",
+        PerfMetric::MemoryUsed
+        | PerfMetric::MemoryTotal
+        | PerfMetric::GpuDedicated
+        | PerfMetric::GpuShared => "字节",
+        PerfMetric::DiskResponse => "毫秒",
+        PerfMetric::DiskRead | PerfMetric::DiskWrite | PerfMetric::NetReceive | PerfMetric::NetSend => "字节/秒",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,5 +631,19 @@ mod tests {
     fn debugger_value_text_and_non_string() {
         assert_eq!(debugger_value(&DebuggerValue::Text("x.exe".into())), "x.exe");
         assert_eq!(debugger_value(&DebuggerValue::NonString { value_type: 3 }), "<非字符串值，类型 3>");
+    }
+
+    #[test]
+    fn export_texts() {
+        assert_eq!(group_name(tml_core::Group::Apps), "应用");
+        assert_eq!(group_name(tml_core::Group::Background), "后台进程");
+        assert_eq!(export_filters()[0], ("CSV 文件", "*.csv"));
+        assert_eq!(perf_header().len(), 8);
+        assert_eq!(perf_unit(PerfMetric::NetReceive), "字节/秒");
+        assert_eq!(perf_metric(PerfMetric::CpuUsage), perf_metric(PerfMetric::GpuUsage));
+        assert_eq!(
+            export_write_error("a.csv", &SystemError::Win32(5)),
+            format!("无法写入 a.csv：{}", std::io::Error::from_raw_os_error(5))
+        );
     }
 }

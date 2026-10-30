@@ -5,6 +5,7 @@ mod autostart;
 pub mod startup;
 mod clipboard;
 mod control;
+pub mod csv;
 mod cpu;
 mod details;
 mod diskio;

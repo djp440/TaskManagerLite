@@ -352,6 +352,14 @@ export component SettingsPage inherits Rectangle {
                 }
 
                 SettingRow {
+                    title: @tr("复制所选行");
+                    description: @tr("仅进程页，复制为制表符分隔的文字；搜索框里按下则复制所选文字。");
+                    KeyCap {
+                        text: "Ctrl+C";
+                    }
+                }
+
+                SettingRow {
                     title: @tr("结束选中的进程");
                     description: @tr("仅进程页。");
                     KeyCap {

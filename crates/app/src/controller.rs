@@ -10,13 +10,14 @@ use slint::{
     SharedString, VecModel,
 };
 use tml_core::{
-    EndError, Group, GroupHeader, MemoryHardware, MemoryStatus, Process, ProcessKey,
+    EndError, GroupHeader, MemoryHardware, MemoryStatus, Process, ProcessKey,
     ProcessSnapshot, Sample, SortKey, SystemMetrics, ViewMode, ViewOptions, ViewRow,
     build_group_view, build_view, end_process, tree_from,
 };
 
 mod columns;
 mod cpu;
+mod export;
 mod memory;
 mod mini;
 mod process_menu;
@@ -52,6 +53,8 @@ const STATUS_ERROR: i32 = 5;
 
 const CONFIRM_CRITICAL: i32 = 1;
 const CONFIRM_TREE: i32 = 2;
+/// 导出的 CSV 含命令行、路径等敏感列：导出前提示（`name` 为列名）。
+const CONFIRM_EXPORT: i32 = 3;
 /// 隐藏启动时托盘图标创建失败的重试次数（每秒一次）。
 const TRAY_RETRIES: u32 = 30;
 
@@ -61,6 +64,7 @@ pub struct Controller {
     /// 启动项页：最近一次枚举到的全部启动项与图标（未过滤）。
     startup_all: RefCell<Vec<(tml_core::startup::Entry, Option<tml_core::IconBitmap>)>>,
     services: services_page::ServicesState,
+    export: export::ExportState,
     ui: slint::Weak<AppWindow>,
     rows: Rc<VecModel<ProcRow>>,
     resources: Rc<VecModel<Resource>>,
@@ -181,10 +185,19 @@ fn view_mode_index(m: ViewMode) -> i32 {
 
 /// 分组标题行上显示的文字。
 fn group_title(h: GroupHeader) -> String {
-    match h.group {
-        Group::Apps => format!("应用 ({})", h.count),
-        Group::Background => format!("后台进程 ({})", h.count),
-    }
+    format!("{} ({})", crate::texts::group_name(h.group), h.count)
+}
+
+/// 进程行显示的 (CPU, 内存, 磁盘, GPU)：分组视图的应用行是自身加全部后代的合计，其余行是各自的值。
+fn row_values(p: &Process, r: &ViewRow) -> (f32, u64, f64, Option<f32>) {
+    r.totals.map_or((p.cpu_usage, p.private_working_set, p.disk_rate, p.gpu_usage), |t| {
+        (t.cpu_usage, t.private_working_set, t.disk_rate, t.gpu_usage)
+    })
+}
+
+/// CPU、内存、磁盘三列的单元格文字；进程列表与“导出为 CSV”共用，保证两边一致。
+fn basic_texts(cpu: f32, memory: u64, disk: f64) -> [String; 3] {
+    [format::percent(cpu), format::megabytes(memory), format::disk_rate(disk)]
 }
 
 fn sort_index(k: SortKey) -> i32 {
@@ -261,6 +274,7 @@ impl Controller {
             startup_entries: RefCell::new(Vec::new()),
             startup_all: RefCell::new(Vec::new()),
             services: Default::default(),
+            export: Default::default(),
             ui: ui.as_weak(),
             rows,
             resources,
@@ -308,6 +322,7 @@ impl Controller {
         c.bind_startup(ui);
         c.bind_services(ui);
         c.bind_run_task(ui);
+        c.bind_export(ui);
         ui.set_pinned(settings.always_on_top);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
         if settings.interval_index != 1 {
@@ -1160,17 +1175,14 @@ impl Controller {
                     selected_index = i as i32;
                 }
                 // 分组视图的应用行显示“自身 + 全部后代”的合计，其余行显示各自的值。
-                let (cpu, memory, disk, gpu) = r
-                    .totals
-                    .map_or((p.cpu_usage, p.private_working_set, p.disk_rate, p.gpu_usage), |t| {
-                        (t.cpu_usage, t.private_working_set, t.disk_rate, t.gpu_usage)
-                    });
+                let (cpu, memory, disk, gpu) = row_values(p, r);
+                let [cpu_text, memory_text, disk_text] = basic_texts(cpu, memory, disk);
                 ProcRow {
                     name: p.name.as_str().into(),
                     pid: p.key.pid as i32,
-                    cpu: format::percent(cpu).into(),
-                    memory: format::megabytes(memory).into(),
-                    disk: format::disk_rate(disk).into(),
+                    cpu: cpu_text.into(),
+                    memory: memory_text.into(),
+                    disk: disk_text.into(),
                     cpu_heat: (cpu / 40.0).min(1.0),
                     memory_heat: (memory as f32 / (1024.0 * 1024.0 * 1024.0)).min(1.0),
                     disk_heat: (disk / (20.0 * 1024.0 * 1024.0)).min(1.0) as f32,
@@ -1309,7 +1321,12 @@ impl Controller {
 
     fn confirm(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
+        let kind = ui.get_confirm_kind();
         ui.set_confirm_kind(0);
+        if kind == CONFIRM_EXPORT {
+            self.confirm_export();
+            return;
+        }
         let keys = std::mem::take(&mut self.state.borrow_mut().pending);
         let name = ui.get_confirm_name().to_string();
         self.end(keys, &name);

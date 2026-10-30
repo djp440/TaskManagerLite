@@ -783,7 +783,7 @@ pub fn run_menu(ui: &AppWindow, spec: &str, warmup: Duration) {
 }
 
 /// `--menu-action <动作>:<pid>`：选中指定 PID 的进程并直接触发一个右键菜单动作
-/// （`open-location`、`properties`、`copy-path`、`copy-command-line`），用于 `scripts/test-menu-actions.ps1`
+/// （`open-location`、`properties`、`copy-path`、`copy-command-line`、`copy-row`），用于 `scripts/test-menu-actions.ps1`
 /// 自动验收，免去点击原生菜单。末尾可加 `:group` 先切到分组视图（验证分组视图里选中的是正确的进程）。
 /// 动作执行后不退出，由脚本检查结果并结束进程。
 pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
@@ -823,6 +823,7 @@ pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
                 "properties" => menu.invoke_show_properties(),
                 "copy-path" => menu.invoke_copy_path(),
                 "copy-command-line" => menu.invoke_copy_command_line(),
+                "copy-row" => menu.invoke_copy_row(),
                 other => eprintln!("未知动作 {other}"),
             }
         });

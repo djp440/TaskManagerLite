@@ -244,6 +244,16 @@ impl ResourceSet {
         self.send.entry(n.id.clone()).or_default().push(now, n.send);
     }
 
+    /// 网卡接收、发送的曲线历史（导出用）。
+    pub fn network_histories(&self, id: &str) -> (Option<&History>, Option<&History>) {
+        (self.receive.get(id), self.send.get(id))
+    }
+
+    /// GPU 专用、共享显存的曲线历史（导出用）。
+    pub fn gpu_memory_histories(&self, id: &str) -> Option<&[History; 2]> {
+        self.gpu_memory.get(id)
+    }
+
     pub fn network_stats(&self, id: &str, now: Instant) -> String {
         let describe = |map: &HashMap<String, History>| map.get(id).and_then(|h| h.window_stats(now))
             .map(|(min,max,mean)| format!("峰值 {} · 谷值 {} · 均值 {}", crate::format::rate(max), crate::format::rate(min), crate::format::rate(mean)))

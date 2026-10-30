@@ -37,7 +37,7 @@ pub fn availability(path: Option<&Path>, command_line: Option<&str>) -> Availabi
 }
 
 /// 菜单动作失败时在状态栏显示的说明（前面由界面加上“操作失败：”）。
-fn failure(action: &str, reason: &str) -> String {
+pub(super) fn failure(action: &str, reason: &str) -> String {
     format!("{action}（{reason}）")
 }
 
@@ -76,7 +76,7 @@ impl Controller {
         menu.set_can_show_properties(a.properties);
     }
 
-    fn report(&self, kind: i32, arg: String) {
+    pub(super) fn report(&self, kind: i32, arg: String) {
         if let Some(ui) = self.ui.upgrade() {
             ui.set_status_arg(arg.into());
             ui.set_status_kind(kind);

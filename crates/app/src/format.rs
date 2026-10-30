@@ -69,6 +69,18 @@ impl History {
         Some((values.iter().copied().fold(f64::INFINITY, f64::min), values.iter().copied().fold(0.0, f64::max), values.iter().sum::<f64>() / values.len() as f64))
     }
 
+    /// 当前窗口内的有效样本：(距 `now` 的秒数, 值)，旧的在前。
+    /// 不含采样中断的断点与窗口外用于左边缘连线的过期点；导出曲线数据用。
+    pub fn samples(&self, now: Instant) -> Vec<(f64, f64)> {
+        self.points
+            .iter()
+            .filter_map(|&(at, v)| {
+                let age = now.saturating_duration_since(at);
+                v.filter(|v| v.is_finite() && age <= WINDOW).map(|v| (age.as_secs_f64(), v))
+            })
+            .collect()
+    }
+
     pub fn max(&self) -> f64 {
         self.points.iter().filter_map(|p| p.1).fold(0.0, f64::max)
     }
@@ -130,6 +142,19 @@ mod tests {
         h.push(t + Duration::from_secs(61), Some(30.0));
         assert_eq!(h.window_stats(t + Duration::from_secs(61)), Some((10.0, 30.0, 20.0)));
         assert_eq!(h.window_stats(t + Duration::from_secs(122)), None);
+    }
+
+    #[test]
+    fn samples_skip_gaps_and_expired_edge_point() {
+        let t = Instant::now();
+        let mut h = History::default();
+        h.push(t, Some(999.0));
+        h.push(t + Duration::from_secs(2), Some(10.0));
+        h.push(t + Duration::from_secs(3), None);
+        h.push(t + Duration::from_secs(61), Some(30.0));
+        // 第一个点距 now 61 秒，已出窗口；断点不导出。
+        assert_eq!(h.samples(t + Duration::from_secs(61)), vec![(59.0, 10.0), (0.0, 30.0)]);
+        assert!(h.samples(t + Duration::from_secs(200)).is_empty());
     }
 
     #[test]
