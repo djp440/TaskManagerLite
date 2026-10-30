@@ -26,7 +26,7 @@ use crate::{AppWindow, MiniWindow, OpacityChoice, placement};
 /// 迷你窗口的逻辑宽度（与 mini-window.slint 一致），用于第一次进入时计算默认位置。
 const MINI_WIDTH: f32 = 250.0;
 
-fn hwnd_of(window: &slint::Window) -> Option<HWND> {
+pub(super) fn hwnd_of(window: &slint::Window) -> Option<HWND> {
     let handle = window.window_handle();
     match HasWindowHandle::window_handle(&handle).ok()?.as_raw() {
         RawWindowHandle::Win32(h) => Some(HWND(h.hwnd.get() as *mut _)),

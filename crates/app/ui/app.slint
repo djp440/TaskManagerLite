@@ -13,6 +13,8 @@ import { StartupPage, StartupData, StartupRow } from "startup-page.slint";
 export { StartupData, StartupRow }
 import { ServicesPage, ServiceData, ServiceRow } from "services-page.slint";
 export { ServiceData, ServiceRow }
+import { RunTaskData, RunTaskDialog } from "run-task.slint";
+export { RunTaskData }
 
 export { ColumnLayout, MemoryView, ProcRow, Resource, ResourceKind, ResourceTint, StatItem, Columns, ProcessMenu, MiniWindow, OpacityChoice, SettingsData }
 export { CoreGraph, CpuData, GridLayout } from "cpu-detail.slint";
@@ -335,6 +337,26 @@ export component AppWindow inherits Window {
         return false;
     }
 
+    // Ctrl+N 与侧边栏的“运行新任务”：打开“运行新任务”对话框（已打开时不再打开第二个）。
+    function open-run-task() {
+        if RunTaskData.open {
+            return;
+        }
+        RunTaskData.input = "";
+        RunTaskData.error = "";
+        RunTaskData.as-admin = false;
+        RunTaskData.open = true;
+        root.ui-event("run-task open");
+        RunTaskData.opened();
+    }
+
+    // 关闭“运行新任务”对话框并把焦点还给列表（取消、Esc，或 Rust 在启动成功后调用）。
+    public function close-run-task() {
+        RunTaskData.open = false;
+        root.ui-event("run-task close");
+        keys.focus();
+    }
+
     // F5：复用各页面进入时的刷新入口；进程页与性能页立即补采一次。
     function refresh-page() {
         root.ui-event("refresh page=\{root.page}");
@@ -378,6 +400,18 @@ export component AppWindow inherits Window {
                     return accept;
                 }
                 return reject;
+            }
+            if RunTaskData.open {
+                // 对话框自己的输入框处理按键；焦点意外留在这里时 Esc 仍能关闭它。
+                if event.text == Key.Escape {
+                    root.close-run-task();
+                    return accept;
+                }
+                return reject;
+            }
+            if event.modifiers.control && (event.text == "n" || event.text == "N") {
+                root.open-run-task();
+                return accept;
             }
             if event.modifiers.control && (event.text == "f" || event.text == "F") {
                 root.focus-search();
@@ -440,6 +474,9 @@ export component AppWindow inherits Window {
                     can-toggle: root.width >= 900px;
                     page-selected(p) => {
                         root.page = p;
+                    }
+                    run-clicked => {
+                        root.open-run-task();
                     }
                     settings-clicked => {
                         root.toggle-settings();
@@ -839,6 +876,12 @@ export component AppWindow inherits Window {
         cancelled => {
             root.confirm-kind = 0;
             keys.focus();
+        }
+    }
+
+    if RunTaskData.open: RunTaskDialog {
+        cancelled => {
+            root.close-run-task();
         }
     }
 

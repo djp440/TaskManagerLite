@@ -344,6 +344,14 @@ export component SettingsPage inherits Rectangle {
                 }
 
                 SettingRow {
+                    title: @tr("运行新任务");
+                    description: @tr("打开“运行新任务”对话框，也可点侧边栏的“运行新任务”。");
+                    KeyCap {
+                        text: "Ctrl+N";
+                    }
+                }
+
+                SettingRow {
                     title: @tr("结束选中的进程");
                     description: @tr("仅进程页。");
                     KeyCap {

@@ -13,7 +13,8 @@ use tml_core::ConnectionKind;
 use tml_core::services::{Action, ServiceError, ServiceState, StartType};
 use tml_core::startup::{SourceError, StartupError, StartupSource};
 use tml_core::{
-    AutostartError, DebuggerValue, ElevationError, IfeoError, MediaType, ShellError, UnsafeReason,
+    AutostartError, DebuggerValue, ElevationError, IfeoError, MediaType, RunError, ShellError, SystemError,
+    UnsafeReason,
 };
 
 /// 服务状态（服务页“状态”列）。
@@ -134,6 +135,27 @@ pub fn shell_error(e: &ShellError) -> String {
     }
 }
 
+/// “运行新任务”对话框里显示的失败原因。
+pub fn run_error(e: &RunError) -> String {
+    match e {
+        RunError::Empty => "请输入程序、文件夹、文档或网址".into(),
+        RunError::Cancelled => "已取消：没有在 UAC 对话框中允许以管理员权限运行".into(),
+        // 2 找不到文件，3 找不到路径。
+        RunError::System(SystemError::Win32(2 | 3)) => "找不到指定的程序、文件、文件夹或网址，请检查输入是否正确".into(),
+        RunError::System(e) => format!("无法启动：{e}"),
+    }
+}
+
+/// “浏览…”文件选择对话框的标题。
+pub fn browse_title() -> &'static str {
+    "选择要运行的程序或文件"
+}
+
+/// “浏览…”文件选择对话框的文件类型：(显示名, 通配符)。
+pub fn browse_filters() -> [(&'static str, &'static str); 2] {
+    [("程序", "*.exe;*.com;*.bat;*.cmd;*.msc;*.lnk"), ("所有文件", "*.*")]
+}
+
 /// 开机启动操作失败的原因（“无法读取开机启动状态：{原因}”“无法修改开机启动：{原因}”）。
 pub fn autostart_error(e: &AutostartError) -> String {
     match e {
@@ -214,7 +236,6 @@ pub fn unsafe_location_note(why: &UnsafeReason) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use tml_core::SystemError;
 
     /// 下面所有期望字符串都取自改动前核心库里的字面量（`git show HEAD:crates/core/src/...`），逐字相同。
     #[test]
@@ -358,6 +379,20 @@ mod tests {
         assert_eq!(shell_error(&failed("")), "系统调用失败");
         assert_eq!(shell_error(&failed("  ")), "系统调用失败");
         assert_eq!(shell_error(&ShellError::ShellExecute(2)), "系统调用失败：ShellExecute 返回 2");
+    }
+
+    #[test]
+    fn run_errors_are_readable() {
+        assert_eq!(run_error(&RunError::Empty), "请输入程序、文件夹、文档或网址");
+        assert!(run_error(&RunError::Cancelled).contains("UAC"));
+        let not_found = "找不到指定的程序、文件、文件夹或网址，请检查输入是否正确";
+        assert_eq!(run_error(&RunError::System(SystemError::Win32(2))), not_found);
+        assert_eq!(run_error(&RunError::System(SystemError::Win32(3))), not_found);
+        let denied = run_error(&RunError::System(SystemError::Win32(5)));
+        assert!(denied.starts_with("无法启动：") && denied.contains("5"), "{denied}");
+        let other = SystemError::Other { code: -2147467259, message: "未指定的错误".into() };
+        assert_eq!(run_error(&RunError::System(other)), "无法启动：未指定的错误");
+        assert_eq!(browse_filters()[1], ("所有文件", "*.*"));
     }
 
     #[test]

@@ -20,6 +20,7 @@ mod cpu;
 mod memory;
 mod mini;
 mod process_menu;
+mod run_task;
 mod services_page;
 mod settings_page;
 mod startup_page;
@@ -306,6 +307,7 @@ impl Controller {
         c.bind_settings(ui);
         c.bind_startup(ui);
         c.bind_services(ui);
+        c.bind_run_task(ui);
         ui.set_pinned(settings.always_on_top);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
         if settings.interval_index != 1 {

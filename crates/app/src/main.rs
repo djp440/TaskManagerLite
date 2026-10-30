@@ -2,6 +2,7 @@
 
 mod controller;
 mod details;
+mod file_dialog;
 mod format;
 mod icons;
 mod logging;

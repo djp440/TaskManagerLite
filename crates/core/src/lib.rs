@@ -20,6 +20,7 @@ pub use network::{ConnectionKind, NetworkAdapter};
 mod procinfo;
 mod sampler;
 pub mod services;
+mod runtask;
 mod shellops;
 mod snapshot;
 mod system;
@@ -42,6 +43,7 @@ pub use instance::{Acquired, SingleInstance, acquire, activate_own_window, is_re
 pub use memory::{MemoryHardware, MemoryStatus};
 pub use procinfo::{command_line, image_path, image_path_of};
 pub use sampler::{DiskSource, Sample, Sampler, Scope};
+pub use runtask::{Command as RunCommand, RunError, expand_env, parse_command, parse_command_with, run_task};
 pub use shellops::{ShellError, reveal_in_explorer, search_online, search_url, show_properties};
 pub use snapshot::{Process, ProcessKey, ProcessSnapshot};
 pub use system::SystemMetrics;

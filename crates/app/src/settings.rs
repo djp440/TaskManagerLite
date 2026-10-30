@@ -123,6 +123,8 @@ pub struct Settings {
     /// 左侧边栏折叠为仅图标。默认展开；窗口过窄时界面会自行收成图标，不改这个值。
     pub sidebar_collapsed: bool,
     pub mini: MiniSettings,
+    /// “运行新任务”的输入历史，最新在前，最多 [`RUN_HISTORY_MAX`] 条。
+    pub run_history: Vec<String>,
     /// 本版本不认识的顶层字段，保存时原样写回。
     extra: Map<String, Value>,
 }
@@ -148,9 +150,28 @@ impl Default for Settings {
             theme: 0,
             sidebar_collapsed: false,
             mini: MiniSettings::default(),
+            run_history: Vec::new(),
             extra: Map::new(),
         }
     }
+}
+
+/// 运行新任务的输入历史保留条数。
+pub const RUN_HISTORY_MAX: usize = 10;
+/// 单条历史的最大字符数；更长的输入（几乎不可能是手敲的命令）不进历史。
+const RUN_HISTORY_ENTRY_MAX: usize = 1024;
+
+/// 把一次成功的输入记入历史：去掉首尾空白，忽略空输入与超长输入，同一条（不区分大小写）移到最前，
+/// 只保留最近 [`RUN_HISTORY_MAX`] 条。
+pub fn push_run_history(history: &mut Vec<String>, input: &str) {
+    let input = input.trim();
+    if input.is_empty() || input.chars().count() > RUN_HISTORY_ENTRY_MAX {
+        return;
+    }
+    let key = input.to_lowercase();
+    history.retain(|h| h.to_lowercase() != key);
+    history.insert(0, input.to_owned());
+    history.truncate(RUN_HISTORY_MAX);
 }
 
 // 顶层字段名。新增字段时同步加入 KNOWN。
@@ -173,6 +194,7 @@ const KNOWN: &[&str] = &[
     "theme",
     "sidebar_collapsed",
     "mini",
+    "run_history",
 ];
 
 /// `theme` 字段的取值，下标即 [`Settings::theme`]。
@@ -337,6 +359,12 @@ impl Settings {
         if let Some(b) = o.get("accurate_disk_io").and_then(Value::as_bool) {
             s.accurate_disk_io = b;
         }
+        // 历史逐条容错：非字符串、空串与重复项被跳过，次序与文件一致（最新在前），最多保留若干条。
+        if let Some(list) = o.get("run_history").and_then(Value::as_array) {
+            for text in list.iter().filter_map(Value::as_str).rev() {
+                push_run_history(&mut s.run_history, text);
+            }
+        }
         if let Some(b) = o.get("always_on_top").and_then(Value::as_bool) {
             s.always_on_top = b;
         }
@@ -413,6 +441,7 @@ impl Settings {
         m.insert("on_top".into(), self.mini.on_top.into());
         m.insert("opacity".into(), self.mini.opacity.into());
         o.insert("mini".into(), Value::Object(m));
+        o.insert("run_history".into(), Value::Array(self.run_history.iter().cloned().map(Value::String).collect()));
         let mut text = serde_json::to_string_pretty(&Value::Object(o)).unwrap_or_default();
         text.push('\n');
         text
@@ -521,6 +550,7 @@ mod tests {
             theme: 2,
             sidebar_collapsed: true,
             mini: MiniSettings { active: true, position: Some((-1500, 40)), on_top: false, opacity: 80 },
+            run_history: vec!["notepad".into(), r#""C:\Program Files\x\a.exe" --flag"#.into()],
             extra: Map::new(),
         }
     }
@@ -535,6 +565,53 @@ mod tests {
         assert_eq!(s.mini.opacity, 70);
         assert!(s.mini.on_top);
         assert_eq!(parse(r#"{"mini": true}"#).mini, MiniSettings::default());
+    }
+
+    #[test]
+    fn 运行历史缺字段或类型不对时按空处理() {
+        assert!(Settings::default().run_history.is_empty());
+        assert!(parse("{}").run_history.is_empty());
+        for bad in ["null", "\"notepad\"", "5", "{\"a\": 1}", "[1, null, {}]"] {
+            let s = parse(&format!("{{\"run_history\": {bad}, \"view\": \"tree\"}}"));
+            assert!(s.run_history.is_empty(), "{bad}");
+            assert_eq!(s.view, ViewMode::Tree, "{bad}：不影响其他设置");
+        }
+        // 旧版文件（没有这个字段）保存后带上空数组。
+        let out: Value = serde_json::from_str(&parse(r#"{"view": "tree"}"#).to_json()).unwrap();
+        assert_eq!(out["run_history"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn 运行历史读取时去重截断并保持顺序() {
+        let s = parse(r#"{"run_history": ["b", 3, " ", "a", "B", "c", ""]}"#);
+        assert_eq!(s.run_history, vec!["b", "a", "c"], "跳过非字符串与空白，重复项保留靠前的那条");
+        let many: Vec<String> = (0..25).map(|i| format!("p{i}")).collect();
+        let s = parse(&serde_json::json!({ "run_history": many }).to_string());
+        assert_eq!(s.run_history.len(), RUN_HISTORY_MAX);
+        assert_eq!(s.run_history[0], "p0");
+        assert_eq!(s.run_history[RUN_HISTORY_MAX - 1], format!("p{}", RUN_HISTORY_MAX - 1));
+    }
+
+    #[test]
+    fn 运行历史最新在前且去重并限长() {
+        let mut h = Vec::new();
+        for t in ["a", "b", "c"] {
+            push_run_history(&mut h, t);
+        }
+        assert_eq!(h, vec!["c", "b", "a"]);
+        push_run_history(&mut h, "  A  ");
+        assert_eq!(h, vec!["A", "c", "b"], "重复项（不区分大小写、忽略首尾空白）移到最前");
+        push_run_history(&mut h, "   ");
+        push_run_history(&mut h, "");
+        assert_eq!(h.len(), 3, "空输入不进历史");
+        push_run_history(&mut h, &"x".repeat(2000));
+        assert_eq!(h.len(), 3, "超长输入不进历史");
+        for i in 0..20 {
+            push_run_history(&mut h, &format!("cmd{i}"));
+        }
+        assert_eq!(h.len(), RUN_HISTORY_MAX);
+        assert_eq!(h[0], "cmd19");
+        assert_eq!(h[RUN_HISTORY_MAX - 1], "cmd10");
     }
 
     #[test]
