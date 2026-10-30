@@ -1158,10 +1158,10 @@ impl Controller {
                     selected_index = i as i32;
                 }
                 // 分组视图的应用行显示“自身 + 全部后代”的合计，其余行显示各自的值。
-                let (cpu, memory, disk) = r
+                let (cpu, memory, disk, gpu) = r
                     .totals
-                    .map_or((p.cpu_usage, p.private_working_set, p.disk_rate), |t| {
-                        (t.cpu_usage, t.private_working_set, t.disk_rate)
+                    .map_or((p.cpu_usage, p.private_working_set, p.disk_rate, p.gpu_usage), |t| {
+                        (t.cpu_usage, t.private_working_set, t.disk_rate, t.gpu_usage)
                     });
                 ProcRow {
                     name: p.name.as_str().into(),
@@ -1182,7 +1182,7 @@ impl Controller {
                         .cloned()
                         .unwrap_or_else(|| self.blank_icon.clone()),
                     header: false,
-                    extra: Self::detail_cells(s, p),
+                    extra: Self::detail_cells(s, p, gpu),
                 }
             })
             .collect();
@@ -1399,6 +1399,7 @@ mod tests {
             cpu_usage: 0.0,
             private_working_set: 0,
             disk_rate: 0.0,
+            gpu_usage: None,
             critical: false,
             counters: Default::default(),
             info: None,

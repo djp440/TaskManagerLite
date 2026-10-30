@@ -24,6 +24,10 @@ pub struct Process {
     pub private_working_set: u64,
     /// 字节/秒。
     pub disk_rate: f64,
+    /// 该进程在所有 GPU 引擎上的最大利用率，0–100（口径见术语表“进程 GPU 占用”）。
+    /// `None`：未显示 GPU 列（不聚合）、GPU 计数器不可用或尚无有效基线；有计数器但进程无负载时为 `Some(0.0)`。
+    /// 由采样器在 `Sampler::track_gpu_processes` 开启时填入。
+    pub gpu_usage: Option<f32>,
     pub critical: bool,
     /// “详细信息”列的计数，随采样更新。
     pub counters: Counters,
@@ -91,6 +95,7 @@ impl Baseline {
                 cpu_usage,
                 private_working_set: r.private_working_set,
                 disk_rate,
+                gpu_usage: None,
                 critical,
                 counters,
                 info: None,

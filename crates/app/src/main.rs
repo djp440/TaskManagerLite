@@ -94,7 +94,7 @@ fn main() -> Result<(), slint::PlatformError> {
         placement::apply(&ui, &loaded);
     }
     log.line(format!("窗口组件创建 {:.1} ms", tml_core::ms_since_process_start()));
-    let sampler = sampling::spawn(loaded.view == tml_core::ViewMode::Group, loaded.accurate_disk_io, loaded.background_sampling, |sample| {
+    let sampler = sampling::spawn(loaded.view == tml_core::ViewMode::Group, details::needs_gpu(&loaded.details), loaded.accurate_disk_io, loaded.background_sampling, |sample| {
         let _ = slint::invoke_from_event_loop(move || {
             CONTROLLER.with(|c| {
                 if let Some(c) = c.borrow().as_ref() {

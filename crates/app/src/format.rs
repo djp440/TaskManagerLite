@@ -11,6 +11,11 @@ pub fn percent(v: f32) -> String {
     if v < 0.05 { "0%".into() } else { format!("{v:.1}%") }
 }
 
+/// 进程 GPU 占用；没有读数（未显示 GPU 列、无 GPU 或计数器不可用）时为“—”，有计数器但无负载为“0%”。
+pub fn gpu_percent(v: Option<f32>) -> String {
+    v.map_or_else(|| "—".into(), percent)
+}
+
 pub fn megabytes(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
 }

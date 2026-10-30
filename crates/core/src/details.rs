@@ -50,10 +50,12 @@ pub enum DetailColumn {
     Elevated,
     Description,
     Company,
+    /// 进程在所有 GPU 引擎上的最大利用率；只有显示这一列时才做进程级聚合。
+    Gpu,
 }
 
 impl DetailColumn {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::Status,
         Self::User,
         Self::Session,
@@ -71,6 +73,7 @@ impl DetailColumn {
         Self::Elevated,
         Self::Description,
         Self::Company,
+        Self::Gpu,
     ];
 
     /// 设置文件里使用的名字。
@@ -93,6 +96,7 @@ impl DetailColumn {
             Self::Elevated => "elevated",
             Self::Description => "description",
             Self::Company => "company",
+            Self::Gpu => "gpu",
         }
     }
 
@@ -415,6 +419,11 @@ pub(crate) fn compare(a: &Process, b: &Process, col: DetailColumn) -> Ordering {
             get(a).cmp(&get(b))
         }
         DetailColumn::Elevated => field(|i| i.elevated.map(u8::from)),
+        // 没有读数（None）排在最小一端，0% 比没有读数大。
+        DetailColumn::Gpu => match (a.gpu_usage, b.gpu_usage) {
+            (Some(x), Some(y)) => x.total_cmp(&y),
+            (x, y) => x.is_some().cmp(&y.is_some()),
+        },
     }
 }
 

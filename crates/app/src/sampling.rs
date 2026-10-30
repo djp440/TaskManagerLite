@@ -19,6 +19,8 @@ pub enum Command {
     Apps(bool),
     /// 是否用 ETW 统计进程磁盘速率（设置项 `accurate_disk_io`；需要管理员权限）。
     AccurateDisk(bool),
+    /// 是否按 PID 聚合进程级 GPU 占用（仅进程列表显示了 GPU 列时需要）。
+    Gpu(bool),
 }
 
 /// 当前应当怎样采样。
@@ -56,11 +58,13 @@ impl SamplerHandle {
 }
 
 /// `track_apps`：一开始就枚举应用窗口（设置里的视图模式是分组时，第一个快照就要带上）。
+/// `track_gpu`：设置里已显示 GPU 列，第一个快照就要带上进程级 GPU 占用。
 /// `accurate_disk`：设置里开启了 ETW 磁盘速率。
 /// `background`：设置里开启了后台继续采样（窗口不可见时只采系统指标）。
 /// `deliver` 在采样线程上调用，负责把快照投递到界面线程。
 pub fn spawn(
     track_apps: bool,
+    track_gpu: bool,
     accurate_disk: bool,
     background: bool,
     deliver: impl Fn(Sample) + Send + 'static,
@@ -71,6 +75,7 @@ pub fn spawn(
         .spawn(move || {
             let mut sampler = Sampler::default();
             sampler.track_apps(track_apps);
+            sampler.track_gpu_processes(track_gpu);
             sampler.set_accurate_disk(accurate_disk);
             let mut interval = Some(Duration::from_secs(1));
             let mut visible = true;
@@ -109,6 +114,11 @@ pub fn spawn(
                     Command::Background(on) => background = on,
                     Command::Mini(on) => mini = on,
                     Command::AccurateDisk(on) => sampler.set_accurate_disk(on),
+                    Command::Gpu(on) => {
+                        sampler.track_gpu_processes(on);
+                        // 刚显示 GPU 列时立即补采一次（暂停时也一样），不必等下一个采样间隔。
+                        forced = on;
+                    }
                     Command::Apps(on) => {
                         sampler.track_apps(on);
                         // 暂停时也补采一次，让刚切换的视图有数据。

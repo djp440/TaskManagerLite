@@ -26,6 +26,7 @@
 - 页面导航在左侧边栏（进程 / 性能 / 启动项 / 服务，设置在底部）：窗口宽度达 900 且未折叠时图标加文字（160px），否则只有图标（48px）；顶部菜单按钮折叠，状态存 `settings.json` 的 `sidebar_collapsed`。
 - 设置页（左侧边栏底部进入）：开机启动写 `HKCU\...\Run`（值 `"<exe>" --autostart`，状态以注册表为准，不写设置文件；环境变量 `TML_AUTOSTART_TEST_KEY` 改写到 `HKCU\Software\TaskManagerLite-test\...` 测试键）。`--autostart` 启动时：开启了 `close_to_tray` 就只建托盘图标、不显示窗口，否则最小化启动。端到端验收：`pwsh scripts/test-autostart.ps1`（隔离单实例名，不碰真实 Run 键）
 - 设置持久化：`%APPDATA%\TaskManagerLite\settings.json`（环境变量 `TML_SETTINGS_DIR` 可覆盖目录；`--screenshot`、`--measure-startup` 不读写）。端到端验收：`pwsh scripts/e2e-settings.ps1`（脚本用 `--allow-multiple` 启动，不受已运行实例影响）
+- 进程级 GPU 占用列（“详细信息”可选列 `gpu`，只在显示该列时才按 PID 聚合 `GPU Engine` 计数器，口径见 `GLOSSARY.md`）：探针 `cargo run -p tml-core --release --example process_gpu_probe -- --secs 10 [--pid N] [--top 8]`（CSV `t,pid,name,gpu`，无读数为 `none`）；测显示该列的常驻开销 `pwsh scripts/measure-idle.ps1 -Gpu`；人工验收见 `docs/checklist/issue-64.md`。
 - ETW 磁盘速率（设置项 `accurate_disk_io`，默认关闭，见 ADR-0004）端到端验收（**需提权终端**，未提权直接退出）：`pwsh scripts/test-etw-disk.ps1`；探针：`cargo run -p tml-core --release --example disk_probe -- --secs 20 [--no-etw] [--pid N]`（输出每进程磁盘速率 CSV，`source` 列区分 `etw`/`approx`）
 - 接管 Ctrl+Shift+Esc（IFEO，见 ADR 0003）：开关 `--register-taskmgr` / `--unregister-taskmgr` / `--taskmgr-status`（可加 `--force`）；端到端验收 `pwsh scripts/test-taskmgr-ifeo.ps1`（环境变量 `TML_IFEO_TEST_KEY` 改写到 HKCU 测试键，不碰 HKLM、不提权）
 - 测试：`cargo test -p tml-core -p tml-app`
