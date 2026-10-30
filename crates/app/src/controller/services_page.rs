@@ -1,7 +1,8 @@
 use super::*;
 use crate::{ServiceData, ServiceRow};
 use std::sync::{Arc, Mutex};
-use tml_core::services::{Action, Service, ServiceList};
+use crate::texts;
+use tml_core::services::{Action, Service, ServiceError, ServiceList};
 
 /// 服务页的页面编号（与 app.slint 中的 `page` 一致）。
 pub const SERVICES_PAGE: i32 = 4;
@@ -103,7 +104,7 @@ impl Controller {
         let Some(service) = self.selected_service() else { return };
         let name = service.display_name.clone();
         let hint = if tml_core::is_elevated() || !elevate { "" } else { "（需要管理员权限，请在 UAC 对话框中确认）" };
-        data.set_note(format!("正在{}服务“{name}”{hint}…", action.label()).into());
+        data.set_note(format!("正在{}服务“{name}”{hint}…", texts::service_action(action)).into());
         data.set_busy(true);
         self.services_work(Some((service.name, name, action, elevate)), false);
     }
@@ -119,8 +120,8 @@ impl Controller {
             .spawn(move || {
                 let note = action.map(|(name, display, action, elevate)| {
                     match tml_core::services::control(&name, action, elevate) {
-                        Ok(()) => format!("已{}服务“{display}”", action.label()),
-                        Err(e) => format!("无法{}服务“{display}”：{e}", action.label()),
+                        Ok(()) => format!("已{}服务“{display}”", texts::service_action(action)),
+                        Err(e) => format!("无法{}服务“{display}”：{}", texts::service_action(action), texts::service_error(&e)),
                     }
                 });
                 let started = Instant::now();
@@ -154,7 +155,7 @@ impl Controller {
         &self,
         seq: u64,
         note: Option<String>,
-        result: std::io::Result<Vec<Service>>,
+        result: Result<Vec<Service>, ServiceError>,
         elapsed: Duration,
     ) {
         let Some(ui) = self.ui.upgrade() else { return };
@@ -184,9 +185,9 @@ impl Controller {
             }
             Err(e) => {
                 if note.is_none() {
-                    data.set_note(format!("无法读取服务列表：{e}").into());
+                    data.set_note(format!("无法读取服务列表：{}", texts::service_error(&e)).into());
                 }
-                self.log.borrow_mut().line(format!("服务页 枚举失败 {e}"));
+                self.log.borrow_mut().line(format!("服务页 枚举失败 {}", texts::service_error(&e)));
             }
         }
         self.run_service_hook();
@@ -273,8 +274,8 @@ fn service_row(e: &Service) -> ServiceRow {
         name: e.name.as_str().into(),
         display_name: e.display_name.as_str().into(),
         description: e.config.description.as_str().into(),
-        state: e.state.label().into(),
-        start_type: e.config.start_type.label().into(),
+        state: texts::service_state(e.state).into(),
+        start_type: texts::start_type(e.config.start_type).into(),
         pid: e.pid as i32,
         group: e.config.group.as_str().into(),
         can_start: e.can_start(),

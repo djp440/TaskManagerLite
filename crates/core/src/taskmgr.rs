@@ -29,6 +29,8 @@ use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELL
 use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 use windows::core::{HRESULT, HSTRING, PCWSTR, PWSTR, w};
 
+use crate::error::SystemError;
+
 /// 真实的 IFEO 键（相对 `HKEY_LOCAL_MACHINE`）。
 const SYSTEM_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\Taskmgr.exe";
 const VALUE_NAME: &str = "Debugger";
@@ -61,30 +63,122 @@ pub mod exit {
     pub const OTHER_MISSING: i32 = 12;
 }
 
+/// `Debugger` 值的内容：字符串原文，或读不懂的非字符串类型。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DebuggerValue {
+    Text(String),
+    /// 非字符串类型的值（DWORD、二进制等），不是我们写的也读不懂：附注册表值类型号。
+    NonString { value_type: u32 },
+}
+
+impl DebuggerValue {
+    /// 字符串原文；非字符串类型返回 `None`。
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Self::Text(t) => Some(t),
+            Self::NonString { .. } => None,
+        }
+    }
+}
+
+impl From<&str> for DebuggerValue {
+    fn from(t: &str) -> Self {
+        Self::Text(t.to_owned())
+    }
+}
+
+impl From<String> for DebuggerValue {
+    fn from(t: String) -> Self {
+        Self::Text(t)
+    }
+}
+
+impl fmt::Display for DebuggerValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(t) => f.write_str(t),
+            Self::NonString { value_type } => write!(f, "<non-string value, type {value_type}>"),
+        }
+    }
+}
+
+/// exe 所在位置不安全的原因（登记前的位置检查，见 [`check_install_location`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnsafeReason {
+    /// 该路径的 DACL 为空（任何人可写）。
+    NoAcl { path: PathBuf },
+    /// 该路径的“允许”ACE 授予了宽泛主体（`who`，如 `Everyone`）写入权限。
+    BroadWrite { path: PathBuf, who: String },
+    /// 提权子进程里的位置检查未通过（具体路径在子进程中，拿不到）。
+    ElevatedCheckFailed,
+}
+
+/// 接管任务管理器的失败原因。界面层按枚举映射成显示文案；系统错误保留错误码。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IfeoError {
     AccessDenied,
     /// 已被别的程序登记（附其 `Debugger` 原值）。
-    Occupied(String),
+    Occupied(DebuggerValue),
     Cancelled,
-    /// exe 所在位置可被其他用户改写（附说明）。
-    UnsafeLocation(String),
+    /// exe 所在位置可被其他用户改写。
+    UnsafeLocation(UnsafeReason),
     /// 其他注册表错误（Win32 错误码）。
     Registry(u32),
-    Other(String),
+    /// 环境变量 [`TEST_KEY_ENV`] 的值不是合法的 Unicode。
+    TestKeyNotUnicode,
+    /// 环境变量 [`TEST_KEY_ENV`] 的值不以 [`TEST_KEY_PREFIX`] 开头或其后为空（附原值）。
+    TestKeyInvalid(String),
+    /// 找不到要登记的程序文件。
+    ExeNotFound(PathBuf),
+    /// 取不到本程序路径。
+    CurrentExeUnavailable(SystemError),
+    /// 启动提权子进程失败（用户取消 UAC 时是 [`Self::Cancelled`]）。
+    ElevationLaunchFailed(SystemError),
+    /// 提权子进程没有返回句柄。
+    ElevationNoHandle,
+    /// 等待提权子进程超时，结果未知，应重新读取登记状态。
+    ElevationTimeout,
+    /// 提权子进程以未知的非零退出码结束。
+    ElevationChildFailed(i32),
+    /// 读取路径的访问控制列表失败（附 Win32 错误码）。
+    AclUnreadable { path: PathBuf, code: u32 },
+    /// 读取 ACL 的长度等信息失败。
+    AclInfoFailed(SystemError),
+    /// 读不懂路径 ACL 里的第 `index` 条访问控制项。
+    AceUnreadable { path: PathBuf, index: u32 },
+    /// 解析不出路径 ACL 里第 `index` 条访问控制项的 SID。
+    SidUnparseable { path: PathBuf, index: u32 },
+    /// 创建后台线程失败（界面层使用）。
+    ThreadSpawnFailed(SystemError),
+    /// 其他系统调用失败。
+    System(SystemError),
 }
 
 impl fmt::Display for IfeoError {
+    /// 开发用的英文说明，不面向用户；界面文案由界面层按枚举映射。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AccessDenied => write!(f, "没有写入系统注册表的权限（需要管理员）"),
-            Self::Occupied(v) => write!(f, "已被其他程序登记：{v}"),
-            Self::Cancelled => write!(f, "已取消管理员授权"),
-            Self::UnsafeLocation(why) => {
-                write!(f, "exe 所在位置可被其他用户改写（{why}）。请用安装包安装（默认装到 Program Files）或移到受保护目录，或使用 --force")
-            }
-            Self::Registry(code) => write!(f, "注册表操作失败（错误码 {code}）"),
-            Self::Other(msg) => f.write_str(msg),
+            Self::AccessDenied => write!(f, "access denied writing the system registry"),
+            Self::Occupied(v) => write!(f, "already registered by another program: {v}"),
+            Self::Cancelled => write!(f, "elevation cancelled"),
+            Self::UnsafeLocation(UnsafeReason::NoAcl { path }) => write!(f, "{} has no ACL (anyone can write)", path.display()),
+            Self::UnsafeLocation(UnsafeReason::BroadWrite { path, who }) => write!(f, "{} grants write access to {who}", path.display()),
+            Self::UnsafeLocation(UnsafeReason::ElevatedCheckFailed) => write!(f, "install location check failed in the elevated child"),
+            Self::Registry(code) => write!(f, "registry operation failed (error {code})"),
+            Self::TestKeyNotUnicode => write!(f, "{TEST_KEY_ENV} is not valid Unicode"),
+            Self::TestKeyInvalid(k) => write!(f, "{TEST_KEY_ENV} must start with {TEST_KEY_PREFIX} and not be empty after it: {k}"),
+            Self::ExeNotFound(p) => write!(f, "program file not found: {}", p.display()),
+            Self::CurrentExeUnavailable(e) => write!(f, "cannot get current exe path: {e}"),
+            Self::ElevationLaunchFailed(e) => write!(f, "cannot start elevated child: {e}"),
+            Self::ElevationNoHandle => write!(f, "elevated child returned no handle"),
+            Self::ElevationTimeout => write!(f, "timed out waiting for the elevated child"),
+            Self::ElevationChildFailed(c) => write!(f, "elevated child failed (exit code {c})"),
+            Self::AclUnreadable { path, code } => write!(f, "cannot read ACL of {} (error {code})", path.display()),
+            Self::AclInfoFailed(e) => write!(f, "cannot read ACL info: {e}"),
+            Self::AceUnreadable { path, index } => write!(f, "cannot read ACE {index} of {}", path.display()),
+            Self::SidUnparseable { path, index } => write!(f, "cannot parse SID of ACE {index} of {}", path.display()),
+            Self::ThreadSpawnFailed(e) => write!(f, "cannot create background thread: {e}"),
+            Self::System(e) => write!(f, "{e}"),
         }
     }
 }
@@ -98,17 +192,17 @@ impl IfeoError {
             Self::Occupied(_) => exit::OCCUPIED,
             Self::Cancelled => exit::CANCELLED,
             Self::UnsafeLocation(_) => exit::UNSAFE_LOCATION,
-            Self::Registry(_) | Self::Other(_) => exit::FAILED,
+            _ => exit::FAILED,
         }
     }
 
     fn from_exit_code(code: u32) -> Self {
         match code as i32 {
             exit::ACCESS_DENIED => Self::AccessDenied,
-            exit::OCCUPIED => Self::Occupied(String::new()),
+            exit::OCCUPIED => Self::Occupied(DebuggerValue::Text(String::new())),
             exit::CANCELLED => Self::Cancelled,
-            exit::UNSAFE_LOCATION => Self::UnsafeLocation("提权子进程的位置检查未通过".into()),
-            c => Self::Other(format!("提权子进程失败（退出码 {c}）")),
+            exit::UNSAFE_LOCATION => Self::UnsafeLocation(UnsafeReason::ElevatedCheckFailed),
+            c => Self::ElevationChildFailed(c),
         }
     }
 }
@@ -124,7 +218,8 @@ pub enum Registration {
     /// 已指向给定的 exe。
     ThisExe,
     /// 指向别的路径：`exists` 为 false 表示路径已失效（exe 被移动或删除，或其他工具已卸载）。
-    OtherExe { debugger: String, exists: bool },
+    /// `Debugger` 不是字符串类型时按“别人的有效登记”处理（`exists` 为 true）。
+    OtherExe { debugger: DebuggerValue, exists: bool },
 }
 
 impl Registration {
@@ -189,7 +284,7 @@ pub fn classify(value: Option<&str>, exe: &Path) -> Registration {
 /// 不能因为读不懂就当成失效而静默覆盖别人的登记。
 pub fn classify_with(value: Option<&str>, exe: &Path, expand: impl Fn(&str) -> Option<String>) -> Registration {
     let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else { return Registration::NotRegistered };
-    let occupied = || Registration::OtherExe { debugger: value.to_owned(), exists: true };
+    let occupied = || Registration::OtherExe { debugger: value.into(), exists: true };
     let expanded;
     let text = if value.contains('%') {
         match expand(value) {
@@ -204,8 +299,8 @@ pub fn classify_with(value: Option<&str>, exe: &Path, expand: impl Fn(&str) -> O
     };
     match debugger_exe(text) {
         Some(p) if same_path(&p, exe) => Registration::ThisExe,
-        Some(p) => Registration::OtherExe { debugger: value.to_owned(), exists: p.exists() },
-        None => Registration::OtherExe { debugger: value.to_owned(), exists: false },
+        Some(p) => Registration::OtherExe { debugger: value.into(), exists: p.exists() },
+        None => Registration::OtherExe { debugger: value.into(), exists: false },
     }
 }
 
@@ -242,10 +337,6 @@ enum RawValue {
     Text(String),
     /// 非字符串类型的注册表值类型号。
     Other(u32),
-}
-
-fn non_string_text(ty: u32) -> String {
-    format!("<非字符串值，类型 {ty}>")
 }
 
 struct Key(HKEY);
@@ -285,12 +376,12 @@ impl Ifeo {
     fn from_env_value(v: Result<String, std::env::VarError>) -> Result<Self, IfeoError> {
         match v {
             Err(std::env::VarError::NotPresent) => Ok(Self::system()),
-            Err(std::env::VarError::NotUnicode(_)) => Err(IfeoError::Other(format!("{TEST_KEY_ENV} 不是合法的 Unicode"))),
+            Err(std::env::VarError::NotUnicode(_)) => Err(IfeoError::TestKeyNotUnicode),
             // 前缀之后至少要有一个字符，不能直接写在 TaskManagerLite-test 键本身上。
             Ok(k) if k.len() > TEST_KEY_PREFIX.len() && k.starts_with(TEST_KEY_PREFIX) && !k.contains("..") => {
                 Ok(Self::under(HKEY_CURRENT_USER, k))
             }
-            Ok(k) => Err(IfeoError::Other(format!("{TEST_KEY_ENV} 必须以 {TEST_KEY_PREFIX} 开头且其后不为空：{k}"))),
+            Ok(k) => Err(IfeoError::TestKeyInvalid(k)),
         }
     }
 
@@ -298,12 +389,12 @@ impl Ifeo {
         self.root == HKEY_LOCAL_MACHINE
     }
 
-    /// 读 `Debugger` 值的文本；键或值不存在返回 `Ok(None)`。始终访问 64 位视图。
-    /// 值不是字符串类型时返回一段描述文字（`<非字符串值，类型 N>`），而不是 `None`：它是一个存在的登记。
-    pub fn debugger(&self) -> Result<Option<String>, IfeoError> {
+    /// 读 `Debugger` 值；键或值不存在返回 `Ok(None)`。始终访问 64 位视图。
+    /// 值不是字符串类型时返回 [`DebuggerValue::NonString`]，而不是 `None`：它是一个存在的登记。
+    pub fn debugger(&self) -> Result<Option<DebuggerValue>, IfeoError> {
         Ok(self.read_raw()?.map(|r| match r {
-            RawValue::Text(t) => t,
-            RawValue::Other(ty) => non_string_text(ty),
+            RawValue::Text(t) => DebuggerValue::Text(t),
+            RawValue::Other(ty) => DebuggerValue::NonString { value_type: ty },
         }))
     }
 
@@ -349,7 +440,7 @@ impl Ifeo {
         Ok(match self.read_raw()? {
             None => Registration::NotRegistered,
             Some(RawValue::Text(t)) => classify(Some(&t), exe),
-            Some(RawValue::Other(ty)) => Registration::OtherExe { debugger: non_string_text(ty), exists: true },
+            Some(RawValue::Other(ty)) => Registration::OtherExe { debugger: DebuggerValue::NonString { value_type: ty }, exists: true },
         })
     }
 
@@ -362,7 +453,7 @@ impl Ifeo {
             _ => {}
         }
         if !exe.is_file() {
-            return Err(IfeoError::Other(format!("找不到程序文件：{}", exe.display())));
+            return Err(IfeoError::ExeNotFound(exe.to_path_buf()));
         }
         let mut key = HKEY::default();
         let sub = wide(&self.subkey);
@@ -444,7 +535,7 @@ pub fn set_replace_taskmgr(enable: bool, force: bool) -> Result<(), IfeoError> {
 /// `allow_elevation` 为 false（提权子进程）时绝不再次提权：拿不到写权限就直接报 `AccessDenied`。
 fn apply(enable: bool, force: bool, allow_elevation: bool) -> Result<(), IfeoError> {
     let ifeo = Ifeo::from_env()?;
-    let exe = std::env::current_exe().map_err(|e| IfeoError::Other(format!("无法取得本程序路径：{e}")))?;
+    let exe = std::env::current_exe().map_err(|e| IfeoError::CurrentExeUnavailable(e.into()))?;
     // 位置检查在真正写入的进程里做（提权子进程同样会走到这里），用户也能在不弹 UAC 的情况下先看到拒绝原因。
     if enable && !force {
         check_install_location(&exe)?;
@@ -499,18 +590,22 @@ fn run_elevated(enable: bool, force: bool, exe: &Path) -> Result<(), IfeoError> 
     match unsafe { ShellExecuteExW(&mut info) } {
         Ok(()) => {}
         Err(e) if e.code() == HRESULT::from_win32(ERROR_CANCELLED.0) => return Err(IfeoError::Cancelled),
-        Err(e) => return Err(IfeoError::Other(format!("无法启动提权子进程：{}", e.message()))),
+        Err(e) => {
+            return Err(IfeoError::ElevationLaunchFailed(SystemError::Other { code: e.code().0, message: e.message() }));
+        }
     }
     let process = info.hProcess;
     if process.is_invalid() {
-        return Err(IfeoError::Other("提权子进程没有返回句柄".into()));
+        return Err(IfeoError::ElevationNoHandle);
     }
     let result = unsafe {
         if WaitForSingleObject(process, 60_000) == WAIT_OBJECT_0 {
             let mut code = 1u32;
-            GetExitCodeProcess(process, &mut code).map(|()| code).map_err(|e| IfeoError::Other(e.message()))
+            GetExitCodeProcess(process, &mut code)
+                .map(|()| code)
+                .map_err(|e| IfeoError::System(SystemError::Other { code: e.code().0, message: e.message() }))
         } else {
-            Err(IfeoError::Other("等待提权子进程超时，结果未知，请重新读取登记状态".into()))
+            Err(IfeoError::ElevationTimeout)
         }
     };
     unsafe {
@@ -555,7 +650,7 @@ fn read_allow_aces(path: &Path) -> Result<Option<Vec<Ace>>, IfeoError> {
     let (mut dacl, mut sd) = (std::ptr::null_mut::<ACL>(), PSECURITY_DESCRIPTOR::default());
     let e = unsafe { GetNamedSecurityInfoW(&name, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, None, None, Some(&mut dacl), None, &mut sd) };
     if e != ERROR_SUCCESS {
-        return Err(IfeoError::Other(format!("无法读取 {} 的访问控制列表（错误码 {}）；确认安全后可使用 --force", path.display(), e.0)));
+        return Err(IfeoError::AclUnreadable { path: path.to_path_buf(), code: e.0 });
     }
     let result = (|| unsafe {
         if dacl.is_null() {
@@ -563,13 +658,13 @@ fn read_allow_aces(path: &Path) -> Result<Option<Vec<Ace>>, IfeoError> {
         }
         let mut info = ACL_SIZE_INFORMATION::default();
         GetAclInformation(dacl, (&mut info as *mut ACL_SIZE_INFORMATION).cast(), size_of::<ACL_SIZE_INFORMATION>() as u32, AclSizeInformation)
-            .map_err(|e| IfeoError::Other(format!("读取 ACL 信息失败：{}", e.message())))?;
+            .map_err(|e| IfeoError::AclInfoFailed(SystemError::Other { code: e.code().0, message: e.message() }))?;
         let mut out = Vec::new();
         for i in 0..info.AceCount {
             let mut ace = std::ptr::null_mut();
             // 失败即拒绝：读不懂的 ACE 不能当作不存在而放行。
             if GetAce(dacl, i, &mut ace).is_err() || ace.is_null() {
-                return Err(IfeoError::Other(format!("无法读取 {} 的第 {i} 条访问控制项；确认安全后可使用 --force", path.display())));
+                return Err(IfeoError::AceUnreadable { path: path.to_path_buf(), index: i });
             }
             // ACE 布局：Header{Type:u8, Flags:u8, Size:u16}, Mask:u32, Sid…（允许类与回调允许类相同）。
             let p = ace as *const u8;
@@ -580,7 +675,7 @@ fn read_allow_aces(path: &Path) -> Result<Option<Vec<Ace>>, IfeoError> {
             let mask = (p.add(4) as *const u32).read_unaligned();
             let mut s = windows::core::PWSTR::null();
             if ConvertSidToStringSidW(PSID(p.add(8) as *mut _), &mut s).is_err() {
-                return Err(IfeoError::Other(format!("无法解析 {} 的第 {i} 条访问控制项的 SID；确认安全后可使用 --force", path.display())));
+                return Err(IfeoError::SidUnparseable { path: path.to_path_buf(), index: i });
             }
             let sid = s.to_string().unwrap_or_default();
             let _ = LocalFree(Some(HLOCAL(s.0.cast())));
@@ -604,10 +699,10 @@ pub fn check_install_location(exe: &Path) -> Result<(), IfeoError> {
     }
     for t in targets {
         match read_allow_aces(&t)? {
-            None => return Err(IfeoError::UnsafeLocation(format!("{} 没有访问控制（任何人可写）", t.display()))),
+            None => return Err(IfeoError::UnsafeLocation(UnsafeReason::NoAcl { path: t })),
             Some(aces) => {
                 if let Some(who) = broad_write_grantee(&aces) {
-                    return Err(IfeoError::UnsafeLocation(format!("{} 授予 {who} 写入权限", t.display())));
+                    return Err(IfeoError::UnsafeLocation(UnsafeReason::BroadWrite { path: t, who: who.to_owned() }));
                 }
             }
         }
@@ -644,7 +739,7 @@ pub fn run_cli(args: &[String]) -> Option<i32> {
     Some(match cmd {
         Command::Register { force } => result_code(apply(true, force, allow_elevation)),
         Command::Unregister { force } => result_code(apply(false, force, allow_elevation)),
-        Command::Status => match Ifeo::from_env().and_then(|i| std::env::current_exe().map_err(|e| IfeoError::Other(e.to_string())).and_then(|exe| i.status(&exe))) {
+        Command::Status => match Ifeo::from_env().and_then(|i| std::env::current_exe().map_err(|e| IfeoError::System(e.into())).and_then(|exe| i.status(&exe))) {
             Ok(r) => r.exit_code(),
             Err(e) => e.exit_code(),
         },
@@ -744,10 +839,14 @@ mod tests {
         assert_eq!(IfeoError::AccessDenied.exit_code(), exit::ACCESS_DENIED);
         assert_eq!(IfeoError::Cancelled.exit_code(), exit::CANCELLED);
         assert_eq!(IfeoError::Occupied("x".into()).exit_code(), exit::OCCUPIED);
+        assert_eq!(IfeoError::Occupied(DebuggerValue::NonString { value_type: 4 }).exit_code(), exit::OCCUPIED);
         assert_eq!(IfeoError::Registry(5).exit_code(), exit::FAILED);
         assert_eq!(IfeoError::from_exit_code(exit::CANCELLED as u32), IfeoError::Cancelled);
         assert_eq!(IfeoError::from_exit_code(exit::ACCESS_DENIED as u32), IfeoError::AccessDenied);
-        assert!(matches!(IfeoError::from_exit_code(1), IfeoError::Other(_)));
+        assert_eq!(IfeoError::from_exit_code(1), IfeoError::ElevationChildFailed(1));
+        assert_eq!(IfeoError::from_exit_code(99), IfeoError::ElevationChildFailed(99));
+        assert_eq!(IfeoError::ElevationChildFailed(99).exit_code(), exit::FAILED);
+        assert_eq!(IfeoError::ExeNotFound("x".into()).exit_code(), exit::FAILED);
     }
 
     #[test]
@@ -862,7 +961,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(granted, "icacls 授权失败");
         match after {
-            Err(IfeoError::UnsafeLocation(why)) => assert!(why.contains("Users"), "{why}"),
+            Err(IfeoError::UnsafeLocation(UnsafeReason::BroadWrite { who, .. })) => assert!(who.contains("Users"), "{who}"),
             other => panic!("应因目录可被 Users 写入而拒绝：{other:?}"),
         }
     }
@@ -878,7 +977,10 @@ mod tests {
     fn 提权子进程标志不影响开关解析() {
         let a = args(&["tml.exe", "--register-taskmgr", "--elevated-child", "--force"]);
         assert_eq!(parse_cli(&a), Some(Command::Register { force: true }));
-        assert_eq!(IfeoError::UnsafeLocation("x".into()).exit_code(), exit::UNSAFE_LOCATION);
-        assert!(matches!(IfeoError::from_exit_code(exit::UNSAFE_LOCATION as u32), IfeoError::UnsafeLocation(_)));
+        assert_eq!(IfeoError::UnsafeLocation(UnsafeReason::ElevatedCheckFailed).exit_code(), exit::UNSAFE_LOCATION);
+        assert_eq!(
+            IfeoError::from_exit_code(exit::UNSAFE_LOCATION as u32),
+            IfeoError::UnsafeLocation(UnsafeReason::ElevatedCheckFailed)
+        );
     }
 }

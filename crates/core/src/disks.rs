@@ -10,11 +10,23 @@ pub struct DiskVolume {
     pub capacity: u64,
     pub free: u64,
 }
+/// 物理磁盘的介质类型；显示名称由界面层决定。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MediaType {
+    /// 没有读到（例如权限不足）。
+    #[default]
+    Unknown,
+    /// 固态硬盘（无寻道惩罚）。
+    Ssd,
+    /// 机械硬盘。
+    Hdd,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PhysicalDisk {
     pub number: u32,
     pub model: String,
-    pub media_type: String,
+    pub media_type: MediaType,
     pub capacity: u64,
     pub volumes: Vec<DiskVolume>,
     pub system: bool,
@@ -123,7 +135,7 @@ fn string_at(b: &[u8], at: usize) -> String {
 fn metadata(number: u32) -> PhysicalDisk {
     let mut disk = PhysicalDisk {
         number,
-        media_type: "未知".into(),
+        media_type: MediaType::Unknown,
         ..Default::default()
     };
     if let Some(d) = Device::open(&format!(r"\\.\PhysicalDrive{number}")) {
@@ -138,7 +150,7 @@ fn metadata(number: u32) -> PhysicalDisk {
         q[0] = 7; // StorageDeviceSeekPenaltyProperty
         if let Some(b) = d.query(0x2d1400, &q) {
             if b.len() >= 9 {
-                disk.media_type = if b[8] == 0 { "SSD" } else { "HDD" }.into();
+                disk.media_type = if b[8] == 0 { MediaType::Ssd } else { MediaType::Hdd };
             }
         }
     }

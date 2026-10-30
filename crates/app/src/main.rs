@@ -9,6 +9,7 @@ mod placement;
 mod sampling;
 mod screenshot;
 mod settings;
+mod texts;
 mod tray;
 #[cfg(all(test, feature = "renderer-software"))]
 mod toolbar_fit;

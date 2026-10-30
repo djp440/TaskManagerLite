@@ -127,7 +127,7 @@ pub fn network_instances(disks: &[tml_core::PhysicalDisk], networks: &[tml_core:
     result.retain(|i| i.id != NETWORK);
     for n in networks {
         result.push(Instance::new(&n.id, ResourceKind::Network, ResourceTint::Network,
-            &n.connection, "吞吐量（接收 + 发送）", &["接收", "发送"]));
+            crate::texts::connection_kind(n.connection), "吞吐量（接收 + 发送）", &["接收", "发送"]));
     }
     result
 }
@@ -179,7 +179,7 @@ pub struct ResourceSet {
     /// 想选中但当前不存在的实例 id（启动时恢复的设置，或选中项暂时消失）。
     /// 实例出现时自动选中；用户明确选中别的实例后清除。退出时优先保存它，而不是回退用的 CPU。
     pending: Option<String>,
-    network_key: Vec<(String, String, String)>,
+    network_key: Vec<(String, String, tml_core::ConnectionKind)>,
     gpu_memory: HashMap<String, [History; 2]>,
     disk_key: Vec<(u32, Vec<String>)>,
     receive: HashMap<String, History>,
@@ -197,7 +197,7 @@ impl ResourceSet {
     }
 
     pub fn sync_devices(&mut self, disks: &[tml_core::PhysicalDisk], networks: &[tml_core::NetworkAdapter]) {
-        let nk: Vec<_> = networks.iter().map(|n| (n.id.clone(), n.name.clone(), n.connection.clone())).collect();
+        let nk: Vec<_> = networks.iter().map(|n| (n.id.clone(), n.name.clone(), n.connection)).collect();
         let dk: Vec<_> = disks.iter().map(|d| (d.number, d.volumes.iter().map(|v| v.mount.clone()).collect())).collect();
         if nk != self.network_key || dk != self.disk_key || self.instances.iter().any(|i| i.id == NETWORK || i.id == DISK) {
             let gpu_instances: Vec<_> = self.instances.iter().filter(|i| i.kind == ResourceKind::Gpu).cloned().collect();

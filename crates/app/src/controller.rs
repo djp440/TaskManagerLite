@@ -975,7 +975,7 @@ impl Controller {
                 let detail = match (&mem_text, inst.kind) {
                     (Some(t), ResourceKind::Memory) => t.header.clone(),
                     (_, ResourceKind::Gpu) => gpu.map(|g| g.name.clone()).unwrap_or_default(),
-                    _ => network.map(|n| format!("{} · 链路 {:.0} Mbps{}\n{}\n{}", n.connection, n.link_speed as f64 / 1e6,
+                    _ => network.map(|n| format!("{} · 链路 {:.0} Mbps{}\n{}\n{}", crate::texts::connection_kind(n.connection), n.link_speed as f64 / 1e6,
                         if n.ssid.is_empty() { String::new() } else { format!(" · SSID {}", n.ssid) },
                         if n.addresses.is_empty() { "地址不可用" } else { &n.addresses }, s.resources.network_stats(&n.id, now))).unwrap_or_default(),
                 };
@@ -997,7 +997,7 @@ impl Controller {
                             format!(
                                 "{} · {} · 容量 {} · {}\n已挂载卷合计：已用 {} · 可用 {}",
                                 d.model,
-                                d.media_type,
+                                crate::texts::media_type(d.media_type),
                                 format::gigabytes(d.capacity),
                                 if d.system {
                                     "系统盘"

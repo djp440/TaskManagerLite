@@ -1,4 +1,5 @@
 use super::*;
+use crate::texts;
 use crate::{StartupData, StartupRow};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -56,14 +57,14 @@ impl Controller {
                     let e = entry.as_ref().unwrap();
                     tml_core::startup::set(e, !e.enabled)
                         .map(|()| "状态已更新".to_owned())
-                        .unwrap_or_else(|e| format!("无法修改启动项：{e}"))
+                        .unwrap_or_else(|e| format!("无法修改启动项：{}", texts::startup_error(&e)))
                 } else {
                     String::new()
                 };
                 let (entries, errors) = tml_core::startup::list();
                 let icons: Vec<_> = entries.iter().map(|e| icon(e.target.as_deref(), px)).collect();
                 let note = std::iter::once(result)
-                    .chain(errors)
+                    .chain(errors.iter().map(texts::startup_source_error))
                     .filter(|s| !s.is_empty())
                     .collect::<Vec<_>>()
                     .join("；");
@@ -101,7 +102,7 @@ impl Controller {
                                 ),
                                 name: e.name.as_str().into(),
                                 publisher: e.publisher.as_str().into(),
-                                source: e.source_label().into(),
+                                source: texts::startup_source(e.source).into(),
                                 command: e.command.as_str().into(),
                                 enabled: e.enabled,
                                 admin: e.needs_admin(),
@@ -151,11 +152,12 @@ fn compare(
         let cmp = match key {
             1 => a.publisher.to_lowercase().cmp(&b.publisher.to_lowercase()),
             2 => a.enabled.cmp(&b.enabled),
-            3 => a.source_label().cmp(b.source_label()),
+            // 按枚举序（与改动前按显示文案排序的结果一致，且不随界面语言变化）。
+            3 => a.source.cmp(&b.source),
             _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         }
         .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        .then(a.source.cmp(&b.source));
+        .then(a.source.index().cmp(&b.source.index()));
         if descending { cmp.reverse() } else { cmp }
     }
 }
@@ -170,10 +172,10 @@ fn sort_entries(entries: &mut [tml_core::startup::Entry], key: i32, descending: 
 
     #[test]
     fn startup_columns_sort_both_directions() {
-        let entry = |name: &str, publisher: &str, source, enabled| tml_core::startup::Entry {
+        let entry = |name: &str, publisher: &str, source: u8, enabled| tml_core::startup::Entry {
             name: name.into(),
             publisher: publisher.into(),
-            source,
+            source: tml_core::startup::StartupSource::from_index(source),
             enabled,
             command: String::new(),
             target: None,

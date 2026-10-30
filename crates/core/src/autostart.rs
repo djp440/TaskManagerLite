@@ -12,6 +12,7 @@ use windows::Win32::System::Registry::{
 };
 use windows::core::PCWSTR;
 
+use crate::error::SystemError;
 use crate::taskmgr::{TEST_KEY_PREFIX, debugger_exe, same_path};
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -21,6 +22,34 @@ const VALUE_NAME: &str = "TaskManagerLite";
 pub const AUTOSTART_ARG: &str = "--autostart";
 /// 设置后改写 `HKCU\<该值>\Run` 与 `HKCU\<该值>\Approved`（须以 [`TEST_KEY_PREFIX`] 开头），不碰真实的 Run 键。仅用于自动化测试。
 pub const AUTOSTART_TEST_KEY_ENV: &str = "TML_AUTOSTART_TEST_KEY";
+
+/// 开机启动操作失败的原因。界面层按枚举映射成显示文案；系统错误保留错误码。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutostartError {
+    /// 环境变量 [`AUTOSTART_TEST_KEY_ENV`] 的值不以 [`TEST_KEY_PREFIX`] 开头或其后为空。
+    InvalidTestKey,
+    /// 注册表或其他系统调用失败。
+    System(SystemError),
+}
+
+impl std::fmt::Display for AutostartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidTestKey => write!(f, "{AUTOSTART_TEST_KEY_ENV} must start with {TEST_KEY_PREFIX} and not be empty after it"),
+            Self::System(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for AutostartError {}
+
+impl From<std::io::Error> for AutostartError {
+    fn from(e: std::io::Error) -> Self {
+        Self::System(e.into())
+    }
+}
+
+type Result<T> = std::result::Result<T, AutostartError>;
 
 /// 开机启动的登记情况。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,18 +82,18 @@ impl AutostartKey {
     }
 
     /// 没有设置 [`AUTOSTART_TEST_KEY_ENV`] 时用真实位置；设置了就必须是合法的测试键，否则报错，绝不退回真实的 Run 键。
-    pub fn from_env() -> std::io::Result<Self> {
+    pub fn from_env() -> Result<Self> {
         Self::from_env_value(std::env::var(AUTOSTART_TEST_KEY_ENV))
     }
 
-    fn from_env_value(v: Result<String, std::env::VarError>) -> std::io::Result<Self> {
+    fn from_env_value(v: std::result::Result<String, std::env::VarError>) -> Result<Self> {
         match v {
             Err(std::env::VarError::NotPresent) => Ok(Self::user()),
             // 前缀之后至少要有一个字符，不能直接写在 TaskManagerLite-test 键本身上。
             Ok(k) if k.len() > TEST_KEY_PREFIX.len() && k.starts_with(TEST_KEY_PREFIX) && !k.contains("..") => {
                 Ok(Self::under(&k))
             }
-            _ => Err(std::io::Error::other(format!("{AUTOSTART_TEST_KEY_ENV} 必须以 {TEST_KEY_PREFIX} 开头且其后不为空"))),
+            _ => Err(AutostartError::InvalidTestKey),
         }
     }
 
@@ -74,7 +103,7 @@ impl AutostartKey {
         Self { run: format!(r"{base}\Run"), approved: format!(r"{base}\Approved") }
     }
 
-    pub fn status(&self, exe: &Path) -> std::io::Result<Autostart> {
+    pub fn status(&self, exe: &Path) -> Result<Autostart> {
         // 别的工具可能写成 REG_EXPAND_SZ，按原文读取（不展开环境变量）。
         let Some(value) = read(&self.run, RRF_RT_REG_SZ.0 | RRF_RT_REG_EXPAND_SZ.0 | RRF_NOEXPAND.0)? else {
             return Ok(Autostart::Off);
@@ -91,7 +120,7 @@ impl AutostartKey {
     }
 
     /// 开启：写入 `"<exe>" --autostart`，并清掉系统里的禁用标记（用户在这里明确要开启）。关闭：删除两处的值。
-    pub fn set(&self, exe: &Path, on: bool) -> std::io::Result<()> {
+    pub fn set(&self, exe: &Path, on: bool) -> Result<()> {
         if on {
             let value = wide(&format!("\"{}\" {AUTOSTART_ARG}", exe.display()));
             let (key, name) = (wide(&self.run), wide(VALUE_NAME));
@@ -117,8 +146,8 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn check(e: WIN32_ERROR) -> std::io::Result<()> {
-    if e == ERROR_SUCCESS { Ok(()) } else { Err(std::io::Error::from_raw_os_error(e.0 as i32)) }
+fn check(e: WIN32_ERROR) -> Result<()> {
+    if e == ERROR_SUCCESS { Ok(()) } else { Err(AutostartError::System(SystemError::Win32(e.0 as i32))) }
 }
 
 fn missing(e: WIN32_ERROR) -> bool {
@@ -126,7 +155,7 @@ fn missing(e: WIN32_ERROR) -> bool {
 }
 
 /// 读 `HKCU\<subkey>` 下本程序的值（按 u16 返回原始数据）；键或值不存在返回 `None`。
-fn read(subkey: &str, flags: u32) -> std::io::Result<Option<Vec<u16>>> {
+fn read(subkey: &str, flags: u32) -> Result<Option<Vec<u16>>> {
     let (key, name) = (wide(subkey), wide(VALUE_NAME));
     let flags = windows::Win32::System::Registry::REG_ROUTINE_FLAGS(flags);
     let mut bytes = 0u32;
@@ -169,7 +198,7 @@ fn read(subkey: &str, flags: u32) -> std::io::Result<Option<Vec<u16>>> {
     Ok(Some(buf))
 }
 
-fn delete(subkey: &str) -> std::io::Result<()> {
+fn delete(subkey: &str) -> Result<()> {
     let (key, name) = (wide(subkey), wide(VALUE_NAME));
     // SAFETY: 指针在调用期间有效。
     let e = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, PCWSTR(key.as_ptr()), PCWSTR(name.as_ptr())) };
@@ -278,7 +307,11 @@ mod tests {
         let ok = AutostartKey::from_env_value(Ok(format!("{TEST_KEY_PREFIX}x"))).unwrap();
         assert_eq!(ok.run, format!(r"{TEST_KEY_PREFIX}x\Run"));
         for bad in [String::new(), r"Software\Other".into(), TEST_KEY_PREFIX.into(), format!(r"{TEST_KEY_PREFIX}..\x")] {
-            assert!(AutostartKey::from_env_value(Ok(bad.clone())).is_err(), "{bad}");
+            assert_eq!(AutostartKey::from_env_value(Ok(bad.clone())).unwrap_err(), AutostartError::InvalidTestKey, "{bad}");
         }
+        assert_eq!(
+            AutostartKey::from_env_value(Err(VarError::NotUnicode("x".into()))).unwrap_err(),
+            AutostartError::InvalidTestKey
+        );
     }
 }

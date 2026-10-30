@@ -16,23 +16,34 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HRESULT, PCWSTR, w};
 
 
+/// 外壳操作失败的原因。界面层按枚举映射成显示文案。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellError {
     /// 路径不是绝对路径，或文件已不存在。
     NotFound,
-    /// 外壳调用失败（含错误描述）。
-    Failed(String),
+    /// 外壳或 COM 调用失败：HRESULT 与系统给出的描述（描述可能为空）。
+    Failed { code: i32, message: String },
+    /// `ShellExecute` 返回了不大于 32 的错误值。
+    ShellExecute(isize),
+}
+
+impl ShellError {
+    fn failed(e: &windows::core::Error) -> Self {
+        Self::Failed { code: e.code().0, message: e.message() }
+    }
 }
 
 impl std::fmt::Display for ShellError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ShellError::NotFound => f.write_str("文件已不存在"),
-            ShellError::Failed(msg) if msg.trim().is_empty() => f.write_str("系统调用失败"),
-            ShellError::Failed(msg) => write!(f, "系统调用失败：{}", msg.trim()),
+            ShellError::NotFound => f.write_str("file not found"),
+            ShellError::Failed { code, message } => write!(f, "shell call failed ({code:#010x}): {}", message.trim()),
+            ShellError::ShellExecute(code) => write!(f, "ShellExecute returned {code}"),
         }
     }
 }
+
+impl std::error::Error for ShellError {}
 
 /// 该线程第一次调用时初始化 COM（外壳 API 需要）；线程退出时由系统回收。
 fn ensure_com() {
@@ -60,11 +71,11 @@ pub fn reveal_in_explorer(path: &Path) -> Result<(), ShellError> {
     let wide = wide(path.as_os_str());
     let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
     unsafe {
-        SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None).map_err(|e| ShellError::Failed(e.message()))?;
+        SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None).map_err(|e| ShellError::failed(&e))?;
         // 不给子项时，pidl 本身就是要在其父文件夹中选中的项。
         let r = SHOpenFolderAndSelectItems(pidl, None, 0);
         CoTaskMemFree(Some(pidl.cast()));
-        r.map_err(|e| ShellError::Failed(e.message()))
+        r.map_err(|e| ShellError::failed(&e))
     }
 }
 
@@ -90,7 +101,7 @@ pub fn show_properties(path: &Path) -> Result<(), ShellError> {
         Ok(()) => Ok(()),
         // 用户取消不算失败。
         Err(e) if e.code() == HRESULT::from_win32(ERROR_CANCELLED.0) => Ok(()),
-        Err(e) => Err(ShellError::Failed(e.message())),
+        Err(e) => Err(ShellError::failed(&e)),
     }
 }
 
@@ -113,7 +124,7 @@ pub fn search_online(process_name: &str) -> Result<(), ShellError> {
     let r = unsafe { ShellExecuteW(None, w!("open"), PCWSTR(url.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
     // 返回值大于 32 表示成功。
     let code = r.0 as isize;
-    if code > 32 { Ok(()) } else { Err(ShellError::Failed(format!("ShellExecute 返回 {code}"))) }
+    if code > 32 { Ok(()) } else { Err(ShellError::ShellExecute(code)) }
 }
 
 #[cfg(test)]
@@ -121,10 +132,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn errors_display_as_chinese_text_not_debug() {
-        assert_eq!(ShellError::NotFound.to_string(), "文件已不存在");
-        assert_eq!(ShellError::Failed("拒绝访问".into()).to_string(), "系统调用失败：拒绝访问");
-        assert_eq!(ShellError::Failed(String::new()).to_string(), "系统调用失败");
+    fn errors_keep_reason_and_code() {
+        let e = windows::core::Error::from_hresult(HRESULT::from_win32(5));
+        assert_eq!(ShellError::failed(&e), ShellError::Failed { code: 0x8007_0005_u32 as i32, message: e.message() });
+        assert_eq!(ShellError::ShellExecute(2), ShellError::ShellExecute(2));
+        assert_ne!(ShellError::NotFound, ShellError::ShellExecute(2));
     }
 
     #[test]

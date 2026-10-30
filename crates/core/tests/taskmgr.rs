@@ -4,9 +4,14 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tml_core::{Ifeo, IfeoError, Registration, TEST_KEY_PREFIX, debugger_value};
+use tml_core::{DebuggerValue, Ifeo, IfeoError, Registration, TEST_KEY_PREFIX, debugger_value};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, KEY_WOW64_64KEY, RegDeleteKeyExW, RegDeleteTreeW};
 use windows::core::PCWSTR;
+
+/// `Debugger` 值的字符串原文（非字符串类型为 `None`）。
+fn text(v: Option<DebuggerValue>) -> Option<String> {
+    v.and_then(|v| v.text().map(str::to_owned))
+}
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
@@ -93,7 +98,7 @@ fn 登记_读取_撤销_往返() {
     assert!(!k.key_exists());
 
     ifeo.register(&exe, false).unwrap();
-    assert_eq!(ifeo.debugger().unwrap().as_deref(), Some(debugger_value(&exe).as_str()));
+    assert_eq!(text(ifeo.debugger().unwrap()).as_deref(), Some(debugger_value(&exe).as_str()));
     assert_eq!(ifeo.status(&exe).unwrap(), Registration::ThisExe);
     // 重复登记幂等。
     ifeo.register(&exe, false).unwrap();
@@ -118,7 +123,7 @@ fn 写入的值带引号且路径含空格也能识别() {
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ifeo.register(&copy, false).unwrap();
-        let raw = ifeo.debugger().unwrap().unwrap();
+        let raw = text(ifeo.debugger().unwrap()).unwrap();
         assert!(raw.starts_with('"') && raw.ends_with('"'), "值应带引号：{raw}");
         assert_eq!(ifeo.status(&copy).unwrap(), Registration::ThisExe);
         // 换成另一个路径查询：识别为他人登记且文件存在。
@@ -145,7 +150,7 @@ fn exe_被移动或删除后检测到路径不一致() {
         std::fs::remove_file(&old).unwrap();
         let now = self_exe();
         match ifeo.status(&now).unwrap() {
-            Registration::OtherExe { debugger, exists: false } => assert_eq!(debugger, debugger_value(&old)),
+            Registration::OtherExe { debugger, exists: false } => assert_eq!(debugger, DebuggerValue::Text(debugger_value(&old))),
             other => panic!("应识别为失效的他人登记：{other:?}"),
         }
         assert_eq!(ifeo.status(&old).unwrap(), Registration::ThisExe, "路径比较只看文本，与文件是否存在无关");
@@ -169,11 +174,11 @@ fn 别的程序的有效登记不被覆盖或撤销_除非_force() {
 
     let exe = self_exe();
     match ifeo.register(&exe, false) {
-        Err(IfeoError::Occupied(v)) => assert_eq!(v, debugger_value(&theirs)),
+        Err(IfeoError::Occupied(v)) => assert_eq!(v, DebuggerValue::Text(debugger_value(&theirs))),
         other => panic!("应拒绝覆盖：{other:?}"),
     }
     assert!(matches!(ifeo.unregister(&exe, false), Err(IfeoError::Occupied(_))));
-    assert_eq!(ifeo.debugger().unwrap().as_deref(), Some(debugger_value(&theirs).as_str()), "拒绝时原值不变");
+    assert_eq!(text(ifeo.debugger().unwrap()).as_deref(), Some(debugger_value(&theirs).as_str()), "拒绝时原值不变");
 
     ifeo.register(&exe, true).unwrap();
     assert_eq!(ifeo.status(&exe).unwrap(), Registration::ThisExe);
@@ -252,7 +257,7 @@ fn reg_expand_sz_的值展开后判断_有效的他人登记受保护() {
     assert!(matches!(ifeo.status(&exe).unwrap(), Registration::OtherExe { exists: true, .. }));
     assert!(matches!(ifeo.register(&exe, false), Err(IfeoError::Occupied(_))));
     assert!(matches!(ifeo.unregister(&exe, false), Err(IfeoError::Occupied(_))));
-    assert_eq!(ifeo.debugger().unwrap().as_deref(), Some(r#""%SystemRoot%\System32\cmd.exe""#), "原值未被改动");
+    assert_eq!(text(ifeo.debugger().unwrap()).as_deref(), Some(r#""%SystemRoot%\System32\cmd.exe""#), "原值未被改动");
 
     // 展开后指向不存在的文件：失效，可直接替换。
     write_raw_debugger(&k, REG_EXPAND_SZ, &utf16_bytes(r#""%SystemRoot%\definitely-not-here\x.exe""#));
@@ -270,12 +275,15 @@ fn 非字符串类型的_debugger_值按被占用处理() {
     write_raw_debugger(&k, REG_DWORD, &1u32.to_le_bytes());
 
     match ifeo.status(&exe).unwrap() {
-        Registration::OtherExe { exists: true, debugger } => assert!(debugger.contains("类型 4"), "{debugger}"),
+        Registration::OtherExe { exists: true, debugger } => {
+            // REG_DWORD 的类型号是 4。
+            assert_eq!(debugger, DebuggerValue::NonString { value_type: 4 });
+        }
         other => panic!("DWORD 值应按被占用处理：{other:?}"),
     }
     assert!(matches!(ifeo.register(&exe, false), Err(IfeoError::Occupied(_))));
     assert!(matches!(ifeo.unregister(&exe, false), Err(IfeoError::Occupied(_))));
-    assert!(ifeo.debugger().unwrap().is_some(), "值仍在");
+    assert_eq!(ifeo.debugger().unwrap(), Some(DebuggerValue::NonString { value_type: 4 }), "值仍在");
 
     // force 才能覆盖。
     ifeo.register(&exe, true).unwrap();
@@ -287,7 +295,7 @@ fn 目标文件不存在时拒绝登记() {
     let k = TestKey::new("nofile");
     let ifeo = k.ifeo();
     let missing = Path::new(r"C:\definitely\not\here\TaskManagerLite.exe");
-    assert!(matches!(ifeo.register(missing, false), Err(IfeoError::Other(_))));
+    assert!(matches!(ifeo.register(missing, false), Err(IfeoError::ExeNotFound(_))));
     assert!(!k.key_exists());
 }
 

@@ -6,21 +6,22 @@ use std::path::Path;
 use std::rc::Rc;
 
 use slint::ComponentHandle;
-use tml_core::{Autostart, AutostartKey, IfeoError, Registration};
+use tml_core::{Autostart, AutostartError, AutostartKey, IfeoError, Registration};
 
 use super::Controller;
 use crate::sampling::Command;
+use crate::texts;
 use crate::{AppWindow, SettingsData};
 
 /// 开机启动的状态说明。
-fn autostart_note(status: &std::io::Result<Autostart>) -> String {
+fn autostart_note(status: &Result<Autostart, AutostartError>) -> String {
     match status {
         Ok(Autostart::Off | Autostart::On) => String::new(),
         Ok(Autostart::OtherPath(value)) => {
             format!("已登记的是另一个位置的程序（{value}），开启后改为当前程序")
         }
         Ok(Autostart::DisabledBySystem) => "已在 Windows 设置的“启动应用”中被禁用，重新开启即可恢复".into(),
-        Err(e) => format!("无法读取开机启动状态：{e}"),
+        Err(e) => format!("无法读取开机启动状态：{}", texts::autostart_error(e)),
     }
 }
 
@@ -30,11 +31,13 @@ fn taskmgr_note(status: &Result<Registration, IfeoError>, wanted: bool) -> (Stri
         Ok(Registration::ThisExe) => (String::new(), false),
         Ok(Registration::NotRegistered) if wanted => ("登记已被移除，重新开启即可恢复".into(), false),
         Ok(Registration::NotRegistered) => (String::new(), false),
-        Ok(Registration::OtherExe { debugger, exists: true }) => (format!("已被其他程序接管：{debugger}"), false),
-        Ok(Registration::OtherExe { debugger, exists: false }) => {
-            (format!("登记的程序已不存在（{debugger}），开启后改为本程序"), false)
+        Ok(Registration::OtherExe { debugger, exists: true }) => {
+            (format!("已被其他程序接管：{}", texts::debugger_value(debugger)), false)
         }
-        Err(e) => (format!("无法读取登记状态：{e}"), true),
+        Ok(Registration::OtherExe { debugger, exists: false }) => {
+            (format!("登记的程序已不存在（{}），开启后改为本程序", texts::debugger_value(debugger)), false)
+        }
+        Err(e) => (format!("无法读取登记状态：{}", texts::ifeo_error(e)), true),
     }
 }
 
@@ -142,7 +145,7 @@ impl Controller {
     fn set_autostart(&self, on: bool) {
         let result = AutostartKey::from_env().and_then(|key| key.set(&exe()?, on));
         self.log.borrow_mut().line(format!("开机启动 设为={on} 结果={result:?}"));
-        self.refresh_autostart(result.err().map(|e| format!("无法修改开机启动：{e}")));
+        self.refresh_autostart(result.err().map(|e| format!("无法修改开机启动：{}", texts::autostart_error(&e))));
     }
 
     fn set_theme(&self, mode: i32) {
@@ -164,17 +167,12 @@ impl Controller {
     /// 读取 IFEO 登记状态写回界面；`error` 是刚才修改失败的原因，优先显示。
     fn refresh_taskmgr(&self, error: Option<IfeoError>) {
         let status = tml_core::Ifeo::from_env()
-            .and_then(|ifeo| exe().map_err(|e| IfeoError::Other(e.to_string())).and_then(|exe| ifeo.status(&exe)));
+            .and_then(|ifeo| exe().map_err(|e| IfeoError::System(e.into())).and_then(|exe| ifeo.status(&exe)));
         let wanted = self.settings.borrow().replace_taskmgr;
         let (note, is_error) = match error {
             // 核心库的说明提到命令行的 --force，界面上换成不含它的说法。
-            Some(IfeoError::UnsafeLocation(why)) => (
-                format!(
-                    "程序所在位置可被其他用户改写（{why}），为安全起见不予登记。请用安装包安装（默认装到 Program Files）后再试，或把程序移到受保护的目录"
-                ),
-                true,
-            ),
-            Some(e) => (e.to_string(), !matches!(e, IfeoError::Cancelled)),
+            Some(IfeoError::UnsafeLocation(why)) => (texts::unsafe_location_note(&why), true),
+            Some(e) => (texts::ifeo_error(&e), !matches!(e, IfeoError::Cancelled)),
             None => taskmgr_note(&status, wanted),
         };
         // 读不出状态时开关沿用设置里的意愿，只显示错误，免得已登记的用户误以为没有登记。
@@ -206,7 +204,7 @@ impl Controller {
             });
         });
         if let Err(e) = spawned {
-            self.finish_replace_taskmgr(on, Err(IfeoError::Other(format!("无法创建后台线程：{e}"))));
+            self.finish_replace_taskmgr(on, Err(IfeoError::ThreadSpawnFailed(e.into())));
         }
     }
 
@@ -242,17 +240,43 @@ mod tests {
     fn 开机启动说明() {
         assert_eq!(autostart_note(&Ok(Autostart::On)), "");
         assert_eq!(autostart_note(&Ok(Autostart::Off)), "");
-        assert!(autostart_note(&Ok(Autostart::DisabledBySystem)).contains("启动应用"));
-        assert!(autostart_note(&Ok(Autostart::OtherPath(r"D:\old.exe".into()))).contains(r"D:\old.exe"));
+        assert_eq!(
+            autostart_note(&Ok(Autostart::DisabledBySystem)),
+            "已在 Windows 设置的“启动应用”中被禁用，重新开启即可恢复"
+        );
+        assert_eq!(
+            autostart_note(&Ok(Autostart::OtherPath(r"D:\old.exe".into()))),
+            r"已登记的是另一个位置的程序（D:\old.exe），开启后改为当前程序"
+        );
+        let err = AutostartError::System(tml_core::SystemError::Win32(5));
+        assert_eq!(
+            autostart_note(&Err(err)),
+            format!("无法读取开机启动状态：{}", std::io::Error::from_raw_os_error(5))
+        );
+        assert_eq!(
+            autostart_note(&Err(AutostartError::InvalidTestKey)),
+            r"无法读取开机启动状态：TML_AUTOSTART_TEST_KEY 必须以 Software\TaskManagerLite-test\ 开头且其后不为空"
+        );
     }
 
     #[test]
     fn 接管说明() {
         assert_eq!(taskmgr_note(&Ok(Registration::ThisExe), true), (String::new(), false));
         assert_eq!(taskmgr_note(&Ok(Registration::NotRegistered), false), (String::new(), false));
-        assert!(taskmgr_note(&Ok(Registration::NotRegistered), true).0.contains("移除"));
+        assert_eq!(
+            taskmgr_note(&Ok(Registration::NotRegistered), true),
+            ("登记已被移除，重新开启即可恢复".to_owned(), false)
+        );
         let other = Registration::OtherExe { debugger: "x.exe".into(), exists: true };
-        assert!(taskmgr_note(&Ok(other), false).0.contains("其他程序"));
-        assert!(taskmgr_note(&Err(IfeoError::AccessDenied), false).1);
+        assert_eq!(taskmgr_note(&Ok(other), false), ("已被其他程序接管：x.exe".to_owned(), false));
+        let gone = Registration::OtherExe { debugger: "x.exe".into(), exists: false };
+        assert_eq!(taskmgr_note(&Ok(gone), true), ("登记的程序已不存在（x.exe），开启后改为本程序".to_owned(), false));
+        // 非字符串值：描述与改动前相同。
+        let dword = Registration::OtherExe { debugger: tml_core::DebuggerValue::NonString { value_type: 4 }, exists: true };
+        assert_eq!(taskmgr_note(&Ok(dword), false), ("已被其他程序接管：<非字符串值，类型 4>".to_owned(), false));
+        assert_eq!(
+            taskmgr_note(&Err(IfeoError::AccessDenied), false),
+            ("无法读取登记状态：没有写入系统注册表的权限（需要管理员）".to_owned(), true)
+        );
     }
 }

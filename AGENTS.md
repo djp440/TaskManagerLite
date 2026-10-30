@@ -5,6 +5,7 @@
 ## 项目结构
 
 - `crates/core`（`tml-core`）：采集进程快照与系统级指标、构建进程树、结束进程。纯 Rust，可脱离界面单测。
+  核心库不返回面向界面的显示文案：状态、类型、来源用枚举，错误用带原因与系统错误码的结构化类型（如 `ServiceError`、`StartupError`、`IfeoError`、`ShellError`）；中文文案集中在 `crates/app/src/texts.rs` 按枚举映射（本地化接入点）。
 - `crates/app`（`tml-app`，产物 `TaskManagerLite.exe`）：Slint 界面与采样线程。
 - `scripts/`：启动耗时、常驻开销测量与截图脚本。
 - `GLOSSARY.md`：领域术语，命名以它为准。
