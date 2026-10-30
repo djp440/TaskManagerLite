@@ -533,6 +533,7 @@ impl Controller {
         }
         let before = s.sampling();
         s.visible = visible;
+        let restored = visible;
         // 采样真的中断（或从中断中恢复）才在曲线上留断点；后台继续采样时曲线保持连续。
         if before != s.sampling() {
             s.gap = true;
@@ -541,6 +542,9 @@ impl Controller {
         self.update_tray_tip(&s);
         drop(s);
         self.sampler.send(Command::Visible(visible));
+        if restored {
+            self.force_repaint("恢复可见");
+        }
     }
 
     /// 由定时器轮询：窗口隐藏到托盘或最小化时不可见。

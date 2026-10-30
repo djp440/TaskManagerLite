@@ -22,6 +22,8 @@ export component MiniWindow inherits Window {
 
     // 置顶：默认开启，由 Rust 按设置恢复，退出时保存。
     in-out property <bool> pinned: true;
+    // 翻转它强制整窗重绘，见 app.slint 的同名属性。
+    in property <bool> repaint-flip;
     in property <[Resource]> resources;
     in-out property <[OpacityChoice]> opacity-choices;
     callback restore();
@@ -47,6 +49,14 @@ export component MiniWindow inherits Window {
     // 主题设置：0 跟随系统，1 浅色，2 深色。
     public function set-theme(mode: int) {
         Palette.color-scheme = mode == 1 ? ColorScheme.light : mode == 2 ? ColorScheme.dark : ColorScheme.unknown;
+    }
+
+    // 整窗兜底重绘（见 repaint-flip）：x 偏移 0.01px 肉眼不可见，但每次翻转都会让整窗区域失效。
+    Rectangle {
+        x: root.repaint-flip ? 0px : 0.01px;
+        width: root.width;
+        height: root.height;
+        background: Theme.surface;
     }
 
     menu := ContextMenuArea {

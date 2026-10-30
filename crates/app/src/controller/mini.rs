@@ -364,6 +364,36 @@ impl Controller {
     }
 
     /// 当前模式的窗口（完整窗口或迷你窗口）。
+    /// 强制整窗重绘（#15 的兜底）：software 渲染器只重绘脏区域，窗口从隐藏/最小化恢复后系统若已清空缓冲区，
+    /// 没变化的区域就不会再画。翻转 `repaint-flip` 让整窗失效；窗口恢复后立即与稍后各做一次，
+    /// 因为原生窗口与缓冲区要等事件循环处理完显示请求才就绪。
+    pub(super) fn force_repaint(&self, why: &str) {
+        self.log.borrow_mut().line(format!("窗口事件 {why}，整窗重绘"));
+        Self::flip_repaint();
+        slint::Timer::single_shot(Duration::from_millis(80), || {
+            let controller = crate::CONTROLLER.with(|c| c.borrow().clone());
+            if let Some(c) = controller {
+                c.flip_repaint_now();
+            }
+        });
+    }
+
+    fn flip_repaint() {
+        let controller = crate::CONTROLLER.with(|c| c.borrow().clone());
+        if let Some(c) = controller {
+            c.flip_repaint_now();
+        }
+    }
+
+    fn flip_repaint_now(&self) {
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_repaint_flip(!ui.get_repaint_flip());
+        }
+        if let Some(m) = self.mini.get() {
+            m.set_repaint_flip(!m.get_repaint_flip());
+        }
+    }
+
     pub(super) fn with_active<R>(&self, f: impl FnOnce(&slint::Window) -> R) -> Option<R> {
         if self.is_mini() {
             self.mini.get().map(|m| f(m.window()))
