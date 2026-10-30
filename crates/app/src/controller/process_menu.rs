@@ -74,6 +74,7 @@ impl Controller {
         menu.set_can_copy_path(a.copy_path);
         menu.set_can_copy_command_line(a.copy_command_line);
         menu.set_can_show_properties(a.properties);
+        self.update_control_menu(&ui);
     }
 
     pub(super) fn report(&self, kind: i32, arg: String) {

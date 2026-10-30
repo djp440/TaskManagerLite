@@ -13,8 +13,8 @@ use tml_core::ConnectionKind;
 use tml_core::services::{Action, ServiceError, ServiceState, StartType};
 use tml_core::startup::{SourceError, StartupError, StartupSource};
 use tml_core::{
-    AutostartError, DebuggerValue, ElevationError, IfeoError, MediaType, RunError, ShellError, SystemError,
-    UnsafeReason,
+    AutostartError, DebuggerValue, ElevationError, IfeoError, MediaType, PriorityClass, ProcessControlError, RunError,
+    ShellError, SystemError, UnsafeReason,
 };
 
 /// 服务状态（服务页“状态”列）。
@@ -143,6 +143,43 @@ pub fn run_error(e: &RunError) -> String {
         // 2 找不到文件，3 找不到路径。
         RunError::System(SystemError::Win32(2 | 3)) => "找不到指定的程序、文件、文件夹或网址，请检查输入是否正确".into(),
         RunError::System(e) => format!("无法启动：{e}"),
+    }
+}
+
+/// 进程优先级（菜单项、状态栏）。
+pub fn priority_name(class: PriorityClass) -> &'static str {
+    match class {
+        PriorityClass::Realtime => "实时",
+        PriorityClass::High => "高",
+        PriorityClass::AboveNormal => "高于正常",
+        PriorityClass::Normal => "正常",
+        PriorityClass::BelowNormal => "低于正常",
+        PriorityClass::Low => "低",
+    }
+}
+
+/// 状态栏：优先级设置成功。系统实际生效的类别与请求不同（未提权时“实时”只会变成“高”）时附带说明。
+pub fn priority_applied(name: &str, requested: PriorityClass, actual: PriorityClass) -> String {
+    if requested == actual {
+        format!("{name} → {}", priority_name(actual))
+    } else {
+        format!("{name} → {}（未以管理员身份运行，系统把“{}”降为了“{}”）", priority_name(actual), priority_name(requested), priority_name(actual))
+    }
+}
+
+/// 状态栏：亲和性设置成功。
+pub fn affinity_applied(name: &str, selected: u32, available: u32) -> String {
+    format!("{name} → {selected}/{available} 个逻辑处理器")
+}
+
+/// 设置优先级或 CPU 亲和性失败的原因。
+pub fn process_control_error(e: &ProcessControlError) -> String {
+    match e {
+        ProcessControlError::Gone => "进程已经退出".into(),
+        ProcessControlError::AccessDenied => "没有权限修改该进程（受保护进程或需要管理员权限），可以以管理员身份重启后再试".into(),
+        ProcessControlError::EmptyAffinity => "至少要选择一个逻辑处理器".into(),
+        ProcessControlError::OutsideProcessorGroup => "所选处理器不在该进程所在的处理器组内".into(),
+        ProcessControlError::System(e) => format!("系统返回错误：{e}"),
     }
 }
 

@@ -18,6 +18,7 @@ mod memory;
 mod nt;
 mod network;
 pub use network::{ConnectionKind, NetworkAdapter};
+mod procctl;
 mod procinfo;
 mod sampler;
 pub mod services;
@@ -42,6 +43,10 @@ pub use etw::{DiskTrace, StartError, TraceGuard, TraceState, stop_all as stop_di
 pub use icon::{IconBitmap, default_icon, file_icon};
 pub use instance::{Acquired, SingleInstance, acquire, activate_own_window, is_relaunch};
 pub use memory::{MemoryHardware, MemoryStatus};
+pub use procctl::{
+    AffinityInfo, ControlState, PriorityClass, ProcessControlError, affinity, control_state, mask_from_processors,
+    processors_in_mask, set_affinity, set_priority, validate_affinity,
+};
 pub use procinfo::{command_line, image_path, image_path_of};
 pub use sampler::{DiskSource, Sample, Sampler, Scope};
 pub use runtask::{Command as RunCommand, RunError, expand_env, parse_command, parse_command_with, run_task};

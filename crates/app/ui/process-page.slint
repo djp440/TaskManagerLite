@@ -49,6 +49,11 @@ export global ProcessMenu {
     in-out property <bool> can-copy-path;
     in-out property <bool> can-copy-command-line;
     in-out property <bool> can-show-properties;
+    // “设置优先级”“设置亲和性”：能否修改由 Rust 在菜单弹出前探测（受保护进程、已退出的进程置灰）。
+    in-out property <bool> can-set-priority;
+    in-out property <bool> can-set-affinity;
+    // 当前优先级的序号（0 实时 … 5 低，与 `PriorityClass::index` 一致）；读不到为 -1，不打勾。
+    in-out property <int> priority: -1;
     callback opening();
     callback open-location();
     callback copy-path();
@@ -59,6 +64,10 @@ export global ProcessMenu {
     callback copy-row();
     // 导出整个进程列表为 CSV（行右键菜单与表头右键菜单）。
     callback export-csv();
+    // 设为第 i 个优先级（序号同 `priority`）；“实时”由 Rust 先弹确认框。
+    callback set-priority(int);
+    // 打开“设置亲和性”对话框。
+    callback set-affinity();
 }
 
 export component HeaderCell inherits Rectangle {
@@ -206,6 +215,79 @@ component ProcRowView inherits Rectangle {
                 activated => {
                     root.select();
                     root.end-tree();
+                }
+            }
+
+            MenuSeparator {}
+
+            Menu {
+                title: @tr("设置优先级");
+                MenuItem {
+                    title: @tr("实时");
+                    checkable: true;
+                    checked: ProcessMenu.priority == 0;
+                    enabled: ProcessMenu.can-set-priority;
+                    activated => {
+                        ProcessMenu.set-priority(0);
+                    }
+                }
+
+                MenuItem {
+                    title: @tr("高");
+                    checkable: true;
+                    checked: ProcessMenu.priority == 1;
+                    enabled: ProcessMenu.can-set-priority;
+                    activated => {
+                        ProcessMenu.set-priority(1);
+                    }
+                }
+
+                MenuItem {
+                    title: @tr("高于正常");
+                    checkable: true;
+                    checked: ProcessMenu.priority == 2;
+                    enabled: ProcessMenu.can-set-priority;
+                    activated => {
+                        ProcessMenu.set-priority(2);
+                    }
+                }
+
+                MenuItem {
+                    title: @tr("正常");
+                    checkable: true;
+                    checked: ProcessMenu.priority == 3;
+                    enabled: ProcessMenu.can-set-priority;
+                    activated => {
+                        ProcessMenu.set-priority(3);
+                    }
+                }
+
+                MenuItem {
+                    title: @tr("低于正常");
+                    checkable: true;
+                    checked: ProcessMenu.priority == 4;
+                    enabled: ProcessMenu.can-set-priority;
+                    activated => {
+                        ProcessMenu.set-priority(4);
+                    }
+                }
+
+                MenuItem {
+                    title: @tr("低");
+                    checkable: true;
+                    checked: ProcessMenu.priority == 5;
+                    enabled: ProcessMenu.can-set-priority;
+                    activated => {
+                        ProcessMenu.set-priority(5);
+                    }
+                }
+            }
+
+            MenuItem {
+                title: @tr("设置亲和性…");
+                enabled: ProcessMenu.can-set-affinity;
+                activated => {
+                    ProcessMenu.set-affinity();
                 }
             }
 

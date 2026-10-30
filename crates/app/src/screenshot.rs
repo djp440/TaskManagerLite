@@ -12,7 +12,7 @@ use slint::{
 };
 
 use crate::controller::SERVICES_PAGE;
-use crate::{AppWindow, Columns, CpuData, MiniWindow, ProcessMenu, SettingsData};
+use crate::{AffinityData, AppWindow, Columns, CpuData, MiniWindow, ProcessMenu, SettingsData};
 
 type Step = (&'static str, fn(&AppWindow));
 
@@ -783,7 +783,8 @@ pub fn run_menu(ui: &AppWindow, spec: &str, warmup: Duration) {
 }
 
 /// `--menu-action <动作>:<pid>`：选中指定 PID 的进程并直接触发一个右键菜单动作
-/// （`open-location`、`properties`、`copy-path`、`copy-command-line`、`copy-row`），用于 `scripts/test-menu-actions.ps1`
+/// （`open-location`、`properties`、`copy-path`、`copy-command-line`、`copy-row`，以及 #66 的
+/// `set-priority:<pid>:<优先级键>`、`set-affinity:<pid>:<十六进制掩码>`、`affinity-shot:<pid>`），用于 `scripts/test-menu-actions.ps1`
 /// 自动验收，免去点击原生菜单。末尾可加 `:group` 先切到分组视图（验证分组视图里选中的是正确的进程）。
 /// 动作执行后不退出，由脚本检查结果并结束进程。
 pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
@@ -796,6 +797,8 @@ pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
         .and_then(|p| p.parse::<i32>().ok())
         .unwrap_or(0);
     let group = parts.contains(&"group");
+    // 第三段（优先级键 / 十六进制掩码）；闭包要 'static，所以先转成拥有所有权的字符串。
+    let arg: Option<String> = parts.get(2).map(|s| s.to_string());
     let weak = ui.as_weak();
     Timer::single_shot(warmup, move || {
         let Some(ui) = weak.upgrade() else { return };
@@ -824,6 +827,49 @@ pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
                 "copy-path" => menu.invoke_copy_path(),
                 "copy-command-line" => menu.invoke_copy_command_line(),
                 "copy-row" => menu.invoke_copy_row(),
+                "set-priority" => {
+                    // 第三段是优先级的键（realtime / high / above-normal / normal / below-normal / low）。
+                    match arg.as_deref().and_then(tml_core::PriorityClass::from_key) {
+                        Some(class) => menu.invoke_set_priority(class.index() as i32),
+                        None => eprintln!("未知优先级 {arg:?}"),
+                    }
+                }
+                "set-affinity" => {
+                    // 第三段是十六进制掩码：打开对话框、按掩码勾选，再点“确定”。
+                    match arg.as_deref().and_then(|m| u64::from_str_radix(m.trim_start_matches("0x"), 16).ok()) {
+                        Some(mask) => {
+                            menu.invoke_set_affinity();
+                            let data = ui.global::<AffinityData>();
+                            let cpus = data.get_cpus();
+                            for i in 0..cpus.row_count() {
+                                if let Some(mut c) = cpus.row_data(i) {
+                                    c.on = c.index < 64 && mask & (1u64 << c.index) != 0;
+                                    cpus.set_row_data(i, c);
+                                }
+                            }
+                            data.invoke_submit();
+                        }
+                        None => eprintln!("未知亲和性掩码 {arg:?}"),
+                    }
+                }
+                "affinity-shot" => {
+                    // 打开亲和性对话框并把窗口截图写到环境变量 TML_AFFINITY_SHOT 指定的 BMP，随后退出。
+                    menu.invoke_set_affinity();
+                    let weak = ui.as_weak();
+                    Timer::single_shot(Duration::from_millis(600), move || {
+                        let Some(ui) = weak.upgrade() else { return };
+                        match (std::env::var_os("TML_AFFINITY_SHOT"), ui.window().take_snapshot()) {
+                            (Some(path), Ok(buf)) => {
+                                if let Err(e) = write_bmp(Path::new(&path), &buf) {
+                                    eprintln!("写入截图失败：{e}");
+                                }
+                            }
+                            (None, _) => eprintln!("未设置 TML_AFFINITY_SHOT"),
+                            (_, Err(e)) => eprintln!("截图失败：{e}"),
+                        }
+                        let _ = slint::quit_event_loop();
+                    });
+                }
                 other => eprintln!("未知动作 {other}"),
             }
         });

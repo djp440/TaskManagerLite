@@ -15,6 +15,8 @@ import { ServicesPage, ServiceData, ServiceRow } from "services-page.slint";
 export { ServiceData, ServiceRow }
 import { RunTaskData, RunTaskDialog } from "run-task.slint";
 export { RunTaskData }
+import { AffinityData, AffinityDialog, CpuBox } from "affinity.slint";
+export { AffinityData, CpuBox }
 
 export { ColumnLayout, MemoryView, ProcRow, Resource, ResourceKind, ResourceTint, StatItem, Columns, ProcessMenu, MiniWindow, OpacityChoice, SettingsData }
 export { CoreGraph, CpuData, GridLayout } from "cpu-detail.slint";
@@ -74,7 +76,8 @@ component MiniIcon inherits Rectangle {
     }
 }
 
-// 需要用户确认的操作：1 = 结束关键进程，2 = 结束进程树，3 = 导出包含敏感列的 CSV（name 是列名）。
+// 需要用户确认的操作：1 = 结束关键进程，2 = 结束进程树，3 = 导出包含敏感列的 CSV（name 是列名），
+// 4 = 把进程优先级设为“实时”（name 是进程名）。
 component ConfirmDialog inherits Rectangle {
     in property <int> kind;
     in property <string> name;
@@ -102,14 +105,16 @@ component ConfirmDialog inherits Rectangle {
             padding: 24px;
             spacing: 12px;
             Text {
-                text: root.kind == 3 ? @tr("导出包含敏感信息的列？") : root.kind == 2 ? @tr("结束进程树？") : @tr("结束关键进程？");
+                text: root.kind == 4 ? @tr("设为“实时”优先级？") : root.kind == 3 ? @tr("导出包含敏感信息的列？") : root.kind == 2 ? @tr("结束进程树？") : @tr("结束关键进程？");
                 font-size: 18px;
                 font-weight: 600;
                 color: Palette.foreground;
             }
 
             Text {
-                text: root.kind == 3
+                text: root.kind == 4
+                    ? @tr("将 {0} 设为“实时”优先级后，它会抢占几乎所有其他进程的 CPU 时间，可能让系统失去响应甚至需要强制重启。仅在清楚后果时继续。", root.name)
+                    : root.kind == 3
                     ? @tr("导出的 CSV 将包含“{0}”。这些内容可能带有密码、令牌或个人信息，请把文件保存在安全的位置，分享给别人之前先检查。", root.name)
                     : root.kind == 2
                     ? @tr("将结束 {0} 及其 {1} 个后代进程，未保存的数据会丢失。", root.name, root.descendants)
@@ -136,7 +141,7 @@ component ConfirmDialog inherits Rectangle {
                 }
 
                 Button {
-                    text: root.kind == 3 ? @tr("继续导出") : @tr("结束");
+                    text: root.kind == 3 ? @tr("继续导出") : root.kind == 4 ? @tr("设为实时") : @tr("结束");
                     primary: true;
                     clicked => {
                         root.accepted();
@@ -186,7 +191,7 @@ export component AppWindow inherits Window {
     in property <string> memory-summary;
 
     // 状态栏消息：1 已结束，2 权限不足，3 进程已退出，4 取消提权，5 其他错误，
-    // 6 已复制路径，7 已复制命令行，8 已导出 CSV，9 已复制所选行。
+    // 6 已复制路径，7 已复制命令行，8 已导出 CSV，9 已复制所选行，10 已设置优先级，11 已设置亲和性。
     in property <int> status-kind;
     in property <string> status-arg;
 
@@ -362,6 +367,13 @@ export component AppWindow inherits Window {
         keys.focus();
     }
 
+    // 关闭“设置亲和性”对话框并把焦点还给列表（取消、Esc，或 Rust 在应用成功后调用）。
+    public function close-affinity() {
+        AffinityData.open = false;
+        root.ui-event("affinity close");
+        keys.focus();
+    }
+
     // F5：复用各页面进入时的刷新入口；进程页与性能页立即补采一次。
     function refresh-page() {
         root.ui-event("refresh page=\{root.page}");
@@ -402,6 +414,13 @@ export component AppWindow inherits Window {
             if root.confirm-kind != 0 {
                 if event.text == Key.Escape {
                     root.confirm-kind = 0;
+                    return accept;
+                }
+                return reject;
+            }
+            if AffinityData.open {
+                if event.text == Key.Escape {
+                    root.close-affinity();
                     return accept;
                 }
                 return reject;
@@ -862,7 +881,7 @@ export component AppWindow inherits Window {
                         vertical-alignment: center;
                         overflow: elide;
                         font-size: 12px;
-                        color: root.status-kind == 1 || (root.status-kind >= 6 && root.status-kind <= 9) ? Theme.subtle-text : Theme.danger;
+                        color: root.status-kind == 1 || (root.status-kind >= 6 && root.status-kind <= 11) ? Theme.subtle-text : Theme.danger;
                         text: root.status-kind == 1 ? @tr("已结束 {0}", root.status-arg)
                             : root.status-kind == 2 ? @tr("没有权限结束 {0}，可以以管理员身份重启后再试", root.status-arg)
                             : root.status-kind == 3 ? @tr("{0} 已经退出", root.status-arg)
@@ -872,6 +891,8 @@ export component AppWindow inherits Window {
                             : root.status-kind == 7 ? @tr("已复制 {0} 的命令行", root.status-arg)
                             : root.status-kind == 8 ? @tr("已导出到 {0}", root.status-arg)
                             : root.status-kind == 9 ? @tr("已复制 {0} 的行", root.status-arg)
+                            : root.status-kind == 10 ? @tr("已设置优先级：{0}", root.status-arg)
+                            : root.status-kind == 11 ? @tr("已设置亲和性：{0}", root.status-arg)
                             : "";
                     }
                 }
@@ -897,6 +918,12 @@ export component AppWindow inherits Window {
     if RunTaskData.open: RunTaskDialog {
         cancelled => {
             root.close-run-task();
+        }
+    }
+
+    if AffinityData.open: AffinityDialog {
+        cancelled => {
+            root.close-affinity();
         }
     }
 

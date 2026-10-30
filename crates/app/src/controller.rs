@@ -20,6 +20,7 @@ mod cpu;
 mod export;
 mod memory;
 mod mini;
+mod process_control;
 mod process_menu;
 mod run_task;
 mod services_page;
@@ -55,6 +56,8 @@ const CONFIRM_CRITICAL: i32 = 1;
 const CONFIRM_TREE: i32 = 2;
 /// 导出的 CSV 含命令行、路径等敏感列：导出前提示（`name` 为列名）。
 const CONFIRM_EXPORT: i32 = 3;
+/// 把进程优先级设为“实时”（`name` 为进程名，目标进程在 `pending` 里）。
+const CONFIRM_REALTIME: i32 = 4;
 /// 隐藏启动时托盘图标创建失败的重试次数（每秒一次）。
 const TRAY_RETRIES: u32 = 30;
 
@@ -65,6 +68,8 @@ pub struct Controller {
     startup_all: RefCell<Vec<(tml_core::startup::Entry, Option<tml_core::IconBitmap>)>>,
     services: services_page::ServicesState,
     export: export::ExportState,
+    /// “设置亲和性”对话框当前针对的进程。
+    affinity_target: RefCell<Option<ProcessKey>>,
     ui: slint::Weak<AppWindow>,
     rows: Rc<VecModel<ProcRow>>,
     resources: Rc<VecModel<Resource>>,
@@ -275,6 +280,7 @@ impl Controller {
             startup_all: RefCell::new(Vec::new()),
             services: Default::default(),
             export: Default::default(),
+            affinity_target: RefCell::new(None),
             ui: ui.as_weak(),
             rows,
             resources,
@@ -322,6 +328,7 @@ impl Controller {
         c.bind_startup(ui);
         c.bind_services(ui);
         c.bind_run_task(ui);
+        c.bind_process_control(ui);
         c.bind_export(ui);
         ui.set_pinned(settings.always_on_top);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
@@ -1325,6 +1332,10 @@ impl Controller {
         ui.set_confirm_kind(0);
         if kind == CONFIRM_EXPORT {
             self.confirm_export();
+            return;
+        }
+        if kind == CONFIRM_REALTIME {
+            self.confirm_realtime();
             return;
         }
         let keys = std::mem::take(&mut self.state.borrow_mut().pending);
