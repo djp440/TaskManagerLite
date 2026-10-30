@@ -399,6 +399,7 @@ mod tests {
             disk_rate: 0.0,
             gpu_usage: None,
             eco_mode: None,
+            services: None,
             critical: false,
             counters: Default::default(),
             info: None,

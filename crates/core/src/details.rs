@@ -54,10 +54,12 @@ pub enum DetailColumn {
     Gpu,
     /// 进程是否处于效率模式（EcoQoS，#68）；只有显示这一列时才按行读取，系统不支持时不提供这一列。
     EcoMode,
+    /// 进程承载的服务（#85）；只有显示这一列时采样器才（节流地）枚举服务。
+    Services,
 }
 
 impl DetailColumn {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::Status,
         Self::User,
         Self::Session,
@@ -77,6 +79,7 @@ impl DetailColumn {
         Self::Company,
         Self::Gpu,
         Self::EcoMode,
+        Self::Services,
     ];
 
     /// 设置文件里使用的名字。
@@ -101,6 +104,7 @@ impl DetailColumn {
             Self::Company => "company",
             Self::Gpu => "gpu",
             Self::EcoMode => "eco_mode",
+            Self::Services => "services",
         }
     }
 
@@ -430,6 +434,11 @@ pub(crate) fn compare(a: &Process, b: &Process, col: DetailColumn) -> Ordering {
         },
         // 没有读数（None）< 未启用 < 已启用。
         DetailColumn::EcoMode => a.eco_mode.cmp(&b.eco_mode),
+        // 没有服务（None）排在最小一端，其余按服务名列表（不区分大小写）比较。
+        DetailColumn::Services => {
+            let get = |p: &Process| p.services.as_ref().map(|s| s.iter().map(|n| n.to_lowercase()).collect::<Vec<_>>());
+            get(a).cmp(&get(b))
+        }
     }
 }
 
@@ -465,6 +474,28 @@ mod tests {
         assert_eq!(info.elevated, Some(crate::is_elevated()));
         #[cfg(target_arch = "x86_64")]
         assert_eq!(info.arch, Some(Arch::X64));
+    }
+
+    #[test]
+    fn services_column_sorts_none_first_then_by_names() {
+        let mk = |s: Option<&[&str]>| Process {
+            key: ProcessKey { pid: 1, create_time: 1 },
+            parent_pid: 0,
+            name: "p".into(),
+            cpu_usage: 0.0,
+            private_working_set: 0,
+            disk_rate: 0.0,
+            gpu_usage: None,
+            eco_mode: None,
+            services: s.map(|v| v.iter().map(|n| n.to_string()).collect::<Vec<_>>().into()),
+            critical: false,
+            counters: Default::default(),
+            info: None,
+        };
+        let (none, a, b) = (mk(None), mk(Some(&["Alpha"])), mk(Some(&["bits", "Dhcp"])));
+        assert_eq!(compare(&none, &a, DetailColumn::Services), Ordering::Less);
+        assert_eq!(compare(&a, &b, DetailColumn::Services), Ordering::Less);
+        assert_eq!(compare(&b, &b, DetailColumn::Services), Ordering::Equal);
     }
 
     #[test]

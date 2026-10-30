@@ -12,7 +12,7 @@ use slint::{
 };
 
 use crate::controller::SERVICES_PAGE;
-use crate::{AffinityData, AppWindow, Columns, CpuData, MiniWindow, ProcessMenu, SettingsData};
+use crate::{AffinityData, AppWindow, Columns, CpuData, MiniWindow, ProcessMenu, ServiceData, SettingsData};
 
 type Step = (&'static str, fn(&AppWindow));
 
@@ -929,6 +929,43 @@ pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
                                 ui.set_confirm_kind(0);
                             }
                         }
+                    });
+                }
+                "goto-service" => {
+                    // 与右键菜单一致：先按弹出前的逻辑判断是否可用，再触发“转到服务”（置灰时钩子仍触发一次，核对不会跳转）。
+                    menu.invoke_opening();
+                    eprintln!("转到服务 菜单项 enabled={}", menu.get_can_goto_service());
+                    menu.invoke_goto_service();
+                    // 服务页枚举是异步的：等一会儿再读服务页状态；设置了 TML_GOTO_SHOT 时顺便把窗口截图写到该 BMP。
+                    let weak = ui.as_weak();
+                    Timer::single_shot(Duration::from_millis(2500), move || {
+                        let Some(ui) = weak.upgrade() else { return };
+                        let data = ui.global::<ServiceData>();
+                        let rows = data.get_rows();
+                        let names: Vec<String> = (0..rows.row_count())
+                            .filter_map(|i| rows.row_data(i))
+                            .map(|r| format!("{}={}", r.name, r.pid))
+                            .collect();
+                        eprintln!(
+                            "服务页状态 page={} filter_pid={} 行数={} 选中={} 提示条={:?}",
+                            ui.get_page(),
+                            data.get_filter_pid(),
+                            rows.row_count(),
+                            data.get_selected(),
+                            data.get_filter_process().as_str()
+                        );
+                        eprintln!("服务页行 {}", names.join(","));
+                        if let Some(path) = std::env::var_os("TML_GOTO_SHOT") {
+                            match ui.window().take_snapshot() {
+                                Ok(buf) => {
+                                    if let Err(e) = write_bmp(Path::new(&path), &buf) {
+                                        eprintln!("写入截图失败：{e}");
+                                    }
+                                }
+                                Err(e) => eprintln!("截图失败：{e}"),
+                            }
+                        }
+                        let _ = slint::quit_event_loop();
                     });
                 }
                 "affinity-shot" => {

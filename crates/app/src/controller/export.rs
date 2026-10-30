@@ -516,6 +516,7 @@ mod tests {
             disk_rate: 0.0,
             gpu_usage: None,
             eco_mode: None,
+            services: None,
             critical: false,
             counters: Counters::default(),
             info: None,
@@ -575,6 +576,23 @@ mod tests {
         // 经 CSV 编码后表头一行、数据行数一致。
         let rows = t.into_rows();
         assert_eq!(rows.len(), 6);
+    }
+
+    #[test]
+    fn services_column_is_exported_with_the_same_text_as_the_list() {
+        let mut snap = snapshot();
+        let names: Vec<String> = (1..=8).map(|i| format!("Svc{i}")).collect();
+        snap.processes[1].services = Some(names.into());
+        snap.processes[2].services = Some(vec!["Dhcp".to_owned(), "Dnscache".to_owned()].into());
+        let view = export_view(&snap, None, &opts(ViewMode::Flat)).unwrap();
+        let d = shown(&[DetailColumn::Services]);
+        let t = process_table(&snap, &view, ViewMode::Flat, &d, &titles());
+        assert_eq!(t.header[5], "服务");
+        let by_pid = |pid: &str| t.rows.iter().find(|(_, c)| c[1] == pid).unwrap().1[5].clone();
+        assert_eq!(by_pid("10"), details::cell(&snap.processes[1], DetailColumn::Services, None));
+        assert_eq!(by_pid("10"), "Svc1、Svc2、Svc3、Svc4、Svc5、Svc6…（共 8 个）");
+        assert_eq!(by_pid("11"), "Dhcp、Dnscache");
+        assert_eq!(by_pid("1"), "");
     }
 
     #[test]

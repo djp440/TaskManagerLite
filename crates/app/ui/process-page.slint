@@ -64,6 +64,8 @@ export global ProcessMenu {
     in-out property <bool> can-resume;
     in-out property <string> suspend-title;
     in-out property <string> resume-title;
+    // “转到服务”（#85）：所选进程承载服务时可用，否则置灰（菜单弹出前由 Rust 枚举判断）。
+    in-out property <bool> can-goto-service;
     callback opening();
     callback open-location();
     callback copy-path();
@@ -82,6 +84,8 @@ export global ProcessMenu {
     callback toggle-eco();
     callback suspend();
     callback resume();
+    // 切到服务页，按所选进程的 PID 过滤并选中它承载的服务。
+    callback goto-service();
 }
 
 export component HeaderCell inherits Rectangle {
@@ -328,6 +332,14 @@ component ProcRowView inherits Rectangle {
                 enabled: ProcessMenu.can-resume;
                 activated => {
                     ProcessMenu.resume();
+                }
+            }
+
+            MenuItem {
+                title: @tr("转到服务");
+                enabled: ProcessMenu.can-goto-service;
+                activated => {
+                    ProcessMenu.goto-service();
                 }
             }
 

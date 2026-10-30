@@ -13,6 +13,9 @@ use crate::nt::ProcessQuery;
 use crate::snapshot::{Baseline, ProcessKey, ProcessSnapshot};
 use crate::system::{CpuTimes, DiskCounters, SystemMetrics, cpu_times};
 
+/// 进程承载的服务（#85）的枚举间隔：服务的启停远慢于采样，每个采样间隔都枚举没有必要。
+pub const SERVICE_HOSTS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// 一次采样的范围。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -76,6 +79,9 @@ pub struct Sampler {
     track_apps: bool,
     track_gpu_processes: bool,
     track_eco_mode: bool,
+    track_service_hosts: bool,
+    /// 最近一次服务枚举的时间与结果（#85）；只在 `track_service_hosts` 开启时使用，隔 `SERVICE_HOSTS_TTL` 刷新一次。
+    service_hosts: Option<(Instant, crate::services::HostMap)>,
     cpu_probe: CpuProbe,
     etw: Option<DiskTrace>,
     etw_tried: bool,
@@ -101,6 +107,15 @@ impl Sampler {
     /// 仅在进程列表显示了“效率模式”列时开启；关闭时不打开任何进程，`eco_mode` 恒为 `None`。
     pub fn track_eco_mode(&mut self, on: bool) {
         self.track_eco_mode = on;
+    }
+
+    /// 开启后每次完整采样都把进程承载的服务名填入 `Process::services`（#85）。
+    /// 仅在进程列表显示了“服务”列时开启；服务枚举带节流缓存（见 `SERVICE_HOSTS_TTL`），关闭时不枚举、缓存清空。
+    pub fn track_service_hosts(&mut self, on: bool) {
+        self.track_service_hosts = on;
+        if !on {
+            self.service_hosts = None;
+        }
     }
 
     /// 开关 ETW 磁盘事件（默认关闭，且需要管理员权限，见 ADR-0004）。运行中可随时切换：
@@ -223,6 +238,9 @@ impl Sampler {
         if full && self.track_eco_mode {
             crate::procctl::apply_eco_modes(&mut snapshot.processes);
         }
+        if full && self.track_service_hosts {
+            self.apply_service_hosts(&mut snapshot.processes, now);
+        }
         let networks = self.net.sample(elapsed);
         // 汇总保持物理网卡口径，虚拟隧道与承载它的物理网卡不能重复累加。
         let net_recv = networks.iter().filter(|n| n.hardware).filter_map(|n| n.recv).sum();
@@ -264,6 +282,23 @@ impl Sampler {
 
     /// 有 ETW 会话时用按进程归属的磁盘字节数覆盖近似速率。会话在首次采样之后才启动，
     /// 并且需要管理员权限；未提权、启动中或失败时保持近似值。
+    /// 把“PID → 服务名”填进进程：缓存超过 `SERVICE_HOSTS_TTL`（或还没有）才重新枚举，枚举失败沿用旧结果。
+    fn apply_service_hosts(&mut self, processes: &mut [crate::Process], now: Instant) {
+        let stale = self.service_hosts.as_ref().is_none_or(|(at, _)| now.duration_since(*at) >= SERVICE_HOSTS_TTL);
+        if stale {
+            let map = crate::services::hosted_services().ok();
+            self.service_hosts = match (map, self.service_hosts.take()) {
+                (Some(map), _) => Some((now, map)),
+                // 失败：保留旧结果，但推迟到下一个周期再试，不在每次采样里反复枚举。
+                (None, Some((_, old))) => Some((now, old)),
+                (None, None) => Some((now, Default::default())),
+            };
+        }
+        if let Some((_, map)) = &self.service_hosts {
+            crate::services::apply_hosts(processes, map);
+        }
+    }
+
     fn apply_etw_disk(
         &mut self,
         first: bool,
@@ -313,6 +348,24 @@ impl Sampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 服务列（#85）：默认不枚举；开启后进程带上所承载的服务（RpcSs 的宿主进程必有），
+    /// 缓存期内不重复枚举，关闭后清空缓存且进程不再带服务。
+    #[test]
+    fn service_hosts_are_filled_only_when_tracked_and_throttled() {
+        let mut s = Sampler::default();
+        assert!(s.sample().snapshot.processes.iter().all(|p| p.services.is_none()));
+        assert!(s.service_hosts.is_none());
+        s.track_service_hosts(true);
+        let got = s.sample();
+        assert!(got.snapshot.processes.iter().any(|p| p.services.as_ref().is_some_and(|v| v.iter().any(|n| n.eq_ignore_ascii_case("RpcSs")))));
+        let first = s.service_hosts.as_ref().map(|(at, _)| *at).unwrap();
+        s.sample();
+        assert_eq!(s.service_hosts.as_ref().map(|(at, _)| *at), Some(first), "缓存期内不重新枚举");
+        s.track_service_hosts(false);
+        assert!(s.service_hosts.is_none());
+        assert!(s.sample().snapshot.processes.iter().all(|p| p.services.is_none()));
+    }
 
     /// 默认关闭：不创建任何 ETW 会话，来源恒为近似。
     #[test]

@@ -36,6 +36,16 @@ pub fn availability(path: Option<&Path>, command_line: Option<&str>) -> Availabi
     }
 }
 
+/// 进程 `pid` 承载的（运行中）服务个数；枚举失败按 0 处理（“转到服务”置灰）。
+fn hosted_count(pid: u32) -> usize {
+    tml_core::services::hosted_services().ok().and_then(|m| m.get(&pid).map(|v| v.len())).unwrap_or(0)
+}
+
+/// 承载至少一个服务时“转到服务”才可用。
+pub fn goto_service_enabled(hosted: usize) -> bool {
+    hosted > 0
+}
+
 /// 菜单动作失败时在状态栏显示的说明（前面由界面加上“操作失败：”）。
 pub(super) fn failure(action: &str, reason: &str) -> String {
     format!("{action}（{reason}）")
@@ -59,6 +69,7 @@ impl Controller {
         menu.on_copy_command_line(with(Controller::copy_command_line));
         menu.on_show_properties(with(Controller::show_properties));
         menu.on_search_online(with(Controller::search_online));
+        menu.on_goto_service(with(Controller::goto_service));
     }
 
     /// 右键按下、菜单弹出前：读取所选进程的路径与命令行，设置各项是否可用。
@@ -74,6 +85,9 @@ impl Controller {
         menu.set_can_copy_path(a.copy_path);
         menu.set_can_copy_command_line(a.copy_command_line);
         menu.set_can_show_properties(a.properties);
+        // “转到服务”：现枚举一次服务（约 1 ms，不读配置），承载服务才可用。
+        let hosted = self.selected_process().map_or(0, |(key, ..)| hosted_count(key.pid));
+        menu.set_can_goto_service(goto_service_enabled(hosted));
         self.update_control_menu(&ui);
     }
 
@@ -135,6 +149,19 @@ impl Controller {
         }
     }
 
+    /// 右键菜单“转到服务”：切到服务页，按所选进程的 PID 过滤并选中它承载的服务。
+    fn goto_service(&self) {
+        let Some((key, name, _)) = self.selected_process() else { return };
+        let hosted = hosted_count(key.pid);
+        if !goto_service_enabled(hosted) {
+            self.log.borrow_mut().line(format!("进程页 转到服务 PID={} 没有承载服务", key.pid));
+            self.report(STATUS_ERROR, failure("转到服务", &format!("{name} 没有承载服务")));
+            return;
+        }
+        self.log.borrow_mut().line(format!("进程页 转到服务 PID={} 服务数={hosted}", key.pid));
+        self.goto_services_of(key.pid, &name);
+    }
+
     fn search_online(&self) {
         let Some((_, name, _)) = self.selected_process() else { return };
         if let Err(e) = tml_core::search_online(&name) {
@@ -170,6 +197,19 @@ mod tests {
         assert!(!b.open_location && !b.copy_path && !b.properties && b.copy_command_line);
         // 空命令行视为不可用。
         assert!(!availability(None, Some("")).copy_command_line);
+    }
+
+    #[test]
+    fn goto_service_needs_a_hosted_service() {
+        assert!(!goto_service_enabled(0));
+        assert!(goto_service_enabled(1));
+        assert!(goto_service_enabled(30));
+        // 真实系统：svchost 通常承载多个服务，本测试进程不承载服务。
+        let hosts = tml_core::services::hosted_services().unwrap();
+        assert!(hosts.values().any(|v| v.len() > 1));
+        assert_eq!(hosted_count(std::process::id()), 0);
+        let (&pid, names) = hosts.iter().next().unwrap();
+        assert_eq!(hosted_count(pid), names.len());
     }
 
     #[test]

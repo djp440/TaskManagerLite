@@ -27,6 +27,9 @@ pub(super) struct ServicesState {
     logged: Cell<usize>,
     /// 自动化验收：`--service-action <动作>:<服务名>`，首次列出服务后执行。
     hook: RefCell<Option<String>>,
+    /// 刚从进程页“转到服务”（#85）跳来、正在等枚举完成：值是要过滤的 PID（0 = 没有），
+    /// 枚举结果应用后选中第一项并清零，避免先显示旧列表再跳动。
+    goto_pid: Cell<u32>,
 }
 
 impl Controller {
@@ -48,6 +51,11 @@ impl Controller {
         let weak = Rc::downgrade(self);
         data.on_filter_edited(move || {
             if let Some(c) = weak.upgrade() {
+                // 用户输入搜索（或 Esc 清空搜索）即退出“按进程过滤”。
+                if let Some(ui) = c.ui.upgrade() {
+                    ui.global::<ServiceData>().set_filter_pid(0);
+                }
+                c.services.goto_pid.set(0);
                 c.show_services();
                 if let Some(ui) = c.ui.upgrade() {
                     c.log.borrow_mut().line(format!(
@@ -57,6 +65,12 @@ impl Controller {
                         c.services.all.borrow().len()
                     ));
                 }
+            }
+        });
+        let weak = Rc::downgrade(self);
+        data.on_process_filter_cleared(move || {
+            if let Some(c) = weak.upgrade() {
+                c.clear_process_filter();
             }
         });
         let weak = Rc::downgrade(self);
@@ -198,6 +212,7 @@ impl Controller {
                     ));
                 }
                 self.apply_services(entries);
+                self.finish_goto_service();
             }
             Err(e) => {
                 if note.is_none() {
@@ -221,8 +236,7 @@ impl Controller {
         let data = ui.global::<ServiceData>();
         let (key, descending) = (data.get_sort_key(), data.get_descending());
         let needle = data.get_filter().trim().to_lowercase();
-        let mut entries: Vec<Service> =
-            self.services.all.borrow().iter().filter(|e| e.matches(&needle)).cloned().collect();
+        let mut entries = visible_services(&self.services.all.borrow(), &needle, data.get_filter_pid());
         entries.sort_by(|a, b| compare(a, b, key, descending));
         let selected = self
             .selected_service()
@@ -244,6 +258,60 @@ impl Controller {
         }
         *self.services.entries.borrow_mut() = entries;
         data.set_selected(selected.map_or(-1, |i| i as i32));
+    }
+
+    /// 从进程页“转到服务”（#85）：按 `pid` 过滤服务页并切过去。搜索文字清空，使结果恰好是该进程承载的服务；
+    /// 枚举是异步的，选中第一项要等本次枚举完成（见 `finish_goto_service`），先显示的是按同一 PID 过滤的旧列表，不会闪出完整列表。
+    pub(super) fn goto_services_of(&self, pid: u32, name: &str) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let data = ui.global::<ServiceData>();
+        data.set_filter("".into());
+        data.set_filter_pid(pid as i32);
+        data.set_filter_process(format!("{name}（PID {pid}）").into());
+        data.set_selected(-1);
+        self.services.goto_pid.set(pid);
+        self.show_services();
+        if ui.get_page() == SERVICES_PAGE {
+            // 已在服务页：不会重新进入，主动重新枚举。
+            self.services_work(None, true);
+        } else {
+            ui.set_page(SERVICES_PAGE);
+        }
+    }
+
+    /// 枚举结果应用后，若正在等“转到服务”，选中第一个服务；该 PID 已不承载运行中的服务则给出提示。
+    fn finish_goto_service(&self) {
+        let pid = self.services.goto_pid.replace(0);
+        let Some(ui) = self.ui.upgrade() else { return };
+        let data = ui.global::<ServiceData>();
+        // 等待期间用户已清除过滤、搜索或离开了页面。
+        if pid == 0 || data.get_filter_pid() != pid as i32 {
+            return;
+        }
+        let shown = self.services.entries.borrow().len();
+        if shown > 0 {
+            data.set_selected(0);
+        } else {
+            data.set_note(format!("PID {pid} 当前没有承载运行中的服务").into());
+        }
+        self.log.borrow_mut().line(format!(
+            "服务页 按进程过滤 PID={pid} 显示 {shown}/{} 选中={}",
+            self.services.all.borrow().len(),
+            data.get_selected()
+        ));
+    }
+
+    /// 清除“按进程过滤”（提示条的“清除过滤”按钮、离开服务页）。
+    fn clear_process_filter(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let data = ui.global::<ServiceData>();
+        let was = data.get_filter_pid();
+        data.set_filter_pid(0);
+        self.services.goto_pid.set(0);
+        self.show_services();
+        if was != 0 {
+            self.log.borrow_mut().line(format!("服务页 清除按进程过滤 PID={was} 显示 {}", self.services.entries.borrow().len()));
+        }
     }
 
     /// 跳转到进程页并选中服务所在的进程。
@@ -294,6 +362,11 @@ impl Controller {
     }
 }
 
+/// 搜索文字（已去空白转小写）与“按进程过滤”（`pid` > 0 时只留下 PID 相同的服务）共同作用后的服务。
+fn visible_services(all: &[Service], needle: &str, pid: i32) -> Vec<Service> {
+    all.iter().filter(|e| (pid <= 0 || e.pid as i32 == pid) && e.matches(needle)).cloned().collect()
+}
+
 fn service_row(e: &Service) -> ServiceRow {
     ServiceRow {
         name: e.name.as_str().into(),
@@ -326,6 +399,20 @@ fn compare(a: &Service, b: &Service, key: i32, descending: bool) -> std::cmp::Or
 mod tests {
     use super::*;
     use tml_core::services::{Config, ServiceState, StartType};
+
+    #[test]
+    fn process_filter_keeps_only_services_of_that_pid_and_composes_with_search() {
+        let svc = |name: &str, pid| Service { name: name.into(), display_name: format!("显示 {name}"), pid, ..Default::default() };
+        let all = [svc("Dhcp", 900), svc("Dnscache", 900), svc("Spooler", 700), svc("Stopped", 0)];
+        let names = |v: Vec<Service>| v.into_iter().map(|s| s.name).collect::<Vec<_>>();
+        assert_eq!(names(visible_services(&all, "", 0)).len(), 4, "pid 0 = 不过滤");
+        assert_eq!(names(visible_services(&all, "", 900)), ["Dhcp", "Dnscache"]);
+        assert_eq!(names(visible_services(&all, "dns", 900)), ["Dnscache"]);
+        assert!(visible_services(&all, "spool", 900).is_empty());
+        // 未运行的服务 PID 为 0，不会被任何有效 PID 过滤选中。
+        assert!(visible_services(&all, "stopped", 900).is_empty());
+        assert!(visible_services(&all, "", 12345).is_empty());
+    }
 
     #[test]
     fn service_columns_sort_both_directions() {

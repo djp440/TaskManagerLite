@@ -23,6 +23,8 @@ pub enum Command {
     Gpu(bool),
     /// 是否按进程读取效率模式状态（仅进程列表显示了“效率模式”列时需要，#68）。
     Eco(bool),
+    /// 是否（节流地）枚举服务并按 PID 填入进程（仅进程列表显示了“服务”列时需要，#85）。
+    Services(bool),
 }
 
 /// 当前应当怎样采样。
@@ -62,6 +64,7 @@ impl SamplerHandle {
 /// `track_apps`：一开始就枚举应用窗口（设置里的视图模式是分组时，第一个快照就要带上）。
 /// `track_gpu`：设置里已显示 GPU 列，第一个快照就要带上进程级 GPU 占用。
 /// `track_eco`：设置里已显示“效率模式”列，第一个快照就要带上效率模式状态。
+/// `track_services`：设置里已显示“服务”列，第一个快照就要带上进程承载的服务。
 /// `accurate_disk`：设置里开启了 ETW 磁盘速率。
 /// `background`：设置里开启了后台继续采样（窗口不可见时只采系统指标）。
 /// `deliver` 在采样线程上调用，负责把快照投递到界面线程。
@@ -69,6 +72,7 @@ pub fn spawn(
     track_apps: bool,
     track_gpu: bool,
     track_eco: bool,
+    track_services: bool,
     accurate_disk: bool,
     background: bool,
     deliver: impl Fn(Sample) + Send + 'static,
@@ -81,6 +85,7 @@ pub fn spawn(
             sampler.track_apps(track_apps);
             sampler.track_gpu_processes(track_gpu);
             sampler.track_eco_mode(track_eco);
+            sampler.track_service_hosts(track_services);
             sampler.set_accurate_disk(accurate_disk);
             let mut interval = Some(Duration::from_secs(1));
             let mut visible = true;
@@ -127,6 +132,11 @@ pub fn spawn(
                     Command::Eco(on) => {
                         sampler.track_eco_mode(on);
                         // 刚显示“效率模式”列时立即补采一次，尽快有值。
+                        forced = on;
+                    }
+                    Command::Services(on) => {
+                        sampler.track_service_hosts(on);
+                        // 刚显示“服务”列时立即补采一次，尽快有值。
                         forced = on;
                     }
                     Command::Apps(on) => {

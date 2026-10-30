@@ -31,6 +31,9 @@ pub struct Process {
     /// 是否处于效率模式（EcoQoS，#68）。`None`：未显示“效率模式”列（不读取）、系统不支持或进程打不开。
     /// 由采样器在 `Sampler::track_eco_mode` 开启时填入。
     pub eco_mode: Option<bool>,
+    /// 该进程承载的服务名（#85，按名称排序）。`None`：未显示“服务”列（不查询）或不承载服务。
+    /// 由采样器在 `Sampler::track_service_hosts` 开启时填入。
+    pub services: Option<Arc<[String]>>,
     pub critical: bool,
     /// “详细信息”列的计数，随采样更新。
     pub counters: Counters,
@@ -100,6 +103,7 @@ impl Baseline {
                 disk_rate,
                 gpu_usage: None,
                 eco_mode: None,
+                services: None,
                 critical,
                 counters,
                 info: None,

@@ -947,6 +947,11 @@ export component AppWindow inherits Window {
 
     changed page => {
         root.ui-event("page=\{root.page}");
+        // 离开服务页时清除“按进程过滤”（#85），下次进入显示完整列表。
+        if root.page != 4 && ServiceData.filter-pid != 0 {
+            ServiceData.filter-pid = 0;
+            ServiceData.process-filter-cleared();
+        }
     }
 
     init => {

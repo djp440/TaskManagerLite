@@ -37,6 +37,7 @@ pub fn title(c: DetailColumn) -> &'static str {
         DetailColumn::Company => "公司",
         DetailColumn::Gpu => "GPU",
         DetailColumn::EcoMode => "效率模式",
+        DetailColumn::Services => "服务",
     }
 }
 
@@ -46,6 +47,7 @@ pub fn default_width(c: DetailColumn) -> f32 {
         DetailColumn::Session | DetailColumn::Threads | DetailColumn::Arch | DetailColumn::Gpu => 72.0,
         DetailColumn::Elevated | DetailColumn::Handles => 76.0,
         DetailColumn::EcoMode => 88.0,
+        DetailColumn::Services => 180.0,
         DetailColumn::Status | DetailColumn::Priority | DetailColumn::CpuTime => 88.0,
         DetailColumn::WorkingSet | DetailColumn::PeakWorkingSet | DetailColumn::Commit => 108.0,
         DetailColumn::User => 120.0,
@@ -147,6 +149,20 @@ pub fn cell(p: &Process, c: DetailColumn, gpu: Option<f32>) -> String {
             Some(false) => "未启用".into(),
             None => String::new(),
         },
+        DetailColumn::Services => p.services.as_deref().map(services_text).unwrap_or_default(),
+    }
+}
+
+/// “服务”列最多逐个列出的服务名个数；更多的写成“…（共 N 个）”，完整列表在服务页（右键“转到服务”）。
+pub const SERVICES_SHOWN: usize = 6;
+
+/// 服务名用“、”连接；超过 [`SERVICES_SHOWN`] 个时只列前几个并注明总数。界面与 CSV 导出共用。
+pub fn services_text(names: &[String]) -> String {
+    let shown = names.iter().take(SERVICES_SHOWN).map(String::as_str).collect::<Vec<_>>().join("、");
+    if names.len() > SERVICES_SHOWN {
+        format!("{shown}…（共 {} 个）", names.len())
+    } else {
+        shown
     }
 }
 
@@ -158,6 +174,11 @@ pub fn needs_gpu(shown: &[Shown]) -> bool {
 /// 是否显示了“效率模式”列：只有显示时采样线程才按进程读取效率模式状态。
 pub fn needs_eco(shown: &[Shown]) -> bool {
     shown.iter().any(|s| s.column == DetailColumn::EcoMode)
+}
+
+/// 是否显示了“服务”列：只有显示时采样线程才（节流地）枚举服务，建立 PID → 服务名的映射。
+pub fn needs_services(shown: &[Shown]) -> bool {
+    shown.iter().any(|s| s.column == DetailColumn::Services)
 }
 
 /// 显示中的可选列（有序）与各自宽度。
@@ -340,6 +361,7 @@ mod tests {
             disk_rate: 0.0,
             gpu_usage: None,
             eco_mode: None,
+            services: None,
             critical: false,
             counters: tml_core::Counters {
                 suspended: true,
@@ -372,6 +394,7 @@ mod tests {
             disk_rate: 0.0,
             gpu_usage: None,
             eco_mode: None,
+            services: None,
             critical: false,
             counters: Default::default(),
             info: None,
@@ -381,6 +404,16 @@ mod tests {
         let off = Process { eco_mode: Some(false), ..p.clone() };
         assert_eq!(cell(&on, DetailColumn::EcoMode, None), "已启用");
         assert_eq!(cell(&off, DetailColumn::EcoMode, None), "未启用");
+        // 服务列（#85）：不承载服务为空；多个服务用“、”连接；过多时截断并注明总数。
+        assert_eq!(cell(&p, DetailColumn::Services, None), "");
+        let names = |n: usize| (1..=n).map(|i| format!("S{i}")).collect::<Vec<_>>();
+        let hosting = |n: usize| Process { services: Some(names(n).into()), ..p.clone() };
+        assert_eq!(cell(&hosting(1), DetailColumn::Services, None), "S1");
+        assert_eq!(cell(&hosting(3), DetailColumn::Services, None), "S1、S2、S3");
+        assert_eq!(cell(&hosting(SERVICES_SHOWN), DetailColumn::Services, None), "S1、S2、S3、S4、S5、S6");
+        assert_eq!(cell(&hosting(SERVICES_SHOWN + 4), DetailColumn::Services, None), "S1、S2、S3、S4、S5、S6…（共 10 个）");
+        assert!(needs_services(&[Shown { column: DetailColumn::Services, width: 180.0 }]));
+        assert!(!needs_services(&[Shown { column: DetailColumn::Gpu, width: 72.0 }]));
         assert!(needs_eco(&[Shown { column: DetailColumn::EcoMode, width: 88.0 }]));
         assert!(!needs_eco(&[Shown { column: DetailColumn::Gpu, width: 72.0 }]));
         assert_eq!(cell(&p, DetailColumn::Gpu, p.gpu_usage), "—");
