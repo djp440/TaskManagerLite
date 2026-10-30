@@ -231,6 +231,7 @@ impl Controller {
         );
         ui.set_view_mode(view_mode_index(settings.view));
         ui.set_page(settings.page);
+        ui.set_sidebar_expanded(!settings.sidebar_collapsed);
         let cols = ui.global::<Columns>();
         cols.set_pid(settings.columns.pid);
         cols.set_cpu(settings.columns.cpu);
@@ -506,6 +507,7 @@ impl Controller {
             p => p,
         };
         settings.always_on_top = ui.get_pinned();
+        settings.sidebar_collapsed = !ui.get_sidebar_expanded();
         let cols = ui.global::<Columns>();
         settings.columns = ColumnWidths {
             pid: cols.get_pid(),

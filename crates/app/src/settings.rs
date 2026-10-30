@@ -120,6 +120,8 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// 主题：0 跟随系统，1 浅色，2 深色。
     pub theme: i32,
+    /// 左侧边栏折叠为仅图标。默认展开；窗口过窄时界面会自行收成图标，不改这个值。
+    pub sidebar_collapsed: bool,
     pub mini: MiniSettings,
     /// 本版本不认识的顶层字段，保存时原样写回。
     extra: Map<String, Value>,
@@ -144,6 +146,7 @@ impl Default for Settings {
             background_sampling: false,
             close_to_tray: false,
             theme: 0,
+            sidebar_collapsed: false,
             mini: MiniSettings::default(),
             extra: Map::new(),
         }
@@ -168,6 +171,7 @@ const KNOWN: &[&str] = &[
     "background_sampling",
     "close_to_tray",
     "theme",
+    "sidebar_collapsed",
     "mini",
 ];
 
@@ -310,6 +314,9 @@ impl Settings {
         if let Some(b) = o.get("close_to_tray").and_then(Value::as_bool) {
             s.close_to_tray = b;
         }
+        if let Some(b) = o.get("sidebar_collapsed").and_then(Value::as_bool) {
+            s.sidebar_collapsed = b;
+        }
         if let Some(t) = o.get("theme").and_then(Value::as_str).and_then(|t| THEMES.iter().position(|&n| n == t)) {
             s.theme = t as i32;
         }
@@ -395,6 +402,7 @@ impl Settings {
         o.insert("replace_taskmgr".into(), self.replace_taskmgr.into());
         o.insert("background_sampling".into(), self.background_sampling.into());
         o.insert("close_to_tray".into(), self.close_to_tray.into());
+        o.insert("sidebar_collapsed".into(), self.sidebar_collapsed.into());
         o.insert("theme".into(), THEMES[self.theme.clamp(0, 2) as usize].into());
         let mut m = Map::new();
         m.insert("active".into(), self.mini.active.into());
@@ -511,6 +519,7 @@ mod tests {
             background_sampling: true,
             close_to_tray: true,
             theme: 2,
+            sidebar_collapsed: true,
             mini: MiniSettings { active: true, position: Some((-1500, 40)), on_top: false, opacity: 80 },
             extra: Map::new(),
         }
@@ -557,6 +566,13 @@ mod tests {
         assert!(!Settings::default().close_to_tray);
         assert!(parse(r#"{"close_to_tray": true}"#).close_to_tray);
         assert!(!parse(r#"{"close_to_tray": 1}"#).close_to_tray);
+    }
+
+    #[test]
+    fn 侧边栏默认展开且只认布尔值() {
+        assert!(!Settings::default().sidebar_collapsed);
+        assert!(parse(r#"{"sidebar_collapsed": true}"#).sidebar_collapsed);
+        assert!(!parse(r#"{"sidebar_collapsed": "yes"}"#).sidebar_collapsed);
     }
 
     #[test]

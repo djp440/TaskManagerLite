@@ -1,0 +1,179 @@
+import { Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { TipBox } from "controls.slint";
+
+// 侧边栏图标，全部是 16×16 描边路径。
+// kind：0 进程（列表），1 性能（心电曲线），2 启动项（电源），3 服务（四宫格），4 设置（齿轮），5 菜单（三横线）。
+component NavIcon inherits Path {
+    in property <int> kind;
+    width: 16px;
+    height: 16px;
+    viewbox-width: 16;
+    viewbox-height: 16;
+    stroke-width: 1.3px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    commands: root.kind == 0 ? "M 6 4 L 14 4 M 6 8 L 14 8 M 6 12 L 14 12 M 2.5 4 L 2.6 4 M 2.5 8 L 2.6 8 M 2.5 12 L 2.6 12"
+        : root.kind == 1 ? "M 1.5 8.5 L 4.5 8.5 L 6.5 3 L 9.5 13 L 11.5 8.5 L 14.5 8.5"
+        : root.kind == 2 ? "M 5 4.2 A 5 5 0 1 0 11 4.2 M 8 1.5 L 8 7.5"
+        : root.kind == 3 ? "M 2.5 2.5 L 6.8 2.5 L 6.8 6.8 L 2.5 6.8 Z M 9.2 2.5 L 13.5 2.5 L 13.5 6.8 L 9.2 6.8 Z M 2.5 9.2 L 6.8 9.2 L 6.8 13.5 L 2.5 13.5 Z M 9.2 9.2 L 13.5 9.2 L 13.5 13.5 L 9.2 13.5 Z"
+        : root.kind == 4 ? "M 6.42 3.15 L 6.8 1.2 L 9.2 1.2 L 9.58 3.15 L 10.32 3.46 L 11.96 2.35 L 13.65 4.04 L 12.54 5.68 L 12.85 6.42 L 14.8 6.8 L 14.8 9.2 L 12.85 9.58 L 12.54 10.32 L 13.65 11.96 L 11.96 13.65 L 10.32 12.54 L 9.58 12.85 L 9.2 14.8 L 6.8 14.8 L 6.42 12.85 L 5.68 12.54 L 4.04 13.65 L 2.35 11.96 L 3.46 10.32 L 3.15 9.58 L 1.2 9.2 L 1.2 6.8 L 3.15 6.42 L 3.46 5.68 L 2.35 4.04 L 4.04 2.35 L 5.68 3.46 Z M 10.2 8 A 2.2 2.2 0 1 0 5.8 8 A 2.2 2.2 0 1 0 10.2 8 Z"
+        : "M 2 4 L 14 4 M 2 8 L 14 8 M 2 12 L 14 12";
+}
+
+// 一个导航项：图标固定在左侧，宽时右边显示文字；窄时只剩图标，悬停提示文字。
+component NavItem inherits Rectangle {
+    in property <string> text;
+    in property <int> icon;
+    in property <bool> active;
+    in property <bool> wide;
+    // 菜单按钮不是页面入口，不画选中条。
+    in property <bool> indicator: true;
+    callback clicked;
+
+    height: 38px;
+    border-radius: 6px;
+    background: root.active ? (Theme.dark ? #ffffff14 : #00000012) : touch.has-hover ? Theme.hover : transparent;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+        if !root.wide: Tooltip {
+            TipBox {
+                text: root.text;
+            }
+        }
+    }
+
+    if root.indicator: Rectangle {
+        x: 0px;
+        y: (parent.height - self.height) / 2;
+        width: 3px;
+        height: root.active ? 16px : 0px;
+        border-radius: 1.5px;
+        background: Palette.accent-background;
+        animate height { duration: 150ms; easing: ease-out; }
+    }
+
+    NavIcon {
+        x: 14px;
+        y: (parent.height - self.height) / 2;
+        kind: root.icon;
+        stroke: root.active ? Palette.accent-background : Palette.foreground;
+    }
+
+    // 文字常驻：宽度固定（不随侧边栏宽度动画而被省略号截断），展开时淡入、折叠时淡出，多出的部分由侧边栏裁掉。
+    Text {
+        x: 42px;
+        y: 0px;
+        width: 100px;
+        height: parent.height;
+        opacity: root.wide ? 1 : 0;
+        visible: self.opacity > 0;
+        animate opacity { duration: 120ms; easing: ease-out; }
+        text: root.text;
+        vertical-alignment: center;
+        overflow: elide;
+        font-size: 14px;
+        font-weight: root.active ? 600 : 400;
+        color: root.active ? Palette.foreground : Theme.subtle-text;
+    }
+}
+
+// 页面编号：0 进程，1 性能，2 设置，3 启动项，4 服务（与 AppWindow.page 一致）。
+// `wide` 为真时图标加文字，否则只有图标。折叠偏好 `expanded` 由用户用顶部菜单按钮切换，窗口过窄时界面不论偏好都收成图标。
+export component Sidebar inherits Rectangle {
+    in property <int> page;
+    in property <bool> wide;
+    // 窗口够宽，菜单按钮才有意义。
+    in property <bool> can-toggle;
+    callback page-selected(int);
+    callback settings-clicked();
+    callback toggle-clicked();
+
+    background: Theme.dark ? #ffffff06 : #00000004;
+    // 宽度过渡时裁掉尚未展开的文字。
+    clip: true;
+
+    VerticalLayout {
+        padding: 6px;
+        spacing: 2px;
+
+        if root.can-toggle: NavItem {
+            text: root.wide ? @tr("收起侧边栏") : @tr("展开侧边栏");
+            icon: 5;
+            wide: false;
+            indicator: false;
+            clicked => {
+                root.toggle-clicked();
+            }
+        }
+
+        NavItem {
+            text: @tr("进程");
+            icon: 0;
+            wide: root.wide;
+            active: root.page == 0;
+            clicked => {
+                root.page-selected(0);
+            }
+        }
+
+        NavItem {
+            text: @tr("性能");
+            icon: 1;
+            wide: root.wide;
+            active: root.page == 1;
+            clicked => {
+                root.page-selected(1);
+            }
+        }
+
+        NavItem {
+            text: @tr("启动项");
+            icon: 2;
+            wide: root.wide;
+            active: root.page == 3;
+            clicked => {
+                root.page-selected(3);
+            }
+        }
+
+        NavItem {
+            text: @tr("服务");
+            icon: 3;
+            wide: root.wide;
+            active: root.page == 4;
+            clicked => {
+                root.page-selected(4);
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        // 设置放在底部：再点一次回到进入设置页之前的页面。
+        NavItem {
+            text: @tr("设置");
+            icon: 4;
+            wide: root.wide;
+            active: root.page == 2;
+            clicked => {
+                root.settings-clicked();
+            }
+        }
+    }
+
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: Theme.divider;
+    }
+}
