@@ -5,6 +5,7 @@
 ## 项目结构
 
 - `crates/core`（`tml-core`）：采集进程快照与系统级指标、构建进程树、结束进程。纯 Rust，可脱离界面单测。
+  核心库不返回面向界面的显示文案：状态、类型、来源用枚举，错误用带原因与系统错误码的结构化类型（如 `ServiceError`、`StartupError`、`IfeoError`、`ShellError`）；中文文案集中在 `crates/app/src/texts.rs` 按枚举映射（本地化接入点）。
 - `crates/app`（`tml-app`，产物 `TaskManagerLite.exe`）：Slint 界面与采样线程。
 - `scripts/`：启动耗时、常驻开销测量与截图脚本。
 - `GLOSSARY.md`：领域术语，命名以它为准。
@@ -21,9 +22,13 @@
 - 单实例限制的 Win32 自动化验收：`pwsh scripts/test-single-instance.ps1`（需先关闭已有实例）；开发时想多开用 `--allow-multiple`（`--measure-startup`、`--screenshot` 同样不受限制）
 - 后台继续采样（设置字段 `background_sampling`）端到端验收：`pwsh scripts/test-background-sampling.ps1`（最小化自己启动的实例，核对曲线连续性并测最小化期间 CPU）
 - 托盘常驻（设置字段 `close_to_tray`）端到端验收：`pwsh scripts/test-tray.ps1`（用 `TML_INSTANCE_ID` 隔离单实例对象名，机器上已有真实实例也可运行；向托盘消息窗口发消息模拟单击/右键/菜单命令，验证隐藏/显示、WM_CLOSE 后常驻、再次启动唤起、隐藏期间 CPU；截图输出到 `-Out`）
+- 键盘快捷键（#71）：Ctrl+F 聚焦当前页搜索框（进程 / 启动项 / 服务页各有一个，性能、设置页跳到进程页的搜索框）、Esc（搜索框内）清空并回到列表、Ctrl+1…5 切页（进程 / 性能 / 启动项 / 服务 / 设置）、F5 立即刷新当前页；说明写在设置页底部“键盘快捷键”。端到端验收：`pwsh scripts/test-shortcuts.ps1`（自己启动 `--allow-multiple` 实例，用 SendInput 发真实按键，读日志里的“界面事件”等行核对，并保存截图；运行期间不要动键盘鼠标，需交互式桌面）
+- 导出 CSV 与复制所选行（#82）：进程页右键行菜单“复制所选行”（Ctrl+C，搜索框有焦点时留给文本框）、“导出为 CSV…”，表头右键菜单也有“导出为 CSV…”；性能页左栏底部“导出当前快照…”（顶栏已满，不放顶栏）。进程导出按当前视图、可见列、排序，单元格文字与界面一致（`controller/export.rs`，CPU/内存/磁盘文字与界面共用 `basic_texts`，基本列标题来自 Slint `Columns.title-*`），树形/分组视图展开全部后代并多“层级”“分组”列；含用户名/映像路径/命令行列时先弹敏感列确认（ConfirmDialog 的 kind 3）；保存对话框在 `file_dialog::pick_save_file`（后台线程），写文件在 core 的 `csv.rs`（UTF-8 BOM、RFC 4180、CRLF，不引第三方库）；日志只记行数、列数、结果、错误码。测试钩子 `--export-csv <process|performance>=<路径>`（不弹对话框，直接写文件后退出，读设置同正常启动）、`--menu-action copy-row:<pid>[:group]`。端到端验收：`pwsh scripts/test-export-csv.ps1`（需交互式桌面，含真实鼠标键盘走保存对话框；`-SkipKeyboard` 跳过真实输入部分），人工项见 `docs/checklist/issue-82.md`
+- 运行新任务（#69）：Ctrl+N 或侧边栏底部“运行新任务”（动作项，不画选中条）打开 Slint 对话框，输入程序、文件夹、文档或网址，可选“以管理员权限创建此任务”（`runas`，会弹 UAC）、“浏览…”（`GetOpenFileNameW`，后台线程、主窗口为所有者）；最近 10 条输入存 `settings.json` 的 `run_history`（缺字段按空处理）。命令拆分与环境变量展开在 core 的 `runtask.rs`（`parse_command`、`run_task`，返回结构化的 `RunError`），文案在 `texts.rs::run_error`；启动失败或 UAC 取消时在对话框里显示原因且不关闭。端到端验收：`pwsh scripts/test-run-task.ps1`（`--allow-multiple` 实例 + SendInput，只清理自己启动的记事本；不覆盖 UAC、网址、explorer，见 `docs/checklist/issue-69.md`；中文输入法下第一下回车只是上屏，脚本会补按一次）
 - 页面导航在左侧边栏（进程 / 性能 / 启动项 / 服务，设置在底部）：窗口宽度达 900 且未折叠时图标加文字（160px），否则只有图标（48px）；顶部菜单按钮折叠，状态存 `settings.json` 的 `sidebar_collapsed`。
 - 设置页（左侧边栏底部进入）：开机启动写 `HKCU\...\Run`（值 `"<exe>" --autostart`，状态以注册表为准，不写设置文件；环境变量 `TML_AUTOSTART_TEST_KEY` 改写到 `HKCU\Software\TaskManagerLite-test\...` 测试键）。`--autostart` 启动时：开启了 `close_to_tray` 就只建托盘图标、不显示窗口，否则最小化启动。端到端验收：`pwsh scripts/test-autostart.ps1`（隔离单实例名，不碰真实 Run 键）
 - 设置持久化：`%APPDATA%\TaskManagerLite\settings.json`（环境变量 `TML_SETTINGS_DIR` 可覆盖目录；`--screenshot`、`--measure-startup` 不读写）。端到端验收：`pwsh scripts/e2e-settings.ps1`（脚本用 `--allow-multiple` 启动，不受已运行实例影响）
+- 进程级 GPU 占用列（“详细信息”可选列 `gpu`，只在显示该列时才按 PID 聚合 `GPU Engine` 计数器，口径见 `GLOSSARY.md`）：探针 `cargo run -p tml-core --release --example process_gpu_probe -- --secs 10 [--pid N] [--top 8]`（CSV `t,pid,name,gpu`，无读数为 `none`）；测显示该列的常驻开销 `pwsh scripts/measure-idle.ps1 -Gpu`；人工验收见 `docs/checklist/issue-64.md`。
 - ETW 磁盘速率（设置项 `accurate_disk_io`，默认关闭，见 ADR-0004）端到端验收（**需提权终端**，未提权直接退出）：`pwsh scripts/test-etw-disk.ps1`；探针：`cargo run -p tml-core --release --example disk_probe -- --secs 20 [--no-etw] [--pid N]`（输出每进程磁盘速率 CSV，`source` 列区分 `etw`/`approx`）
 - 接管 Ctrl+Shift+Esc（IFEO，见 ADR 0003）：开关 `--register-taskmgr` / `--unregister-taskmgr` / `--taskmgr-status`（可加 `--force`）；端到端验收 `pwsh scripts/test-taskmgr-ifeo.ps1`（环境变量 `TML_IFEO_TEST_KEY` 改写到 HKCU 测试键，不碰 HKLM、不提权）
 - 测试：`cargo test -p tml-core -p tml-app`

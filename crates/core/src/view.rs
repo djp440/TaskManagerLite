@@ -80,6 +80,8 @@ pub struct Totals {
     pub private_working_set: u64,
     /// 字节/秒。
     pub disk_rate: f64,
+    /// GPU 占用合计，同 CPU 口径合计后不超过 100；自身和全部后代都没有读数时为 `None`。
+    pub gpu_usage: Option<f32>,
 }
 
 /// 标题行的 `index`：它不对应任何进程，误当下标用会立即越界而不是悄悄指向别的进程。
@@ -290,9 +292,14 @@ pub fn build_group_view(snapshot: &ProcessSnapshot, apps: &HashSet<u32>, opts: &
             sum.cpu_usage += procs[c].cpu_usage;
             sum.private_working_set += procs[c].private_working_set;
             sum.disk_rate += procs[c].disk_rate;
+            sum.gpu_usage = match (sum.gpu_usage, procs[c].gpu_usage) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+            };
             stack.extend(&children[c]);
         }
         sum.cpu_usage = sum.cpu_usage.min(100.0);
+        sum.gpu_usage = sum.gpu_usage.map(|v| v.min(100.0));
         totals[r] = Some(sum);
     }
     roots.retain(|&i| keep[i]);
@@ -324,6 +331,7 @@ pub fn build_group_view(snapshot: &ProcessSnapshot, apps: &HashSet<u32>, opts: &
             cpu_usage: t.cpu_usage,
             private_working_set: t.private_working_set,
             disk_rate: t.disk_rate,
+            gpu_usage: t.gpu_usage,
         });
         out.push(ViewRow { index: i, depth, has_children: !children[i].is_empty(), expanded, header: None, totals });
         if expanded {
@@ -389,6 +397,7 @@ mod tests {
             cpu_usage: cpu,
             private_working_set: 0,
             disk_rate: 0.0,
+            gpu_usage: None,
             critical: false,
             counters: Default::default(),
             info: None,
@@ -562,7 +571,7 @@ mod tests {
         // 应用行：自身 + 全部后代；子进程行与后台行没有合计。
         assert_eq!(
             rows[1].totals,
-            Some(Totals { cpu_usage: 9.0, private_working_set: 700, disk_rate: 7.0 })
+            Some(Totals { cpu_usage: 9.0, private_working_set: 700, disk_rate: 7.0, gpu_usage: None })
         );
         assert!(rows[2].totals.is_none() && rows[3].totals.is_none());
         assert!(rows.last().unwrap().totals.is_none());
@@ -578,6 +587,53 @@ mod tests {
         s.processes[0].cpu_usage = 80.0;
         s.processes[1].cpu_usage = 60.0;
         assert_eq!(build_group_view(&s, &apps(&[1]), &group_opts(&s))[1].totals.unwrap().cpu_usage, 100.0);
+    }
+
+    #[test]
+    fn group_app_rows_sum_gpu_like_cpu() {
+        let mut s = snap(vec![
+            p(1, 0, 1, "app", 2.0),
+            p(2, 1, 2, "kid", 3.0),
+            p(3, 2, 3, "grandkid", 4.0),
+            p(4, 0, 1, "bg", 9.0),
+        ]);
+        // 没有读数（未显示 GPU 列或计数器不可用）：合计也没有读数。
+        assert_eq!(build_group_view(&s, &apps(&[1]), &group_opts(&s))[1].totals.unwrap().gpu_usage, None);
+        // 自身 + 全部后代相加；部分后代没有读数按 0 计。
+        for (i, gpu) in [(0, Some(10.0)), (1, Some(20.0)), (2, None), (3, Some(50.0))] {
+            s.processes[i].gpu_usage = gpu;
+        }
+        let rows = build_group_view(&s, &apps(&[1]), &group_opts(&s));
+        assert_eq!(rows[1].totals.unwrap().gpu_usage, Some(30.0));
+        assert!(rows[2].totals.is_none(), "子进程行显示各自的值");
+        // 只有后代有读数。
+        s.processes[0].gpu_usage = None;
+        assert_eq!(build_group_view(&s, &apps(&[1]), &group_opts(&s))[1].totals.unwrap().gpu_usage, Some(20.0));
+        // 与 CPU 一致：合计不超过 100%。
+        s.processes[0].gpu_usage = Some(80.0);
+        s.processes[1].gpu_usage = Some(60.0);
+        assert_eq!(build_group_view(&s, &apps(&[1]), &group_opts(&s))[1].totals.unwrap().gpu_usage, Some(100.0));
+    }
+
+    #[test]
+    fn gpu_column_sorts_and_none_is_smallest() {
+        let mut s = snap(vec![p(1, 0, 1, "none", 0.0), p(2, 0, 1, "idle", 0.0), p(3, 0, 1, "busy", 0.0)]);
+        s.processes[1].gpu_usage = Some(0.0);
+        s.processes[2].gpu_usage = Some(35.0);
+        let opts = ViewOptions { sort_key: SortKey::Detail(DetailColumn::Gpu), ..Default::default() };
+        let names = |s: &ProcessSnapshot, o: &ViewOptions| -> Vec<String> {
+            build_view(s, o).iter().map(|r| s.processes[r.index].name.clone()).collect()
+        };
+        assert_eq!(names(&s, &opts), ["busy", "idle", "none"]);
+        let asc = ViewOptions { descending: false, ..opts.clone() };
+        assert_eq!(names(&s, &asc), ["none", "idle", "busy"]);
+        // 分组视图：应用之间按合计排序（a 自身为 0，但后代很忙）。
+        s.processes = vec![p(1, 0, 1, "a", 0.0), p(2, 1, 2, "a-kid", 0.0), p(3, 0, 1, "b", 0.0)];
+        s.processes[0].gpu_usage = Some(0.0);
+        s.processes[1].gpu_usage = Some(40.0);
+        s.processes[2].gpu_usage = Some(10.0);
+        let rows = build_group_view(&s, &apps(&[1, 3]), &opts);
+        assert_eq!(show(&s, &rows), ["H:Apps(2)", "a@0", "b@0"]);
     }
 
     #[test]

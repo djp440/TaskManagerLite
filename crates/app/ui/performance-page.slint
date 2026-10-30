@@ -1,4 +1,4 @@
-import { Palette, ScrollView } from "std-widgets.slint";
+import { Button, Palette, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Resource, ResourceKind, ResourceTint } from "types.slint";
 import { MemoryDetail, MemoryView } from "memory-detail.slint";
@@ -131,6 +131,8 @@ export component PerformancePage inherits Rectangle {
     in property <string> selected-resource;
     in property <int> selected-index;
     callback resource-selected(string);
+    // 左栏底部的“导出当前快照…”：把各资源的当前数值与时间窗口内的曲线导出为 CSV。
+    callback export-snapshot();
     // 双击左栏卡片：切换到迷你模式。
     callback mini-mode();
     // 内存详情页的数据（kind == memory 时使用）。
@@ -155,8 +157,11 @@ export component PerformancePage inherits Rectangle {
         padding: 12px;
         spacing: 12px;
 
-        ScrollView {
+        VerticalLayout {
             width: 240px;
+            spacing: 8px;
+            ScrollView {
+            vertical-stretch: 1;
             content-width: self.visible-width;
             VerticalLayout {
             spacing: 4px;
@@ -173,6 +178,14 @@ export component PerformancePage inherits Rectangle {
                 }
             }
         }
+        }
+
+            Button {
+                text: @tr("导出当前快照…");
+                clicked => {
+                    root.export-snapshot();
+                }
+            }
         }
 
         Rectangle {

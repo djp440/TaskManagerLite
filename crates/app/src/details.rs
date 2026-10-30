@@ -35,13 +35,14 @@ pub fn title(c: DetailColumn) -> &'static str {
         DetailColumn::Elevated => "已提权",
         DetailColumn::Description => "描述",
         DetailColumn::Company => "公司",
+        DetailColumn::Gpu => "GPU",
     }
 }
 
 /// 列的默认宽度（逻辑像素）。
 pub fn default_width(c: DetailColumn) -> f32 {
     match c {
-        DetailColumn::Session | DetailColumn::Threads | DetailColumn::Arch => 72.0,
+        DetailColumn::Session | DetailColumn::Threads | DetailColumn::Arch | DetailColumn::Gpu => 72.0,
         DetailColumn::Elevated | DetailColumn::Handles => 76.0,
         DetailColumn::Status | DetailColumn::Priority | DetailColumn::CpuTime => 88.0,
         DetailColumn::WorkingSet | DetailColumn::PeakWorkingSet | DetailColumn::Commit => 108.0,
@@ -65,6 +66,7 @@ pub fn right_aligned(c: DetailColumn) -> bool {
             | DetailColumn::PeakWorkingSet
             | DetailColumn::Commit
             | DetailColumn::CpuTime
+            | DetailColumn::Gpu
     )
 }
 
@@ -97,7 +99,8 @@ pub fn cpu_time(t: u64) -> String {
 }
 
 /// 单元格文字。静态信息尚未读到或读不到时为空。
-pub fn cell(p: &Process, c: DetailColumn) -> String {
+/// `gpu`：GPU 列要显示的值——分组视图的应用行是自身加后代的合计，其余行就是进程自己的 `gpu_usage`。
+pub fn cell(p: &Process, c: DetailColumn, gpu: Option<f32>) -> String {
     let n = &p.counters;
     let info = p.info.as_deref();
     let text =
@@ -135,7 +138,13 @@ pub fn cell(p: &Process, c: DetailColumn) -> String {
         },
         DetailColumn::Description => text(|i| i.description.as_deref()),
         DetailColumn::Company => text(|i| i.company.as_deref()),
+        DetailColumn::Gpu => format::gpu_percent(gpu),
     }
+}
+
+/// 是否显示了 GPU 列：只有显示时采样线程才做进程级 GPU 聚合。
+pub fn needs_gpu(shown: &[Shown]) -> bool {
+    shown.iter().any(|s| s.column == DetailColumn::Gpu)
 }
 
 /// 显示中的可选列（有序）与各自宽度。
@@ -279,6 +288,14 @@ mod tests {
     }
 
     #[test]
+    fn gpu_column_is_detected_for_sampling() {
+        let shown = |c| vec![Shown { column: c, width: 72.0 }];
+        assert!(needs_gpu(&shown(DetailColumn::Gpu)));
+        assert!(!needs_gpu(&shown(DetailColumn::Threads)));
+        assert!(!needs_gpu(&[]));
+    }
+
+    #[test]
     fn every_column_has_title_and_sane_width() {
         for c in DetailColumn::ALL {
             assert!(!title(c).is_empty());
@@ -308,6 +325,7 @@ mod tests {
             cpu_usage: 0.0,
             private_working_set: 0,
             disk_rate: 0.0,
+            gpu_usage: None,
             critical: false,
             counters: tml_core::Counters {
                 suspended: true,
@@ -316,9 +334,9 @@ mod tests {
             },
             info: None,
         };
-        assert_eq!(cell(&p, DetailColumn::Status), "已挂起");
-        assert_eq!(cell(&p, DetailColumn::Handles), "12");
-        assert_eq!(cell(&p, DetailColumn::User), "");
+        assert_eq!(cell(&p, DetailColumn::Status, None), "已挂起");
+        assert_eq!(cell(&p, DetailColumn::Handles, None), "12");
+        assert_eq!(cell(&p, DetailColumn::User, None), "");
         let p = Process {
             info: Some(Arc::new(StaticInfo {
                 elevated: Some(true),
@@ -326,6 +344,26 @@ mod tests {
             })),
             ..p
         };
-        assert_eq!(cell(&p, DetailColumn::Elevated), "是");
+        assert_eq!(cell(&p, DetailColumn::Elevated, None), "是");
+    }
+
+    #[test]
+    fn gpu_cell_distinguishes_unavailable_from_idle() {
+        let p = Process {
+            key: key(9),
+            parent_pid: 0,
+            name: "x".into(),
+            cpu_usage: 0.0,
+            private_working_set: 0,
+            disk_rate: 0.0,
+            gpu_usage: None,
+            critical: false,
+            counters: Default::default(),
+            info: None,
+        };
+        assert_eq!(cell(&p, DetailColumn::Gpu, p.gpu_usage), "—");
+        assert_eq!(cell(&p, DetailColumn::Gpu, Some(0.0)), "0%");
+        assert_eq!(cell(&p, DetailColumn::Gpu, Some(37.46)), "37.5%");
+        assert!(right_aligned(DetailColumn::Gpu) && default_descending(DetailColumn::Gpu));
     }
 }

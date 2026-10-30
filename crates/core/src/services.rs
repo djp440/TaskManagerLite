@@ -1,7 +1,7 @@
 //! Windows 服务。仅由服务页按需调用：一次枚举拿到状态与 PID，启动类型、描述、组按服务名缓存。
+use crate::error::{ElevationError, SystemError};
 use std::{
     collections::HashMap,
-    io,
     time::{Duration, Instant},
 };
 use windows::{
@@ -41,18 +41,6 @@ impl ServiceState {
             _ => Self::Unknown,
         }
     }
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Stopped => "已停止",
-            Self::StartPending => "正在启动",
-            Self::StopPending => "正在停止",
-            Self::Running => "正在运行",
-            Self::ContinuePending => "正在继续",
-            Self::PausePending => "正在暂停",
-            Self::Paused => "已暂停",
-            Self::Unknown => "未知",
-        }
-    }
 }
 
 /// 启动类型，取值与 `QUERY_SERVICE_CONFIGW::dwStartType` 对应；自动启动再区分是否延迟。
@@ -79,17 +67,6 @@ impl StartType {
             3 => Self::Manual,
             4 => Self::Disabled,
             _ => Self::Unknown,
-        }
-    }
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Auto => "自动",
-            Self::AutoDelayed => "自动（延迟启动）",
-            Self::Manual => "手动",
-            Self::Disabled => "已禁用",
-            Self::Boot => "引导",
-            Self::System => "系统",
-            Self::Unknown => "未知",
         }
     }
 }
@@ -127,6 +104,13 @@ impl Service {
     pub fn can_stop(&self) -> bool {
         matches!(self.state, ServiceState::Running | ServiceState::Paused) && self.accepts_stop
     }
+
+    /// 搜索：`needle` 已去空白并转小写；为空时匹配全部，否则服务名或显示名称包含它（不区分大小写）。
+    pub fn matches(&self, needle: &str) -> bool {
+        needle.is_empty()
+            || self.name.to_lowercase().contains(needle)
+            || self.display_name.to_lowercase().contains(needle)
+    }
 }
 
 /// 启动、停止、重启。
@@ -153,13 +137,6 @@ impl Action {
             Self::Restart => "restart",
         }
     }
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Start => "启动",
-            Self::Stop => "停止",
-            Self::Restart => "重启",
-        }
-    }
 }
 
 struct Handle(SC_HANDLE);
@@ -171,17 +148,82 @@ impl Drop for Handle {
     }
 }
 
-fn win(e: windows::core::Error) -> io::Error {
-    io::Error::from_raw_os_error(e.code().0 & 0xFFFF)
+/// 服务操作失败的原因。界面层按枚举映射成显示文案；系统错误保留错误码。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceError {
+    /// 系统调用失败（拒绝访问、服务不存在、请求超时等，见错误码）。
+    System(SystemError),
+    /// 经 UAC 提权子进程执行时失败。
+    Elevation(ElevationError),
+    /// 读到的服务配置为空。
+    EmptyConfig,
+    /// 服务启动后随即停止。
+    StoppedAfterStart,
+    /// 停止请求发出后服务没有停止。
+    NotStopped,
+    /// 服务名为空或含非法字符。
+    InvalidName,
+    /// 提权子进程命令行：参数数量错误。
+    BadArgumentCount,
+    /// 提权子进程命令行：动作错误。
+    BadAction,
+    /// 提权子进程命令行：服务名编码错误。
+    BadNameEncoding,
 }
 
-fn manager(access: u32) -> io::Result<Handle> {
+impl ServiceError {
+    /// 提权子进程用作退出码：Win32 错误码，否则 1。
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::System(e) => e.exit_code(),
+            _ => 1,
+        }
+    }
+}
+
+impl std::fmt::Display for ServiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::System(e) => write!(f, "system call failed: {e}"),
+            Self::Elevation(e) => write!(f, "{e}"),
+            Self::EmptyConfig => f.write_str("empty service config"),
+            Self::StoppedAfterStart => f.write_str("service stopped right after start"),
+            Self::NotStopped => f.write_str("service did not stop"),
+            Self::InvalidName => f.write_str("invalid service name"),
+            Self::BadArgumentCount => f.write_str("bad argument count"),
+            Self::BadAction => f.write_str("bad action"),
+            Self::BadNameEncoding => f.write_str("bad name encoding"),
+        }
+    }
+}
+
+impl std::error::Error for ServiceError {}
+
+impl From<SystemError> for ServiceError {
+    fn from(e: SystemError) -> Self {
+        Self::System(e)
+    }
+}
+
+impl From<ElevationError> for ServiceError {
+    fn from(e: ElevationError) -> Self {
+        Self::Elevation(e)
+    }
+}
+
+type Result<T> = std::result::Result<T, ServiceError>;
+
+fn win(e: windows::core::Error) -> ServiceError {
+    ServiceError::System(SystemError::Win32(e.code().0 & 0xFFFF))
+}
+
+fn manager(access: u32) -> Result<Handle> {
     unsafe { OpenSCManagerW(None, None, access) }
         .map(Handle)
         .map_err(win)
 }
 
-fn open(scm: &Handle, name: &str, access: u32) -> io::Result<Handle> {
+fn open(scm: &Handle, name: &str, access: u32) -> Result<Handle> {
     unsafe { OpenServiceW(scm.0, &HSTRING::from(name), access) }
         .map(Handle)
         .map_err(win)
@@ -214,7 +256,7 @@ fn parse(items: &[ENUM_SERVICE_STATUS_PROCESSW]) -> Vec<Service> {
 }
 
 /// 枚举全部 Win32 服务（含每用户服务实例，与 `Get-Service` 口径一致），按名称排序。
-fn enumerate() -> io::Result<Vec<Service>> {
+fn enumerate() -> Result<Vec<Service>> {
     let scm = manager(SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE)?;
     let mut services = vec![];
     let mut resume = 0u32;
@@ -275,7 +317,7 @@ fn svchost_group(command: &str) -> String {
 }
 
 /// 读一个配置项；缓冲区不足时按返回的大小重试一次。
-fn query(read: impl Fn(Option<&mut [u8]>, &mut u32) -> windows::core::Result<()>) -> io::Result<Vec<u64>> {
+fn query(read: impl Fn(Option<&mut [u8]>, &mut u32) -> windows::core::Result<()>) -> Result<Vec<u64>> {
     let mut needed = 0u32;
     match read(None, &mut needed) {
         Ok(()) => return Ok(vec![]),
@@ -289,7 +331,7 @@ fn query(read: impl Fn(Option<&mut [u8]>, &mut u32) -> windows::core::Result<()>
     Ok(buf)
 }
 
-fn read_config(scm: &Handle, name: &str) -> io::Result<Config> {
+fn read_config(scm: &Handle, name: &str) -> Result<Config> {
     let svc = open(scm, name, SERVICE_QUERY_CONFIG)?;
     let buf = query(|b, n| unsafe {
         let len = b.as_ref().map_or(0, |b| b.len() as u32);
@@ -301,7 +343,7 @@ fn read_config(scm: &Handle, name: &str) -> io::Result<Config> {
         )
     })?;
     if buf.is_empty() {
-        return Err(io::Error::other("服务配置为空"));
+        return Err(ServiceError::EmptyConfig);
     }
     let cfg = unsafe { &*buf.as_ptr().cast::<QUERY_SERVICE_CONFIGW>() };
     let config2 = |level| query(|b, n| unsafe { QueryServiceConfig2W(svc.0, level, b, n) });
@@ -338,7 +380,7 @@ impl ServiceList {
         self.cache.clear();
     }
 
-    pub fn list(&mut self) -> io::Result<Vec<Service>> {
+    pub fn list(&mut self) -> Result<Vec<Service>> {
         let mut services = enumerate()?;
         let scm = manager(SC_MANAGER_CONNECT)?;
         self.fill(&mut services, |name| read_config(&scm, name).ok());
@@ -362,7 +404,7 @@ impl ServiceList {
     }
 }
 
-fn status(svc: &Handle) -> io::Result<SERVICE_STATUS_PROCESS> {
+fn status(svc: &Handle) -> Result<SERVICE_STATUS_PROCESS> {
     let mut s = SERVICE_STATUS_PROCESS::default();
     let bytes = unsafe {
         std::slice::from_raw_parts_mut(
@@ -377,7 +419,7 @@ fn status(svc: &Handle) -> io::Result<SERVICE_STATUS_PROCESS> {
 }
 
 /// 等服务离开挂起状态；超时按“服务没有及时响应”报错。
-fn wait(svc: &Handle, pending: ServiceState, timeout: Duration) -> io::Result<ServiceState> {
+fn wait(svc: &Handle, pending: ServiceState, timeout: Duration) -> Result<ServiceState> {
     let end = Instant::now() + timeout;
     loop {
         let state = ServiceState::from_raw(status(svc)?.dwCurrentState.0);
@@ -385,7 +427,7 @@ fn wait(svc: &Handle, pending: ServiceState, timeout: Duration) -> io::Result<Se
             return Ok(state);
         }
         if Instant::now() >= end {
-            return Err(io::Error::from_raw_os_error(ERROR_SERVICE_REQUEST_TIMEOUT.0 as i32));
+            return Err(ServiceError::System(SystemError::Win32(ERROR_SERVICE_REQUEST_TIMEOUT.0 as i32)));
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -393,15 +435,15 @@ fn wait(svc: &Handle, pending: ServiceState, timeout: Duration) -> io::Result<Se
 
 const WAIT: Duration = Duration::from_secs(30);
 
-fn start(svc: &Handle) -> io::Result<()> {
+fn start(svc: &Handle) -> Result<()> {
     unsafe { StartServiceW(svc.0, None) }.map_err(win)?;
     match wait(svc, ServiceState::StartPending, WAIT)? {
-        ServiceState::Stopped => Err(io::Error::other("服务启动后随即停止")),
+        ServiceState::Stopped => Err(ServiceError::StoppedAfterStart),
         _ => Ok(()),
     }
 }
 
-fn stop(svc: &Handle) -> io::Result<()> {
+fn stop(svc: &Handle) -> Result<()> {
     let mut s = SERVICE_STATUS::default();
     match unsafe { ControlService(svc.0, SERVICE_CONTROL_STOP, &mut s) } {
         Ok(()) => {}
@@ -411,13 +453,13 @@ fn stop(svc: &Handle) -> io::Result<()> {
     }
     match wait(svc, ServiceState::StopPending, WAIT)? {
         ServiceState::Stopped => Ok(()),
-        _ => Err(io::Error::other("服务没有停止")),
+        _ => Err(ServiceError::NotStopped),
     }
 }
 
-fn control_direct(name: &str, action: Action) -> io::Result<()> {
+fn control_direct(name: &str, action: Action) -> Result<()> {
     if name.is_empty() || name.contains(['\0', '/', '\\']) {
-        return Err(io::Error::other("无效的服务名"));
+        return Err(ServiceError::InvalidName);
     }
     let scm = manager(SC_MANAGER_CONNECT)?;
     let access = SERVICE_QUERY_STATUS
@@ -436,18 +478,19 @@ fn control_direct(name: &str, action: Action) -> io::Result<()> {
 
 /// 执行操作并等待服务到达目标状态。未提权时先直接尝试，权限不足且 `elevate` 为真时
 /// 通过固定参数的提权子进程执行（弹出 UAC）；`elevate` 为假时直接返回“拒绝访问”。
-pub fn control(name: &str, action: Action, elevate: bool) -> io::Result<()> {
+pub fn control(name: &str, action: Action, elevate: bool) -> Result<()> {
     match control_direct(name, action) {
         Err(e)
             if elevate
                 && !crate::is_elevated()
-                && e.raw_os_error() == Some(ERROR_ACCESS_DENIED.0 as i32) =>
+                && matches!(&e, ServiceError::System(s) if s.win32_code() == Some(ERROR_ACCESS_DENIED.0 as i32)) =>
         {
             crate::startup::run_elevated(&format!(
                 "--service-control {} {}",
                 action.arg(),
                 crate::startup::hex(name)
             ))
+            .map_err(ServiceError::Elevation)
         }
         r => r,
     }
@@ -460,12 +503,13 @@ pub fn run_cli(args: &[String]) -> Option<i32> {
     }
     let result = (|| {
         if args.len() != 4 {
-            return Err(io::Error::other("参数数量错误"));
+            return Err(ServiceError::BadArgumentCount);
         }
-        let action = Action::parse(&args[2]).ok_or_else(|| io::Error::other("操作错误"))?;
-        control_direct(&crate::startup::unhex(&args[3])?, action)
+        let action = Action::parse(&args[2]).ok_or(ServiceError::BadAction)?;
+        let name = crate::startup::unhex(&args[3]).ok_or(ServiceError::BadNameEncoding)?;
+        control_direct(&name, action)
     })();
-    Some(result.map_or_else(|e| e.raw_os_error().unwrap_or(1), |()| 0))
+    Some(result.map_or_else(|e| e.exit_code(), |()| 0))
 }
 
 #[cfg(test)]
@@ -502,16 +546,28 @@ mod tests {
     }
 
     #[test]
+    fn search_matches_name_or_display_name_case_insensitive() {
+        let s = Service { name: "Spooler".into(), display_name: "Print Spooler 打印后台处理程序".into(), ..Default::default() };
+        assert!(s.matches(""));
+        assert!(s.matches("spool"));
+        assert!(s.matches("print"));
+        assert!(s.matches("打印"));
+        assert!(!s.matches("dhcp"));
+    }
+
+    #[test]
     fn maps_states_and_start_types() {
-        let states: Vec<_> = (0..=8).map(|v| ServiceState::from_raw(v).label()).collect();
+        use ServiceState as S;
+        let states: Vec<_> = (0..=8).map(S::from_raw).collect();
         assert_eq!(
             states,
-            ["未知", "已停止", "正在启动", "正在停止", "正在运行", "正在继续", "正在暂停", "已暂停", "未知"]
+            [S::Unknown, S::Stopped, S::StartPending, S::StopPending, S::Running, S::ContinuePending, S::PausePending, S::Paused, S::Unknown]
         );
         assert_eq!(StartType::from_raw(2, false), StartType::Auto);
-        assert_eq!(StartType::from_raw(2, true).label(), "自动（延迟启动）");
+        assert_eq!(StartType::from_raw(2, true), StartType::AutoDelayed);
         assert_eq!(StartType::from_raw(3, true), StartType::Manual);
-        assert_eq!(StartType::from_raw(4, false).label(), "已禁用");
+        assert_eq!(StartType::from_raw(4, false), StartType::Disabled);
+        assert_eq!(StartType::from_raw(1, false), StartType::System);
         assert_eq!(StartType::from_raw(0, false), StartType::Boot);
         assert_eq!(StartType::from_raw(9, false), StartType::Unknown);
         // 运行但不接受停止（如 RpcSs）时不能停止。
@@ -522,6 +578,25 @@ mod tests {
             assert_eq!(a.arg(), arg);
         }
         assert_eq!(Action::parse("pause"), None);
+    }
+
+    #[test]
+    fn enum_declaration_order_is_the_sort_order() {
+        // 服务页按状态、启动类型排序时直接比较枚举，顺序即声明顺序（与改动前一致）。
+        use ServiceState as S;
+        let states = [S::Stopped, S::StartPending, S::StopPending, S::Running, S::ContinuePending, S::PausePending, S::Paused, S::Unknown];
+        assert!(states.windows(2).all(|w| w[0] < w[1]));
+        use StartType as T;
+        let types = [T::Auto, T::AutoDelayed, T::Manual, T::Disabled, T::Boot, T::System, T::Unknown];
+        assert!(types.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn errors_keep_reason_and_system_code() {
+        let denied = ServiceError::System(SystemError::Win32(ERROR_ACCESS_DENIED.0 as i32));
+        assert_eq!(denied.exit_code(), 5);
+        assert_eq!(ServiceError::NotStopped.exit_code(), 1);
+        assert_eq!(ServiceError::System(SystemError::Other { code: -1, message: "x".into() }).exit_code(), 1);
     }
 
     #[test]

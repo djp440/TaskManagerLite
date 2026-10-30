@@ -8,6 +8,7 @@ use slint::ComponentHandle;
 use tml_core::ProcessKey;
 
 use super::Controller;
+use crate::texts;
 use crate::{AppWindow, ProcessMenu};
 
 const STATUS_PATH_COPIED: i32 = 6;
@@ -36,7 +37,7 @@ pub fn availability(path: Option<&Path>, command_line: Option<&str>) -> Availabi
 }
 
 /// 菜单动作失败时在状态栏显示的说明（前面由界面加上“操作失败：”）。
-fn failure(action: &str, reason: &str) -> String {
+pub(super) fn failure(action: &str, reason: &str) -> String {
     format!("{action}（{reason}）")
 }
 
@@ -75,7 +76,7 @@ impl Controller {
         menu.set_can_show_properties(a.properties);
     }
 
-    fn report(&self, kind: i32, arg: String) {
+    pub(super) fn report(&self, kind: i32, arg: String) {
         if let Some(ui) = self.ui.upgrade() {
             ui.set_status_arg(arg.into());
             ui.set_status_kind(kind);
@@ -98,7 +99,7 @@ impl Controller {
         let Some((_, _, path)) = self.selected_with_path("打开文件位置") else { return };
         if let Err(e) = tml_core::reveal_in_explorer(&path) {
             self.log.borrow_mut().line(format!("打开文件位置失败 {} {e:?}", path.display()));
-            self.report(STATUS_ERROR, failure("打开文件位置", &e.to_string()));
+            self.report(STATUS_ERROR, failure("打开文件位置", &texts::shell_error(&e)));
         }
     }
 
@@ -129,7 +130,7 @@ impl Controller {
         let Some((_, _, path)) = self.selected_with_path("打开属性") else { return };
         if let Err(e) = tml_core::show_properties(&path) {
             self.log.borrow_mut().line(format!("打开属性失败 {} {e:?}", path.display()));
-            self.report(STATUS_ERROR, failure("打开属性", &e.to_string()));
+            self.report(STATUS_ERROR, failure("打开属性", &texts::shell_error(&e)));
         }
     }
 
@@ -137,7 +138,7 @@ impl Controller {
         let Some((_, name, _)) = self.selected_process() else { return };
         if let Err(e) = tml_core::search_online(&name) {
             self.log.borrow_mut().line(format!("在线搜索失败 {name} {e:?}"));
-            self.report(STATUS_ERROR, failure("在线搜索", &e.to_string()));
+            self.report(STATUS_ERROR, failure("在线搜索", &texts::shell_error(&e)));
         }
     }
 }

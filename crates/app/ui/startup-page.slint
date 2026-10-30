@@ -10,6 +10,9 @@ export global StartupData {
     in-out property <bool> descending;
     in property <bool> busy;
     in property <string> note;
+    // 搜索文字，由工具栏的搜索框双向绑定；编辑后 Rust 重新过滤。
+    in-out property <string> filter;
+    callback filter-edited();
     callback refresh();
     callback toggle();
     callback sort(int);

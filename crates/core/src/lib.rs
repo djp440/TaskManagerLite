@@ -5,20 +5,23 @@ mod autostart;
 pub mod startup;
 mod clipboard;
 mod control;
+pub mod csv;
 mod cpu;
 mod details;
 mod diskio;
 mod disks;
+mod error;
 mod etw;
 mod icon;
 mod instance;
 mod memory;
 mod nt;
 mod network;
-pub use network::NetworkAdapter;
+pub use network::{ConnectionKind, NetworkAdapter};
 mod procinfo;
 mod sampler;
 pub mod services;
+mod runtask;
 mod shellops;
 mod snapshot;
 mod system;
@@ -26,26 +29,29 @@ mod taskmgr;
 mod view;
 
 pub use apps::app_pids;
-pub use autostart::{AUTOSTART_ARG, AUTOSTART_TEST_KEY_ENV, Autostart, AutostartKey};
+pub use autostart::{AUTOSTART_ARG, AUTOSTART_TEST_KEY_ENV, Autostart, AutostartError, AutostartKey};
 pub use clipboard::{clipboard_text, set_clipboard_text};
 pub use control::{EndError, end_process, is_elevated, relaunch_elevated};
 pub use cpu::{CpuInfo, CpuSample, read_cpu_info};
 pub use details::{Arch, Counters, DetailColumn, StaticInfo, StaticReader, local_time_text};
 mod gpu;
 pub use gpu::Gpu;
-pub use disks::{DiskVolume, PhysicalDisk};
+pub use disks::{DiskVolume, MediaType, PhysicalDisk};
+pub use error::{ElevationError, SystemError};
 pub use etw::{DiskTrace, StartError, TraceGuard, TraceState, stop_all as stop_disk_trace};
 pub use icon::{IconBitmap, default_icon, file_icon};
 pub use instance::{Acquired, SingleInstance, acquire, activate_own_window, is_relaunch};
 pub use memory::{MemoryHardware, MemoryStatus};
 pub use procinfo::{command_line, image_path, image_path_of};
 pub use sampler::{DiskSource, Sample, Sampler, Scope};
+pub use runtask::{Command as RunCommand, RunError, expand_env, parse_command, parse_command_with, run_task};
 pub use shellops::{ShellError, reveal_in_explorer, search_online, search_url, show_properties};
 pub use snapshot::{Process, ProcessKey, ProcessSnapshot};
 pub use system::SystemMetrics;
 pub use taskmgr::{
-    Ifeo, IfeoError, Registration, TEST_KEY_ENV, TEST_KEY_PREFIX, check_install_location,
-    debugger_value, launched_as_taskmgr_debugger, run_cli, set_replace_taskmgr,
+    DebuggerValue, Ifeo, IfeoError, Registration, TEST_KEY_ENV, TEST_KEY_PREFIX, UnsafeReason,
+    check_install_location, debugger_value, launched_as_taskmgr_debugger, run_cli,
+    set_replace_taskmgr,
 };
 pub use view::{
     Group, GroupHeader, HEADER_INDEX, SortKey, Totals, ViewMode, ViewOptions, ViewRow,

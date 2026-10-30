@@ -74,6 +74,7 @@ pub struct Sampler {
     hardware_tried: bool,
     critical: HashMap<ProcessKey, bool>,
     track_apps: bool,
+    track_gpu_processes: bool,
     cpu_probe: CpuProbe,
     etw: Option<DiskTrace>,
     etw_tried: bool,
@@ -87,6 +88,12 @@ impl Sampler {
     /// 开启后每次采样都枚举窗口，找出应用进程（仅分组视图需要）。
     pub fn track_apps(&mut self, on: bool) {
         self.track_apps = on;
+    }
+
+    /// 开启后每次完整采样都按 PID 聚合进程级 GPU 占用（填入 `Process::gpu_usage`）。
+    /// 仅在进程列表显示了 GPU 列时开启；关闭时不做聚合，进程的 `gpu_usage` 恒为 `None`。
+    pub fn track_gpu_processes(&mut self, on: bool) {
+        self.track_gpu_processes = on;
     }
 
     /// 开关 ETW 磁盘事件（默认关闭，且需要管理员权限，见 ADR-0004）。运行中可随时切换：
@@ -200,7 +207,12 @@ impl Sampler {
             self.gpu_tried = true;
             self.gpu = crate::gpu::GpuProbe::open();
         }
-        let gpus = self.gpu.as_mut().map(|p| p.sample()).unwrap_or_default();
+        // 进程级 GPU 占用只在需要且有新进程快照时从同一份 PDH 读数里聚合，不新增采集源。
+        let per_process_gpu = full && self.track_gpu_processes;
+        let (gpus, process_gpu) = self.gpu.as_mut().map_or_else(Default::default, |p| p.sample(per_process_gpu));
+        if per_process_gpu {
+            crate::gpu::apply_usage(&mut snapshot.processes, process_gpu.as_ref());
+        }
         let networks = self.net.sample(elapsed);
         // 汇总保持物理网卡口径，虚拟隧道与承载它的物理网卡不能重复累加。
         let net_recv = networks.iter().filter(|n| n.hardware).filter_map(|n| n.recv).sum();

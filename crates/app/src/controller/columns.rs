@@ -6,7 +6,8 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use tml_core::{DetailColumn, SortKey};
 
 use super::{Controller, State};
-use crate::details::{self, InfoWorker, Shown};
+use crate::sampling::Command;
+use crate::details::{self, InfoWorker, Shown, needs_gpu};
 use crate::{AppWindow, Columns, DetailChoice, DetailHeader};
 
 /// 详细信息列在排序序号中的起点：序号 = 100 + 列在 `DetailColumn::ALL` 中的位置。
@@ -105,8 +106,14 @@ impl Controller {
         {
             let mut guard = self.state.borrow_mut();
             let s = &mut *guard;
+            let gpu_before = needs_gpu(&s.details);
             f(s);
             fix_sort(&mut s.opts.sort_key, &mut s.opts.descending, &s.details);
+            // GPU 列只有显示时才让采样线程做进程级聚合；刚显示时会立即补采一次，尽快有值。
+            let gpu_after = needs_gpu(&s.details);
+            if gpu_before != gpu_after {
+                self.sampler.send(Command::Gpu(gpu_after));
+            }
         }
         self.sync_columns();
         self.track_info();
@@ -201,14 +208,15 @@ impl Controller {
     }
 
     /// 当前进程行的详细信息单元格文字。
-    pub(super) fn detail_cells(s: &State, p: &tml_core::Process) -> ModelRc<SharedString> {
+    /// `gpu`：GPU 列的值（应用行为合计，其余行为进程自己的）。
+    pub(super) fn detail_cells(s: &State, p: &tml_core::Process, gpu: Option<f32>) -> ModelRc<SharedString> {
         if s.details.is_empty() {
             return ModelRc::default();
         }
         ModelRc::new(VecModel::from(
             s.details
                 .iter()
-                .map(|d| SharedString::from(details::cell(p, d.column)))
+                .map(|d| SharedString::from(details::cell(p, d.column, gpu)))
                 .collect::<Vec<_>>(),
         ))
     }

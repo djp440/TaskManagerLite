@@ -10,6 +10,12 @@ export global Columns {
     in-out property <length> disk: 108px;
     // 进程磁盘速率是否来自 ETW 磁盘事件（准确）；否则是近似值，列头显示“≈”。
     in-out property <bool> disk-accurate: false;
+    // 基本列的标题：表头与“导出为 CSV”的表头共用这一份文字（Rust 侧读取，见 controller/export.rs）。
+    out property <string> title-name: @tr("名称");
+    out property <string> title-pid: @tr("PID");
+    out property <string> title-cpu: @tr("CPU");
+    out property <string> title-memory: @tr("内存");
+    out property <string> title-disk: self.disk-accurate ? @tr("磁盘") : @tr("磁盘 ≈");
     out property <length> default-pid: 76px;
     out property <length> default-cpu: 76px;
     out property <length> default-memory: 108px;
@@ -49,6 +55,10 @@ export global ProcessMenu {
     callback copy-command-line();
     callback show-properties();
     callback search-online();
+    // 复制所选行为制表符分隔的文本（右键菜单与 Ctrl+C）。
+    callback copy-row();
+    // 导出整个进程列表为 CSV（行右键菜单与表头右键菜单）。
+    callback export-csv();
 }
 
 export component HeaderCell inherits Rectangle {
@@ -239,6 +249,22 @@ component ProcRowView inherits Rectangle {
                 title: @tr("在线搜索进程名");
                 activated => {
                     ProcessMenu.search-online();
+                }
+            }
+
+            MenuSeparator {}
+
+            MenuItem {
+                title: @tr("复制所选行");
+                activated => {
+                    ProcessMenu.copy-row();
+                }
+            }
+
+            MenuItem {
+                title: @tr("导出为 CSV…");
+                activated => {
+                    ProcessMenu.export-csv();
                 }
             }
         }
@@ -505,6 +531,15 @@ export component ProcessPage inherits Rectangle {
                             Columns.reset-details();
                         }
                     }
+
+                    MenuSeparator {}
+
+                    MenuItem {
+                        title: @tr("导出为 CSV…");
+                        activated => {
+                            ProcessMenu.export-csv();
+                        }
+                    }
                 }
             }
 
@@ -518,7 +553,7 @@ export component ProcessPage inherits Rectangle {
                 HeaderCell {
                     horizontal-stretch: 1;
                     resizable: false;
-                    text: @tr("名称");
+                    text: Columns.title-name;
                     align: left;
                     active: root.sort-key == 0;
                     descending: root.sort-descending;
@@ -538,7 +573,7 @@ export component ProcessPage inherits Rectangle {
                     reset => {
                         root.reset-column(1);
                     }
-                    text: @tr("PID");
+                    text: Columns.title-pid;
                     active: root.sort-key == 1;
                     descending: root.sort-descending;
                     clicked => {
@@ -557,7 +592,7 @@ export component ProcessPage inherits Rectangle {
                     reset => {
                         root.reset-column(2);
                     }
-                    text: @tr("CPU");
+                    text: Columns.title-cpu;
                     active: root.sort-key == 2;
                     descending: root.sort-descending;
                     clicked => {
@@ -576,7 +611,7 @@ export component ProcessPage inherits Rectangle {
                     reset => {
                         root.reset-column(3);
                     }
-                    text: @tr("内存");
+                    text: Columns.title-memory;
                     active: root.sort-key == 3;
                     descending: root.sort-descending;
                     clicked => {
@@ -595,7 +630,7 @@ export component ProcessPage inherits Rectangle {
                     reset => {
                         root.reset-column(4);
                     }
-                    text: Columns.disk-accurate ? @tr("磁盘") : @tr("磁盘 ≈");
+                    text: Columns.title-disk;
                     active: root.sort-key == 4;
                     descending: root.sort-descending;
                     clicked => {

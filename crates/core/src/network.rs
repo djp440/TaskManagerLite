@@ -3,13 +3,35 @@ use std::collections::HashMap;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::NetworkManagement::{IpHelper::*, WiFi::*};
 
+/// 网卡的连接类型（由接口类型 `IfType` 得出）；显示名称由界面层决定。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ConnectionKind {
+    /// 无线（`IF_TYPE_IEEE80211`，71）
+    WiFi,
+    /// 以太网（6）以及隧道类（53、131）
+    Ethernet,
+    #[default]
+    Other,
+}
+
+impl ConnectionKind {
+    /// 由 `MIB_IF_ROW2::Type` 判定。
+    pub fn from_if_type(kind: u32) -> Self {
+        match kind {
+            71 => Self::WiFi,
+            6 | 53 | 131 => Self::Ethernet,
+            _ => Self::Other,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NetworkAdapter {
     pub id: String,
     pub name: String,
     pub description: String,
     pub hardware: bool,
-    pub connection: String,
+    pub connection: ConnectionKind,
     pub link_speed: u64,
     pub addresses: String,
     pub ssid: String,
@@ -143,13 +165,7 @@ impl NetworkProbe {
                     name: wide(&r.Alias),
                     description: wide(&r.Description),
                     hardware: r.InterfaceAndOperStatusFlags._bitfield & 1 != 0,
-                    connection: match r.Type {
-                        71 => "Wi-Fi",
-                        6 => "以太网",
-                        53 | 131 => "以太网",
-                        _ => "其他",
-                    }
-                    .into(),
+                    connection: ConnectionKind::from_if_type(r.Type),
                     link_speed: r.ReceiveLinkSpeed.min(r.TransmitLinkSpeed),
                     addresses: addresses.remove(&key).unwrap_or_default(),
                     ssid,
@@ -171,6 +187,16 @@ impl NetworkProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn connection_kind_follows_interface_type() {
+        assert_eq!(ConnectionKind::from_if_type(71), ConnectionKind::WiFi);
+        for t in [6, 53, 131] {
+            assert_eq!(ConnectionKind::from_if_type(t), ConnectionKind::Ethernet, "{t}");
+        }
+        for t in [0, 24, 1, 100] {
+            assert_eq!(ConnectionKind::from_if_type(t), ConnectionKind::Other, "{t}");
+        }
+    }
     #[test]
     fn includes_virtual_adapters_but_excludes_transport_duplicates() {
         assert!(visible(1, 71, 1, true));

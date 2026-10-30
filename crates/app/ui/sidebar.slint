@@ -3,7 +3,7 @@ import { Theme } from "theme.slint";
 import { TipBox } from "controls.slint";
 
 // 侧边栏图标，全部是 16×16 描边路径。
-// kind：0 进程（列表），1 性能（心电曲线），2 启动项（电源），3 服务（四宫格），4 设置（齿轮），5 菜单（三横线）。
+// kind：0 进程（列表），1 性能（心电曲线），2 启动项（电源），3 服务（四宫格），4 设置（齿轮），5 菜单（三横线），6 运行（命令提示符“>_”）。
 component NavIcon inherits Path {
     in property <int> kind;
     width: 16px;
@@ -17,6 +17,7 @@ component NavIcon inherits Path {
         : root.kind == 1 ? "M 1.5 8.5 L 4.5 8.5 L 6.5 3 L 9.5 13 L 11.5 8.5 L 14.5 8.5"
         : root.kind == 2 ? "M 5 4.2 A 5 5 0 1 0 11 4.2 M 8 1.5 L 8 7.5"
         : root.kind == 3 ? "M 2.5 2.5 L 6.8 2.5 L 6.8 6.8 L 2.5 6.8 Z M 9.2 2.5 L 13.5 2.5 L 13.5 6.8 L 9.2 6.8 Z M 2.5 9.2 L 6.8 9.2 L 6.8 13.5 L 2.5 13.5 Z M 9.2 9.2 L 13.5 9.2 L 13.5 13.5 L 9.2 13.5 Z"
+        : root.kind == 6 ? "M 2.8 4.4 L 7 8 L 2.8 11.6 M 8.8 12 L 13.4 12"
         : root.kind == 4 ? "M 6.42 3.15 L 6.8 1.2 L 9.2 1.2 L 9.58 3.15 L 10.32 3.46 L 11.96 2.35 L 13.65 4.04 L 12.54 5.68 L 12.85 6.42 L 14.8 6.8 L 14.8 9.2 L 12.85 9.58 L 12.54 10.32 L 13.65 11.96 L 11.96 13.65 L 10.32 12.54 L 9.58 12.85 L 9.2 14.8 L 6.8 14.8 L 6.42 12.85 L 5.68 12.54 L 4.04 13.65 L 2.35 11.96 L 3.46 10.32 L 3.15 9.58 L 1.2 9.2 L 1.2 6.8 L 3.15 6.42 L 3.46 5.68 L 2.35 4.04 L 4.04 2.35 L 5.68 3.46 Z M 10.2 8 A 2.2 2.2 0 1 0 5.8 8 A 2.2 2.2 0 1 0 10.2 8 Z"
         : "M 2 4 L 14 4 M 2 8 L 14 8 M 2 12 L 14 12";
 }
@@ -24,6 +25,8 @@ component NavIcon inherits Path {
 // 一个导航项：图标固定在左侧，宽时右边显示文字；窄时只剩图标，悬停提示文字。
 component NavItem inherits Rectangle {
     in property <string> text;
+    // 悬停提示（窄侧边栏只有图标时显示）；为空时用 text。
+    in property <string> hint;
     in property <int> icon;
     in property <bool> active;
     in property <bool> wide;
@@ -46,7 +49,7 @@ component NavItem inherits Rectangle {
         }
         if !root.wide: Tooltip {
             TipBox {
-                text: root.text;
+                text: root.hint != "" ? root.hint : root.text;
             }
         }
     }
@@ -96,6 +99,8 @@ export component Sidebar inherits Rectangle {
     callback page-selected(int);
     callback settings-clicked();
     callback toggle-clicked();
+    // 运行新任务：动作项，不是页面入口。
+    callback run-clicked();
 
     background: Theme.dark ? #ffffff06 : #00000004;
     // 宽度过渡时裁掉尚未展开的文字。
@@ -157,6 +162,18 @@ export component Sidebar inherits Rectangle {
 
         Rectangle {
             vertical-stretch: 1;
+        }
+
+        // 运行新任务（Ctrl+N）：动作入口，不画选中条。
+        NavItem {
+            text: @tr("运行新任务");
+            hint: @tr("运行新任务（Ctrl+N）");
+            icon: 6;
+            wide: root.wide;
+            indicator: false;
+            clicked => {
+                root.run-clicked();
+            }
         }
 
         // 设置放在底部：再点一次回到进入设置页之前的页面。
