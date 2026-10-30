@@ -104,6 +104,13 @@ impl Service {
     pub fn can_stop(&self) -> bool {
         matches!(self.state, ServiceState::Running | ServiceState::Paused) && self.accepts_stop
     }
+
+    /// 搜索：`needle` 已去空白并转小写；为空时匹配全部，否则服务名或显示名称包含它（不区分大小写）。
+    pub fn matches(&self, needle: &str) -> bool {
+        needle.is_empty()
+            || self.name.to_lowercase().contains(needle)
+            || self.display_name.to_lowercase().contains(needle)
+    }
 }
 
 /// 启动、停止、重启。
@@ -536,6 +543,16 @@ mod tests {
         assert_eq!(rows[1].state, ServiceState::Stopped);
         assert!(rows[1].can_start() && !rows[1].can_stop());
         assert_eq!(rows[1].config.start_type, StartType::Unknown);
+    }
+
+    #[test]
+    fn search_matches_name_or_display_name_case_insensitive() {
+        let s = Service { name: "Spooler".into(), display_name: "Print Spooler 打印后台处理程序".into(), ..Default::default() };
+        assert!(s.matches(""));
+        assert!(s.matches("spool"));
+        assert!(s.matches("print"));
+        assert!(s.matches("打印"));
+        assert!(!s.matches("dhcp"));
     }
 
     #[test]

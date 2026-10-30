@@ -203,6 +203,10 @@ export component AppWindow inherits Window {
     callback graph-resized();
     // 切换到迷你模式（性能页工具栏按钮、双击性能页左栏卡片、Ctrl+M）。
     callback mini-mode();
+    // F5 在进程页与性能页：立即补采一次。
+    callback refresh-now();
+    // 界面事件（页面切换、搜索框焦点），Rust 写入日志，供自动化验收核对。
+    callback ui-event(string);
     // 性能页选中的资源：实例 id 与它在 resources 中的下标，均由 Rust 维护。
     in property <string> selected-resource: "cpu";
     in property <int> resource-index: 0;
@@ -224,8 +228,14 @@ export component AppWindow inherits Window {
     // 2. 仍放不下时，“以管理员身份重启”收成盾牌图标按钮（悬停显示提示）；
     // 3. 仍放不下时收起置顶按钮（设置页里可以切换置顶）。
     // 档位按搜索框的舒适宽度判断；最窄时（约 800 以下）搜索框再缩到只放下简短占位文字。判断只用不随档位变化的量（各部分的首选/最小宽度），避免绑定循环。
-    private property <string> search-hint: @tr("搜索名称或 PID（Ctrl+F）");
-    private property <string> search-hint-short: @tr("搜索进程");
+    // 进程页、启动项页、服务页各有自己的搜索框（同一位置，按页面显示其一）。
+    private property <bool> search-page: root.page == 0 || root.page == 3 || root.page == 4;
+    private property <string> search-hint: root.page == 3 ? @tr("搜索名称或发布者（Ctrl+F）")
+        : root.page == 4 ? @tr("搜索服务（Ctrl+F）")
+        : @tr("搜索名称或 PID（Ctrl+F）");
+    private property <string> search-hint-short: root.page == 3 ? @tr("搜索启动项")
+        : root.page == 4 ? @tr("搜索服务")
+        : @tr("搜索进程");
     private property <string> elevate-text: @tr("以管理员身份重启");
     private property <string> mini-text: @tr("迷你模式（Ctrl+M）");
     private property <string> pin-text: root.pinned ? @tr("取消置顶") : @tr("窗口置顶");
@@ -241,7 +251,7 @@ export component AppWindow inherits Window {
     private property <length> elevate-icon-need: root.elevated ? 0px : 32px + 8px;
     // 置顶按钮 32px，加上与左侧控件的 8px 间距。
     private property <length> icon-button-need: 32px + 8px;
-    private property <length> toolbar-core-need: toolbar-core.min-width + (root.page == 0 ? root.search-comfort - root.search-floor : 0px);
+    private property <length> toolbar-core-need: toolbar-core.min-width + (root.search-page ? root.search-comfort - root.search-floor : 0px);
     out property <bool> toolbar-elevate-compact: root.toolbar-core-need + root.icon-button-need + root.elevate-text-need > root.toolbar-room;
     private property <length> elevate-need: root.toolbar-elevate-compact ? root.elevate-icon-need : root.elevate-text-need;
     out property <bool> toolbar-pin-shown: root.toolbar-core-need + root.icon-button-need + root.elevate-need <= root.toolbar-room;
@@ -270,6 +280,72 @@ export component AppWindow inherits Window {
         } else {
             root.page-before-settings = root.page;
             root.page = 2;
+        }
+    }
+
+    // Ctrl+1…5 对应的页面编号（侧边栏顺序：进程 0、性能 1、启动项 3、服务 4、设置 2）；其他文字返回 -1。
+    pure function shortcut-page(text: string) -> int {
+        return text == "1" ? 0 : text == "2" ? 1 : text == "3" ? 3 : text == "4" ? 4 : text == "5" ? 2 : -1;
+    }
+
+    // 快捷键切页：进入设置页前记下来源页（与点侧边栏一致），并把焦点还给列表，避免继续留在已隐藏的搜索框里。
+    function goto-page(p: int) {
+        if p == 2 && root.page != 2 {
+            root.page-before-settings = root.page;
+        }
+        root.page = p;
+        keys.focus();
+    }
+
+    // Ctrl+F：聚焦当前页的搜索框并选中已有文字；没有搜索框的页面（性能、设置）跳到进程页的搜索框。
+    function focus-search() {
+        if root.page == 3 {
+            startup-search.focus();
+            startup-search.select-all();
+        } else if root.page == 4 {
+            services-search.focus();
+            services-search.select-all();
+        } else {
+            root.page = 0;
+            search.focus();
+            search.select-all();
+        }
+    }
+
+    // Esc：搜索框有焦点时清空搜索并把焦点还给列表。返回是否处理了按键。
+    function clear-search() -> bool {
+        if root.page == 0 && search.has-focus {
+            root.filter = "";
+            root.filter-edited("");
+            keys.focus();
+            return true;
+        }
+        if root.page == 3 && startup-search.has-focus {
+            StartupData.filter = "";
+            StartupData.filter-edited();
+            keys.focus();
+            return true;
+        }
+        if root.page == 4 && services-search.has-focus {
+            ServiceData.filter = "";
+            ServiceData.filter-edited();
+            keys.focus();
+            return true;
+        }
+        return false;
+    }
+
+    // F5：复用各页面进入时的刷新入口；进程页与性能页立即补采一次。
+    function refresh-page() {
+        root.ui-event("refresh page=\{root.page}");
+        if root.page == 3 {
+            StartupData.refresh();
+        } else if root.page == 4 {
+            ServiceData.refresh();
+        } else if root.page == 2 {
+            SettingsData.refresh();
+        } else {
+            root.refresh-now();
         }
     }
 
@@ -304,12 +380,23 @@ export component AppWindow inherits Window {
                 return reject;
             }
             if event.modifiers.control && (event.text == "f" || event.text == "F") {
-                root.page = 0;
-                search.focus();
+                root.focus-search();
                 return accept;
             }
             if event.modifiers.control && (event.text == "m" || event.text == "M") {
                 root.mini-mode();
+                return accept;
+            }
+            // 只有按着 Ctrl 才切页：在搜索框里输入的数字由文本框自己处理，不会冒泡到这里。
+            if event.modifiers.control && !event.modifiers.shift && !event.modifiers.alt && root.shortcut-page(event.text) >= 0 {
+                root.goto-page(root.shortcut-page(event.text));
+                return accept;
+            }
+            if event.text == Key.F5 {
+                root.refresh-page();
+                return accept;
+            }
+            if event.text == Key.Escape && root.clear-search() {
                 return accept;
             }
             if root.page != 0 {
@@ -412,19 +499,68 @@ export component AppWindow inherits Window {
                                 spacing: 8px;
                                 VerticalLayout {
                                     alignment: center;
-                                    search := LineEdit {
-                                        visible: root.page == 0;
-                                        min-width: root.page == 0 ? root.search-floor : 0px;
-                                        preferred-width: root.page == 0 ? 220px : 0px;
-                                        max-width: root.page == 0 ? 220px : 0px;
-                                        // 窄于舒适宽度时换成简短占位文字，避免文字被截断。
-                                        placeholder-text: self.width >= 219.5px ? root.search-hint : root.search-hint-short;
-                                        text <=> root.filter;
-                                        edited(text) => {
-                                            root.filter-edited(text);
+                                    // 三个搜索框叠在同一位置，按页面显示其一（元素 id 不能在 if 之外引用，所以用 visible 切换）。
+                                    Rectangle {
+                                        min-width: root.search-page ? root.search-floor : 0px;
+                                        preferred-width: root.search-page ? 220px : 0px;
+                                        max-width: root.search-page ? 220px : 0px;
+                                        height: search.preferred-height;
+                                        search := LineEdit {
+                                            x: 0px;
+                                            y: 0px;
+                                            width: parent.width;
+                                            height: parent.height;
+                                            visible: root.page == 0;
+                                            // 窄于舒适宽度时换成简短占位文字，避免文字被截断。
+                                            placeholder-text: self.width >= 219.5px ? root.search-hint : root.search-hint-short;
+                                            text <=> root.filter;
+                                            edited(text) => {
+                                                root.filter-edited(text);
+                                            }
+                                            accepted => {
+                                                keys.focus();
+                                            }
+                                            changed has-focus => {
+                                                root.ui-event("search-focus page=0 focused=" + (self.has-focus ? "1" : "0"));
+                                            }
                                         }
-                                        accepted => {
-                                            keys.focus();
+
+                                        startup-search := LineEdit {
+                                            x: 0px;
+                                            y: 0px;
+                                            width: parent.width;
+                                            height: parent.height;
+                                            visible: root.page == 3;
+                                            placeholder-text: self.width >= 219.5px ? root.search-hint : root.search-hint-short;
+                                            text <=> StartupData.filter;
+                                            edited(text) => {
+                                                StartupData.filter-edited();
+                                            }
+                                            accepted => {
+                                                keys.focus();
+                                            }
+                                            changed has-focus => {
+                                                root.ui-event("search-focus page=3 focused=" + (self.has-focus ? "1" : "0"));
+                                            }
+                                        }
+
+                                        services-search := LineEdit {
+                                            x: 0px;
+                                            y: 0px;
+                                            width: parent.width;
+                                            height: parent.height;
+                                            visible: root.page == 4;
+                                            placeholder-text: self.width >= 219.5px ? root.search-hint : root.search-hint-short;
+                                            text <=> ServiceData.filter;
+                                            edited(text) => {
+                                                ServiceData.filter-edited();
+                                            }
+                                            accepted => {
+                                                keys.focus();
+                                            }
+                                            changed has-focus => {
+                                                root.ui-event("search-focus page=4 focused=" + (self.has-focus ? "1" : "0"));
+                                            }
                                         }
                                     }
                                 }
@@ -704,6 +840,10 @@ export component AppWindow inherits Window {
             root.confirm-kind = 0;
             keys.focus();
         }
+    }
+
+    changed page => {
+        root.ui-event("page=\{root.page}");
     }
 
     init => {

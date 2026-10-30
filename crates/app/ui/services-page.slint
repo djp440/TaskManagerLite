@@ -13,6 +13,9 @@ export global ServiceData {
     in property <bool> busy;
     in property <bool> elevated;
     in property <string> note;
+    // 搜索文字，由工具栏的搜索框双向绑定；编辑后 Rust 重新过滤。
+    in-out property <string> filter;
+    callback filter-edited();
     // 进入页面：清空配置缓存后重新枚举。
     callback refresh();
     callback sort(int);

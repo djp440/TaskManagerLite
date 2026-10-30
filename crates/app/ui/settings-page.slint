@@ -111,6 +111,28 @@ component SettingRow inherits Rectangle {
     }
 }
 
+// 快捷键的键帽。
+component KeyCap inherits Rectangle {
+    in property <string> text;
+    min-width: 28px;
+    height: 24px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: Theme.divider;
+    background: Theme.surface;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        Text {
+            text: root.text;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            color: Palette.foreground;
+        }
+    }
+}
+
 // 一组设置：组标题与一张卡片。
 component SettingGroup inherits VerticalLayout {
     in property <string> title;
@@ -275,6 +297,66 @@ export component SettingsPage inherits Rectangle {
                         toggled => {
                             SettingsData.replace-taskmgr-toggled(self.checked);
                         }
+                    }
+                }
+            }
+
+            SettingGroup {
+                title: @tr("键盘快捷键");
+                SettingRow {
+                    title: @tr("搜索");
+                    description: @tr("进程、启动项、服务页：聚焦搜索框。其他页面跳到进程页的搜索框。");
+                    KeyCap {
+                        text: "Ctrl+F";
+                    }
+                }
+
+                SettingRow {
+                    title: @tr("清空搜索并回到列表");
+                    description: @tr("在搜索框中按下。");
+                    KeyCap {
+                        text: "Esc";
+                    }
+                }
+
+                SettingRow {
+                    title: @tr("切换页面");
+                    description: @tr("依次为进程、性能、启动项、服务、设置。");
+                    KeyCap {
+                        text: "Ctrl+1 … 5";
+                    }
+                }
+
+                SettingRow {
+                    title: @tr("立即刷新当前页");
+                    description: @tr("进程、性能页立即采样一次；启动项、服务页重新枚举。");
+                    KeyCap {
+                        text: "F5";
+                    }
+                }
+
+                SettingRow {
+                    title: @tr("迷你模式");
+                    description: @tr("进入或退出迷你窗口。");
+                    KeyCap {
+                        text: "Ctrl+M";
+                    }
+                }
+
+                SettingRow {
+                    title: @tr("结束选中的进程");
+                    description: @tr("仅进程页。");
+                    KeyCap {
+                        text: "Delete";
+                    }
+                }
+
+                SettingRow {
+                    title: @tr("移动选择");
+                    description: @tr("仅进程页。");
+                    last: true;
+                    KeyCap {
+                        text: "↑ ↓ PgUp PgDn";
                     }
                 }
             }

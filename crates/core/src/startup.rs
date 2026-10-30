@@ -162,6 +162,13 @@ impl Entry {
     pub fn needs_admin(&self) -> bool {
         self.source.index() % 2 == 1
     }
+
+    /// 搜索：`needle` 已去空白并转小写；为空时匹配全部，否则名称或发布者包含它（不区分大小写）。
+    pub fn matches(&self, needle: &str) -> bool {
+        needle.is_empty()
+            || self.name.to_lowercase().contains(needle)
+            || self.publisher.to_lowercase().contains(needle)
+    }
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -598,6 +605,24 @@ mod tests {
         assert_eq!(approval(true), [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(approval(false)[0], 3);
     }
+    #[test]
+    fn search_matches_name_or_publisher_case_insensitive() {
+        let entry = Entry {
+            source: StartupSource::HkcuRun,
+            name: "OneDrive".into(),
+            publisher: "Microsoft Corporation".into(),
+            command: "C:\\secret\\path.exe".into(),
+            enabled: true,
+            target: None,
+        };
+        assert!(entry.matches(""));
+        assert!(entry.matches("onedr"));
+        assert!(entry.matches("microsoft"));
+        // 命令行不参与搜索。
+        assert!(!entry.matches("secret"));
+        assert!(!entry.matches("没有"));
+    }
+
     #[test]
     fn source_index_roundtrip_and_sort_order() {
         use StartupSource::*;

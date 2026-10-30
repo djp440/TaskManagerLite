@@ -55,7 +55,10 @@ const CONFIRM_TREE: i32 = 2;
 const TRAY_RETRIES: u32 = 30;
 
 pub struct Controller {
+    /// 启动项页：当前显示（过滤并排序后）的启动项，与行模型一一对应。
     startup_entries: RefCell<Vec<tml_core::startup::Entry>>,
+    /// 启动项页：最近一次枚举到的全部启动项与图标（未过滤）。
+    startup_all: RefCell<Vec<(tml_core::startup::Entry, Option<tml_core::IconBitmap>)>>,
     services: services_page::ServicesState,
     ui: slint::Weak<AppWindow>,
     rows: Rc<VecModel<ProcRow>>,
@@ -255,6 +258,7 @@ impl Controller {
         });
         let c = Rc::new(Self {
             startup_entries: RefCell::new(Vec::new()),
+            startup_all: RefCell::new(Vec::new()),
             services: Default::default(),
             ui: ui.as_weak(),
             rows,
@@ -424,6 +428,26 @@ impl Controller {
             if let Some(c) = c.upgrade() {
                 c.state.borrow_mut().opts.filter = text.to_string();
                 c.refresh_rows();
+                c.log.borrow_mut().line(format!(
+                    "进程页 搜索={:?} 显示 {} 行",
+                    text.as_str(),
+                    c.rows.row_count()
+                ));
+            }
+        });
+        // F5：进程页与性能页立即补采一次（暂停时也补采）；其余页面由界面直接调用各页面进入时的刷新入口。
+        let c = Rc::downgrade(self);
+        ui.on_refresh_now(move || {
+            if let Some(c) = c.upgrade() {
+                c.sampler.send(Command::Wake);
+                c.log.borrow_mut().line("F5 请求立即补采");
+            }
+        });
+        // 界面事件（页面切换、搜索框焦点、快捷键），仅写入日志，供自动化验收核对。
+        let c = Rc::downgrade(self);
+        ui.on_ui_event(move |event| {
+            if let Some(c) = c.upgrade() {
+                c.log.borrow_mut().line(format!("界面事件 {event}"));
             }
         });
         let c = Rc::downgrade(self);

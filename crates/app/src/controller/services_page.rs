@@ -10,7 +10,9 @@ pub const SERVICES_PAGE: i32 = 4;
 /// 服务页的界面线程状态。
 #[derive(Default)]
 pub(super) struct ServicesState {
-    /// 当前显示顺序的服务。
+    /// 最近一次枚举到的全部服务（未过滤、未排序）。
+    all: RefCell<Vec<Service>>,
+    /// 当前显示（过滤并排序后）的服务，与行模型一一对应。
     entries: RefCell<Vec<Service>>,
     /// 原地更新的行模型，避免周期刷新时列表回到顶部。
     rows: Rc<VecModel<ServiceRow>>,
@@ -40,13 +42,27 @@ impl Controller {
                 let d = ui.global::<ServiceData>();
                 d.set_descending(d.get_sort_key() == key && !d.get_descending());
                 d.set_sort_key(key);
-                let entries = std::mem::take(&mut *c.services.entries.borrow_mut());
-                c.apply_services(entries);
+                c.show_services();
+            }
+        });
+        let weak = Rc::downgrade(self);
+        data.on_filter_edited(move || {
+            if let Some(c) = weak.upgrade() {
+                c.show_services();
+                if let Some(ui) = c.ui.upgrade() {
+                    c.log.borrow_mut().line(format!(
+                        "服务页 搜索={:?} 显示 {}/{}",
+                        ui.global::<ServiceData>().get_filter().as_str(),
+                        c.services.entries.borrow().len(),
+                        c.services.all.borrow().len()
+                    ));
+                }
             }
         });
         let weak = Rc::downgrade(self);
         data.on_refresh(move || {
             if let Some(c) = weak.upgrade() {
+                c.log.borrow_mut().line("服务页 重新枚举");
                 c.services_work(None, true);
             }
         });
@@ -193,11 +209,20 @@ impl Controller {
         self.run_service_hook();
     }
 
-    /// 按当前排序显示，并按服务名保留选中项。
-    fn apply_services(&self, mut entries: Vec<Service>) {
+    /// 记下最新枚举到的全部服务并显示。
+    fn apply_services(&self, entries: Vec<Service>) {
+        *self.services.all.borrow_mut() = entries;
+        self.show_services();
+    }
+
+    /// 按当前搜索文字过滤、按当前排序显示，并按服务名保留选中项。
+    fn show_services(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
         let data = ui.global::<ServiceData>();
         let (key, descending) = (data.get_sort_key(), data.get_descending());
+        let needle = data.get_filter().trim().to_lowercase();
+        let mut entries: Vec<Service> =
+            self.services.all.borrow().iter().filter(|e| e.matches(&needle)).cloned().collect();
         entries.sort_by(|a, b| compare(a, b, key, descending));
         let selected = self
             .selected_service()
