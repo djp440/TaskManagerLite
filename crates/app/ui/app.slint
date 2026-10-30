@@ -157,6 +157,9 @@ export component AppWindow inherits Window {
     default-font-size: 13px;
     background: Theme.surface;
 
+    // software 渲染器的局部重绘依赖缓冲区没有被系统清掉；窗口从隐藏/最小化恢复后若缓冲区已清空，
+    // 就会出现整片透明/黑色（#15）。Rust 翻转它，让下面的整窗矩形整块失效、强制整窗重绘。
+    in property <bool> repaint-flip;
     in property <[ProcRow]> rows;
     in-out property <int> selected: -1;
     in property <int> sort-key: 2;
@@ -280,6 +283,14 @@ export component AppWindow inherits Window {
             : (base + 1 < root.rows.length ? base + 1 : base - 1);
         root.select(root.selected);
         process-page.ensure-visible(root.selected);
+    }
+
+    // 整窗兜底重绘（见 repaint-flip）：x 偏移 0.01px 肉眼不可见，但每次翻转都会让整窗区域失效。
+    Rectangle {
+        x: root.repaint-flip ? 0px : 0.01px;
+        width: root.width;
+        height: root.height;
+        background: Theme.surface;
     }
 
     keys := FocusScope {
