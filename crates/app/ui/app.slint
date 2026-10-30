@@ -77,12 +77,14 @@ component MiniIcon inherits Rectangle {
 }
 
 // 需要用户确认的操作：1 = 结束关键进程，2 = 结束进程树，3 = 导出包含敏感列的 CSV（name 是列名），
-// 4 = 把进程优先级设为“实时”（name 是进程名）。
+// 4 = 把进程优先级设为“实时”（name 是进程名），5 = 对应用及其全部后代开启 / 关闭效率模式
+// （name 是应用名，descendants 是受影响的进程总数，eco-on 为 true 表示开启）。
 component ConfirmDialog inherits Rectangle {
     in property <int> kind;
     in property <string> name;
     in property <int> descendants;
     in property <bool> includes-critical;
+    in property <bool> eco-on;
     callback accepted();
     callback cancelled();
 
@@ -105,14 +107,18 @@ component ConfirmDialog inherits Rectangle {
             padding: 24px;
             spacing: 12px;
             Text {
-                text: root.kind == 4 ? @tr("设为“实时”优先级？") : root.kind == 3 ? @tr("导出包含敏感信息的列？") : root.kind == 2 ? @tr("结束进程树？") : @tr("结束关键进程？");
+                text: root.kind == 5 ? (root.eco-on ? @tr("开启效率模式？") : @tr("关闭效率模式？")) : root.kind == 4 ? @tr("设为“实时”优先级？") : root.kind == 3 ? @tr("导出包含敏感信息的列？") : root.kind == 2 ? @tr("结束进程树？") : @tr("结束关键进程？");
                 font-size: 18px;
                 font-weight: 600;
                 color: Palette.foreground;
             }
 
             Text {
-                text: root.kind == 4
+                text: root.kind == 5
+                    ? (root.eco-on
+                        ? @tr("将对 {0} 及其后代共 {1} 个进程开启效率模式：它们的优先级会降为“低”，并被系统限制到节能运行，可能变慢。", root.name, root.descendants)
+                        : @tr("将对 {0} 及其后代共 {1} 个进程关闭效率模式：优先级会恢复到开启前的值（手动改过优先级的进程保持不变）。", root.name, root.descendants))
+                    : root.kind == 4
                     ? @tr("将 {0} 设为“实时”优先级后，它会抢占几乎所有其他进程的 CPU 时间，可能让系统失去响应甚至需要强制重启。仅在清楚后果时继续。", root.name)
                     : root.kind == 3
                     ? @tr("导出的 CSV 将包含“{0}”。这些内容可能带有密码、令牌或个人信息，请把文件保存在安全的位置，分享给别人之前先检查。", root.name)
@@ -141,7 +147,7 @@ component ConfirmDialog inherits Rectangle {
                 }
 
                 Button {
-                    text: root.kind == 3 ? @tr("继续导出") : root.kind == 4 ? @tr("设为实时") : @tr("结束");
+                    text: root.kind == 3 ? @tr("继续导出") : root.kind == 4 ? @tr("设为实时") : root.kind == 5 ? (root.eco-on ? @tr("开启") : @tr("关闭")) : @tr("结束");
                     primary: true;
                     clicked => {
                         root.accepted();
@@ -191,7 +197,7 @@ export component AppWindow inherits Window {
     in property <string> memory-summary;
 
     // 状态栏消息：1 已结束，2 权限不足，3 进程已退出，4 取消提权，5 其他错误，
-    // 6 已复制路径，7 已复制命令行，8 已导出 CSV，9 已复制所选行，10 已设置优先级，11 已设置亲和性。
+    // 6 已复制路径，7 已复制命令行，8 已导出 CSV，9 已复制所选行，10 已设置优先级，11 已设置亲和性，12 效率模式已切换。
     in property <int> status-kind;
     in property <string> status-arg;
 
@@ -199,6 +205,7 @@ export component AppWindow inherits Window {
     in property <string> confirm-name;
     in property <int> confirm-descendants;
     in property <bool> confirm-critical;
+    in property <bool> confirm-eco-on;
 
     callback select(int);
     callback sort-by(int);
@@ -881,7 +888,7 @@ export component AppWindow inherits Window {
                         vertical-alignment: center;
                         overflow: elide;
                         font-size: 12px;
-                        color: root.status-kind == 1 || (root.status-kind >= 6 && root.status-kind <= 11) ? Theme.subtle-text : Theme.danger;
+                        color: root.status-kind == 1 || (root.status-kind >= 6 && root.status-kind <= 12) ? Theme.subtle-text : Theme.danger;
                         text: root.status-kind == 1 ? @tr("已结束 {0}", root.status-arg)
                             : root.status-kind == 2 ? @tr("没有权限结束 {0}，可以以管理员身份重启后再试", root.status-arg)
                             : root.status-kind == 3 ? @tr("{0} 已经退出", root.status-arg)
@@ -893,6 +900,7 @@ export component AppWindow inherits Window {
                             : root.status-kind == 9 ? @tr("已复制 {0} 的行", root.status-arg)
                             : root.status-kind == 10 ? @tr("已设置优先级：{0}", root.status-arg)
                             : root.status-kind == 11 ? @tr("已设置亲和性：{0}", root.status-arg)
+                            : root.status-kind == 12 ? @tr("效率模式：{0}", root.status-arg)
                             : "";
                     }
                 }
@@ -905,6 +913,7 @@ export component AppWindow inherits Window {
         name: root.confirm-name;
         descendants: root.confirm-descendants;
         includes-critical: root.confirm-critical;
+        eco-on: root.confirm-eco-on;
         accepted => {
             root.confirm-accepted();
             keys.focus();

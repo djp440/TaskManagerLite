@@ -52,10 +52,12 @@ pub enum DetailColumn {
     Company,
     /// 进程在所有 GPU 引擎上的最大利用率；只有显示这一列时才做进程级聚合。
     Gpu,
+    /// 进程是否处于效率模式（EcoQoS，#68）；只有显示这一列时才按行读取，系统不支持时不提供这一列。
+    EcoMode,
 }
 
 impl DetailColumn {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Status,
         Self::User,
         Self::Session,
@@ -74,6 +76,7 @@ impl DetailColumn {
         Self::Description,
         Self::Company,
         Self::Gpu,
+        Self::EcoMode,
     ];
 
     /// 设置文件里使用的名字。
@@ -97,6 +100,7 @@ impl DetailColumn {
             Self::Description => "description",
             Self::Company => "company",
             Self::Gpu => "gpu",
+            Self::EcoMode => "eco_mode",
         }
     }
 
@@ -424,6 +428,8 @@ pub(crate) fn compare(a: &Process, b: &Process, col: DetailColumn) -> Ordering {
             (Some(x), Some(y)) => x.total_cmp(&y),
             (x, y) => x.is_some().cmp(&y.is_some()),
         },
+        // 没有读数（None）< 未启用 < 已启用。
+        DetailColumn::EcoMode => a.eco_mode.cmp(&b.eco_mode),
     }
 }
 

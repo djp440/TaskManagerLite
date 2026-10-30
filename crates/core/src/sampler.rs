@@ -75,6 +75,7 @@ pub struct Sampler {
     critical: HashMap<ProcessKey, bool>,
     track_apps: bool,
     track_gpu_processes: bool,
+    track_eco_mode: bool,
     cpu_probe: CpuProbe,
     etw: Option<DiskTrace>,
     etw_tried: bool,
@@ -94,6 +95,12 @@ impl Sampler {
     /// 仅在进程列表显示了 GPU 列时开启；关闭时不做聚合，进程的 `gpu_usage` 恒为 `None`。
     pub fn track_gpu_processes(&mut self, on: bool) {
         self.track_gpu_processes = on;
+    }
+
+    /// 开启后每次完整采样都按进程读取效率模式状态（填入 `Process::eco_mode`，#68）。
+    /// 仅在进程列表显示了“效率模式”列时开启；关闭时不打开任何进程，`eco_mode` 恒为 `None`。
+    pub fn track_eco_mode(&mut self, on: bool) {
+        self.track_eco_mode = on;
     }
 
     /// 开关 ETW 磁盘事件（默认关闭，且需要管理员权限，见 ADR-0004）。运行中可随时切换：
@@ -212,6 +219,9 @@ impl Sampler {
         let (gpus, process_gpu) = self.gpu.as_mut().map_or_else(Default::default, |p| p.sample(per_process_gpu));
         if per_process_gpu {
             crate::gpu::apply_usage(&mut snapshot.processes, process_gpu.as_ref());
+        }
+        if full && self.track_eco_mode {
+            crate::procctl::apply_eco_modes(&mut snapshot.processes);
         }
         let networks = self.net.sample(elapsed);
         // 汇总保持物理网卡口径，虚拟隧道与承载它的物理网卡不能重复累加。

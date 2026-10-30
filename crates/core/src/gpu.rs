@@ -285,7 +285,7 @@ mod tests {
         use crate::snapshot::{Process, ProcessKey};
         let mk = |pid| Process {
             key: ProcessKey { pid, create_time: 1 }, parent_pid: 0, name: "p".into(), cpu_usage: 0.0, private_working_set: 0,
-            disk_rate: 0.0, gpu_usage: Some(99.0), critical: false, counters: Default::default(), info: None,
+            disk_rate: 0.0, gpu_usage: Some(99.0), eco_mode: None, critical: false, counters: Default::default(), info: None,
         };
         let mut procs = vec![mk(7), mk(8)];
         let usage: ProcessUsage = [(7, 42.0)].into_iter().collect();

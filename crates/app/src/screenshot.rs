@@ -784,7 +784,8 @@ pub fn run_menu(ui: &AppWindow, spec: &str, warmup: Duration) {
 
 /// `--menu-action <动作>:<pid>`：选中指定 PID 的进程并直接触发一个右键菜单动作
 /// （`open-location`、`properties`、`copy-path`、`copy-command-line`、`copy-row`，以及 #66 的
-/// `set-priority:<pid>:<优先级键>`、`set-affinity:<pid>:<十六进制掩码>`、`affinity-shot:<pid>`），用于 `scripts/test-menu-actions.ps1`
+/// `set-priority:<pid>:<优先级键>`、`set-affinity:<pid>:<十六进制掩码>`、`affinity-shot:<pid>`，以及 #68 的 `eco-mode:<pid>:<on|off>`：先走一遍菜单弹出前的探测，
+/// 当前状态与目标不同才触发“效率模式”，应用行出现确认框时自动点确认），用于 `scripts/test-menu-actions.ps1`
 /// 自动验收，免去点击原生菜单。末尾可加 `:group` 先切到分组视图（验证分组视图里选中的是正确的进程）。
 /// 动作执行后不退出，由脚本检查结果并结束进程。
 pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
@@ -850,6 +851,27 @@ pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
                             data.invoke_submit();
                         }
                         None => eprintln!("未知亲和性掩码 {arg:?}"),
+                    }
+                }
+                "eco-mode" => {
+                    let want = match arg.as_deref() {
+                        Some("on") => true,
+                        Some("off") => false,
+                        _ => {
+                            eprintln!("未知效率模式目标 {arg:?}");
+                            return;
+                        }
+                    };
+                    menu.invoke_opening();
+                    if !menu.get_eco_visible() || !menu.get_can_eco() {
+                        // 菜单项置灰时用户点不了；钩子仍强行触发一次，核对受保护进程会被拒绝并留下日志。
+                        eprintln!("效率模式菜单项不可用（visible={} enabled={}）", menu.get_eco_visible(), menu.get_can_eco());
+                        menu.invoke_toggle_eco();
+                    } else if menu.get_eco_checked() != want {
+                        menu.invoke_toggle_eco();
+                        if ui.get_confirm_kind() != 0 {
+                            ui.invoke_confirm_accepted();
+                        }
                     }
                 }
                 "affinity-shot" => {

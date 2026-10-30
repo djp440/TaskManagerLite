@@ -375,6 +375,10 @@ impl Settings {
                 if s.details.iter().any(|d| d.column == column) {
                     continue;
                 }
+                // 系统不支持效率模式（低于 Windows 10 1709）时没有这一列，设置里残留的也忽略。
+                if column == DetailColumn::EcoMode && !tml_core::eco_supported() {
+                    continue;
+                }
                 let width = match item.get("width").and_then(Value::as_f64) {
                     Some(v) if v.is_finite() => (v as f32).clamp(details::MIN_WIDTH, details::MAX_WIDTH),
                     _ => details::default_width(column),

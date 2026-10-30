@@ -54,6 +54,12 @@ export global ProcessMenu {
     in-out property <bool> can-set-affinity;
     // 当前优先级的序号（0 实时 … 5 低，与 `PriorityClass::index` 一致）；读不到为 -1，不打勾。
     in-out property <int> priority: -1;
+    // “效率模式”（#68）：系统不支持（Windows 10 1709 以下）时整项隐藏；系统关键进程、本程序自身与
+    // 无权限的进程置灰（标题里带原因）。勾选 = 所选进程当前处于效率模式。
+    in-out property <bool> eco-visible;
+    in-out property <bool> can-eco;
+    in-out property <bool> eco-checked;
+    in-out property <string> eco-title;
     callback opening();
     callback open-location();
     callback copy-path();
@@ -68,6 +74,8 @@ export global ProcessMenu {
     callback set-priority(int);
     // 打开“设置亲和性”对话框。
     callback set-affinity();
+    // 切换所选进程（应用行为其全部后代）的效率模式；多于一个进程时由 Rust 先弹确认框。
+    callback toggle-eco();
 }
 
 export component HeaderCell inherits Rectangle {
@@ -288,6 +296,16 @@ component ProcRowView inherits Rectangle {
                 enabled: ProcessMenu.can-set-affinity;
                 activated => {
                     ProcessMenu.set-affinity();
+                }
+            }
+
+            if ProcessMenu.eco-visible: MenuItem {
+                title: ProcessMenu.eco-title;
+                checkable: true;
+                checked: ProcessMenu.eco-checked;
+                enabled: ProcessMenu.can-eco;
+                activated => {
+                    ProcessMenu.toggle-eco();
                 }
             }
 

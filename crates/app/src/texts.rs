@@ -172,14 +172,57 @@ pub fn affinity_applied(name: &str, selected: u32, available: u32) -> String {
     format!("{name} → {selected}/{available} 个逻辑处理器")
 }
 
-/// 设置优先级或 CPU 亲和性失败的原因。
+/// 设置优先级、CPU 亲和性或效率模式失败的原因。
 pub fn process_control_error(e: &ProcessControlError) -> String {
     match e {
         ProcessControlError::Gone => "进程已经退出".into(),
         ProcessControlError::AccessDenied => "没有权限修改该进程（受保护进程或需要管理员权限），可以以管理员身份重启后再试".into(),
         ProcessControlError::EmptyAffinity => "至少要选择一个逻辑处理器".into(),
         ProcessControlError::OutsideProcessorGroup => "所选处理器不在该进程所在的处理器组内".into(),
+        ProcessControlError::Protected => "系统关键进程或本程序自身，不能开启效率模式".into(),
+        ProcessControlError::Unsupported => "当前 Windows 版本不支持效率模式（需要 Windows 10 1709 及以上）".into(),
         ProcessControlError::System(e) => format!("系统返回错误：{e}"),
+    }
+}
+
+/// 状态栏：效率模式已开启（进程优先级随之降为低）。
+pub fn eco_enabled(name: &str) -> String {
+    format!("{name} → 已开启效率模式（优先级降为“低”）")
+}
+
+/// 状态栏：效率模式已关闭；`restored` 为关闭后的优先级（没有恢复优先级时为 `None`）。
+pub fn eco_disabled(name: &str, restored: Option<PriorityClass>) -> String {
+    match restored {
+        Some(p) => format!("{name} → 已关闭效率模式（优先级恢复为“{}”）", priority_name(p)),
+        None => format!("{name} → 已关闭效率模式"),
+    }
+}
+
+/// 状态栏：对应用及其后代批量切换效率模式的结果。
+pub fn eco_batch(name: &str, on: bool, ok: usize, failed: usize) -> String {
+    let verb = if on { "开启" } else { "关闭" };
+    if failed == 0 {
+        format!("{name} → 已为 {ok} 个进程{verb}效率模式")
+    } else {
+        format!("{name} → 已为 {ok} 个进程{verb}效率模式，{failed} 个失败（权限不足或已退出）")
+    }
+}
+
+/// 右键菜单“效率模式”项的标题；置灰时括号里写原因（`Some(true)` 关键 / 自身，`Some(false)` 无权限）。
+pub fn eco_menu_title(disabled_reason: Option<bool>) -> &'static str {
+    match disabled_reason {
+        None => "效率模式",
+        Some(true) => "效率模式（系统关键进程或本程序，不可开启）",
+        Some(false) => "效率模式（没有权限）",
+    }
+}
+
+/// 菜单项置灰时的原因（效率模式）。
+pub fn eco_disabled_reason(critical: bool) -> &'static str {
+    if critical {
+        "系统关键进程或本程序自身不能开启效率模式"
+    } else {
+        "没有权限修改该进程的效率模式"
     }
 }
 

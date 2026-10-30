@@ -58,6 +58,8 @@ const CONFIRM_TREE: i32 = 2;
 const CONFIRM_EXPORT: i32 = 3;
 /// 把进程优先级设为“实时”（`name` 为进程名，目标进程在 `pending` 里）。
 const CONFIRM_REALTIME: i32 = 4;
+/// 对应用及其全部后代开启 / 关闭效率模式（`name` 为应用名，目标进程在 `pending` 里，`descendants` 为进程总数）。
+const CONFIRM_ECO: i32 = 5;
 /// 隐藏启动时托盘图标创建失败的重试次数（每秒一次）。
 const TRAY_RETRIES: u32 = 30;
 
@@ -70,6 +72,8 @@ pub struct Controller {
     export: export::ExportState,
     /// “设置亲和性”对话框当前针对的进程。
     affinity_target: RefCell<Option<ProcessKey>>,
+    /// 效率模式的优先级联动记忆与待确认的批量操作（#68）。
+    eco: process_control::EcoState,
     ui: slint::Weak<AppWindow>,
     rows: Rc<VecModel<ProcRow>>,
     resources: Rc<VecModel<Resource>>,
@@ -281,6 +285,7 @@ impl Controller {
             services: Default::default(),
             export: Default::default(),
             affinity_target: RefCell::new(None),
+            eco: Default::default(),
             ui: ui.as_weak(),
             rows,
             resources,
@@ -1338,6 +1343,10 @@ impl Controller {
             self.confirm_realtime();
             return;
         }
+        if kind == CONFIRM_ECO {
+            self.confirm_eco();
+            return;
+        }
         let keys = std::mem::take(&mut self.state.borrow_mut().pending);
         let name = ui.get_confirm_name().to_string();
         self.end(keys, &name);
@@ -1430,6 +1439,7 @@ mod tests {
             private_working_set: 0,
             disk_rate: 0.0,
             gpu_usage: None,
+            eco_mode: None,
             critical: false,
             counters: Default::default(),
             info: None,

@@ -211,7 +211,7 @@ pub fn build_view(snapshot: &ProcessSnapshot, opts: &ViewOptions) -> Vec<ViewRow
 
 /// 不向下收纳后代的进程：桌面外壳是用户从桌面、开始菜单启动的所有程序的父进程，
 /// 它自己有窗口（文件资源管理器）时，若收纳后代，几乎所有程序都会被挤进它的名下。
-fn adopts_descendants(p: &Process) -> bool {
+pub fn adopts_descendants(p: &Process) -> bool {
     !p.name.eq_ignore_ascii_case("explorer.exe")
 }
 
@@ -398,6 +398,7 @@ mod tests {
             private_working_set: 0,
             disk_rate: 0.0,
             gpu_usage: None,
+            eco_mode: None,
             critical: false,
             counters: Default::default(),
             info: None,

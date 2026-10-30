@@ -44,8 +44,9 @@ pub use icon::{IconBitmap, default_icon, file_icon};
 pub use instance::{Acquired, SingleInstance, acquire, activate_own_window, is_relaunch};
 pub use memory::{MemoryHardware, MemoryStatus};
 pub use procctl::{
-    AffinityInfo, ControlState, PriorityClass, ProcessControlError, affinity, control_state, mask_from_processors,
-    processors_in_mask, set_affinity, set_priority, validate_affinity,
+    AffinityInfo, ControlState, EcoOutcome, PriorityClass, ProcessControlError, affinity, control_state, eco_enabled,
+    eco_mode, eco_protected_pid, eco_supported, eco_supported_build, mask_from_processors, processors_in_mask, set_affinity,
+    set_eco_mode, set_priority, validate_affinity,
 };
 pub use procinfo::{command_line, image_path, image_path_of};
 pub use sampler::{DiskSource, Sample, Sampler, Scope};
@@ -60,7 +61,7 @@ pub use taskmgr::{
 };
 pub use view::{
     Group, GroupHeader, HEADER_INDEX, SortKey, Totals, ViewMode, ViewOptions, ViewRow,
-    build_group_view, build_view, tree_from,
+    adopts_descendants, build_group_view, build_view, tree_from,
 };
 
 /// 本地时间，格式 `yyyy-MM-dd HH-mm-ss`，用作日志文件名。

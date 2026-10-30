@@ -36,6 +36,7 @@ pub fn title(c: DetailColumn) -> &'static str {
         DetailColumn::Description => "描述",
         DetailColumn::Company => "公司",
         DetailColumn::Gpu => "GPU",
+        DetailColumn::EcoMode => "效率模式",
     }
 }
 
@@ -44,6 +45,7 @@ pub fn default_width(c: DetailColumn) -> f32 {
     match c {
         DetailColumn::Session | DetailColumn::Threads | DetailColumn::Arch | DetailColumn::Gpu => 72.0,
         DetailColumn::Elevated | DetailColumn::Handles => 76.0,
+        DetailColumn::EcoMode => 88.0,
         DetailColumn::Status | DetailColumn::Priority | DetailColumn::CpuTime => 88.0,
         DetailColumn::WorkingSet | DetailColumn::PeakWorkingSet | DetailColumn::Commit => 108.0,
         DetailColumn::User => 120.0,
@@ -75,7 +77,7 @@ pub fn default_descending(c: DetailColumn) -> bool {
     right_aligned(c)
         || matches!(
             c,
-            DetailColumn::Status | DetailColumn::Priority | DetailColumn::Elevated
+            DetailColumn::Status | DetailColumn::Priority | DetailColumn::Elevated | DetailColumn::EcoMode
         )
 }
 
@@ -139,12 +141,23 @@ pub fn cell(p: &Process, c: DetailColumn, gpu: Option<f32>) -> String {
         DetailColumn::Description => text(|i| i.description.as_deref()),
         DetailColumn::Company => text(|i| i.company.as_deref()),
         DetailColumn::Gpu => format::gpu_percent(gpu),
+        // 没有读数（进程打不开或系统不支持）留空；应用行显示应用自身进程的状态。
+        DetailColumn::EcoMode => match p.eco_mode {
+            Some(true) => "已启用".into(),
+            Some(false) => "未启用".into(),
+            None => String::new(),
+        },
     }
 }
 
 /// 是否显示了 GPU 列：只有显示时采样线程才做进程级 GPU 聚合。
 pub fn needs_gpu(shown: &[Shown]) -> bool {
     shown.iter().any(|s| s.column == DetailColumn::Gpu)
+}
+
+/// 是否显示了“效率模式”列：只有显示时采样线程才按进程读取效率模式状态。
+pub fn needs_eco(shown: &[Shown]) -> bool {
+    shown.iter().any(|s| s.column == DetailColumn::EcoMode)
 }
 
 /// 显示中的可选列（有序）与各自宽度。
@@ -326,6 +339,7 @@ mod tests {
             private_working_set: 0,
             disk_rate: 0.0,
             gpu_usage: None,
+            eco_mode: None,
             critical: false,
             counters: tml_core::Counters {
                 suspended: true,
@@ -357,10 +371,18 @@ mod tests {
             private_working_set: 0,
             disk_rate: 0.0,
             gpu_usage: None,
+            eco_mode: None,
             critical: false,
             counters: Default::default(),
             info: None,
         };
+        assert_eq!(cell(&p, DetailColumn::EcoMode, None), "");
+        let on = Process { eco_mode: Some(true), ..p.clone() };
+        let off = Process { eco_mode: Some(false), ..p.clone() };
+        assert_eq!(cell(&on, DetailColumn::EcoMode, None), "已启用");
+        assert_eq!(cell(&off, DetailColumn::EcoMode, None), "未启用");
+        assert!(needs_eco(&[Shown { column: DetailColumn::EcoMode, width: 88.0 }]));
+        assert!(!needs_eco(&[Shown { column: DetailColumn::Gpu, width: 72.0 }]));
         assert_eq!(cell(&p, DetailColumn::Gpu, p.gpu_usage), "—");
         assert_eq!(cell(&p, DetailColumn::Gpu, Some(0.0)), "0%");
         assert_eq!(cell(&p, DetailColumn::Gpu, Some(37.46)), "37.5%");

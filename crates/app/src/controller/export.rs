@@ -515,6 +515,7 @@ mod tests {
             private_working_set: u64::from(pid) * 1024 * 1024,
             disk_rate: 0.0,
             gpu_usage: None,
+            eco_mode: None,
             critical: false,
             counters: Counters::default(),
             info: None,

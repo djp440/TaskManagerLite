@@ -8,13 +8,20 @@
 //! 亲和性掩码只覆盖进程当前所在的处理器组（最多 64 个逻辑处理器）。系统逻辑处理器多于一个组
 //! 能容纳的数量时，[`AffinityInfo::truncated`] 为真，界面应明确提示“仅当前处理器组”。
 
+use std::sync::OnceLock;
+
+use windows::Wdk::System::SystemServices::RtlGetVersion;
+use windows::Wdk::System::Threading::{NtQueryInformationProcess, PROCESSINFOCLASS};
 use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER};
+use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows::Win32::System::Threading::{
     ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetActiveProcessorCount, GetExitCodeProcess,
-    GetPriorityClass, GetProcessAffinityMask, HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS,
-    NORMAL_PRIORITY_CLASS, PROCESS_ACCESS_RIGHTS, PROCESS_CREATION_FLAGS,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, REALTIME_PRIORITY_CLASS,
-    SetPriorityClass, SetProcessAffinityMask,
+    GetPriorityClass, GetProcessAffinityMask, HIGH_PRIORITY_CLASS,
+    IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_ACCESS_RIGHTS, PROCESS_CREATION_FLAGS,
+    PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+    PROCESS_POWER_THROTTLING_STATE, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
+    ProcessPowerThrottling, REALTIME_PRIORITY_CLASS, SetPriorityClass, SetProcessAffinityMask,
+    SetProcessInformation,
 };
 
 use crate::control::{OwnedHandle, create_time, open};
@@ -97,6 +104,10 @@ pub enum ProcessControlError {
     EmptyAffinity,
     /// 掩码含有当前处理器组之外的位。
     OutsideProcessorGroup,
+    /// 效率模式（#68）：系统关键进程（PID 0、4）或本程序自身，不允许开启。
+    Protected,
+    /// 效率模式（#68）：系统版本低于 Windows 10 1709（build 16299），不支持进程电源节流。
+    Unsupported,
     /// 其余系统调用失败，保留系统错误码。
     System(SystemError),
 }
@@ -107,7 +118,7 @@ impl ProcessControlError {
         match self {
             Self::Gone => ERROR_INVALID_PARAMETER.0 as i32,
             Self::AccessDenied => ERROR_ACCESS_DENIED.0 as i32,
-            Self::EmptyAffinity | Self::OutsideProcessorGroup => 0,
+            Self::EmptyAffinity | Self::OutsideProcessorGroup | Self::Protected | Self::Unsupported => 0,
             Self::System(SystemError::Win32(code)) => *code,
             Self::System(SystemError::Other { code, .. }) => *code,
         }
@@ -121,6 +132,8 @@ impl std::fmt::Display for ProcessControlError {
             Self::AccessDenied => f.write_str("access denied"),
             Self::EmptyAffinity => f.write_str("empty affinity mask"),
             Self::OutsideProcessorGroup => f.write_str("mask has bits outside the processor group"),
+            Self::Protected => f.write_str("protected process"),
+            Self::Unsupported => f.write_str("efficiency mode is not supported on this Windows version"),
             Self::System(e) => write!(f, "process control failed: {e}"),
         }
     }
@@ -200,6 +213,8 @@ pub struct ControlState {
     pub priority: Option<PriorityClass>,
     /// 当前亲和性；读不到时为 `None`。
     pub affinity: Option<AffinityInfo>,
+    /// 是否处于效率模式（#68）；系统不支持或读不到时为 `None`。
+    pub eco: Option<bool>,
     /// 能否修改：`Ok` 表示可以打开进程设置，`Err` 是预知的原因（用于置灰与提示）。
     pub modify: Result<(), ProcessControlError>,
 }
@@ -270,6 +285,7 @@ pub fn control_state(key: ProcessKey) -> Result<ControlState, ProcessControlErro
     Ok(ControlState {
         priority: read_priority(&h),
         affinity: read_affinity(&h).ok(),
+        eco: if eco_supported() { read_eco(&h).ok() } else { None },
         modify,
     })
 }
@@ -306,6 +322,211 @@ pub fn set_affinity(key: ProcessKey, mask: u64) -> Result<AffinityInfo, ProcessC
     validate_affinity(mask, before.system_mask)?;
     unsafe { SetProcessAffinityMask(h.raw(), mask as usize) }.map_err(|e| classify(&e))?;
     read_affinity(&h)
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// 效率模式（#68）
+//
+// 效率模式 = 进程电源节流 `ProcessPowerThrottling` 的 `PROCESS_POWER_THROTTLING_EXECUTION_SPEED`（EcoQoS：
+// 调度器把进程放到节能核/低频，省电降温）+ 优先级类“低”（IDLE_PRIORITY_CLASS），与原生任务管理器一致。
+//
+// `PROCESS_POWER_THROTTLING_STATE` 的语义：`ControlMask` 的位 = “由调用方接管该项”，
+// `StateMask` 的位 = 该项开启。因此：
+//   开启：Control = SPEED，State = SPEED（强制节流）；
+//   关闭：Control = SPEED，State = 0（显式禁止节流，与系统任务管理器关闭效率模式一致）。
+//         实测 Control = 0 的调用是空操作（State 被忽略，不会关掉已开启的节流），所以不能用它“交还系统管理”。
+// 读回：用 `NtQueryInformationProcess(77)`（见 `read_eco`），Control 与 State 的 SPEED 位同时置位才算“开启”；
+//       写入后读回约有 1 毫秒延迟，`set_eco_mode` 会等待至多 50 毫秒。
+// ---------------------------------------------------------------------------------------------
+
+/// 支持进程电源节流（EcoQoS）的最低 Windows 版本：Windows 10 1709，build 16299。
+const ECO_MIN_BUILD: u32 = 16299;
+
+/// 由系统 build 号判断是否支持效率模式（纯函数，便于单测）。
+pub fn eco_supported_build(build: u32) -> bool {
+    build >= ECO_MIN_BUILD
+}
+
+/// 当前系统的 build 号。用 `RtlGetVersion`，不会像 `GetVersionEx` 那样被应用清单欺骗。
+fn windows_build() -> Option<u32> {
+    let mut info = OSVERSIONINFOW {
+        dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+        ..Default::default()
+    };
+    unsafe { RtlGetVersion(&mut info) }.is_ok().then_some(info.dwBuildNumber)
+}
+
+/// 当前系统是否支持效率模式（只查一次）。读不到版本时按不支持处理。
+pub fn eco_supported() -> bool {
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED.get_or_init(|| windows_build().is_some_and(eco_supported_build))
+}
+
+/// 这个 PID 是否不允许开启效率模式：Idle(0)、System(4) 与本程序自身（`own` 传本进程 PID）。
+/// 其余关键进程由调用方按 [`crate::Process::critical`] 判断。
+pub fn eco_protected_pid(pid: u32, own: u32) -> bool {
+    pid == 0 || pid == 4 || pid == own
+}
+
+/// 由控制/状态掩码得到“是否处于效率模式”。
+pub fn eco_enabled(control_mask: u32, state_mask: u32) -> bool {
+    control_mask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED != 0
+        && state_mask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED != 0
+}
+
+/// `ProcessPowerThrottlingState` 的 NT 信息类编号（`PROCESSINFOCLASS` 77）。
+const PROCESS_POWER_THROTTLING_STATE_CLASS: i32 = 77;
+
+/// 读回 Control/State 掩码。
+///
+/// 不用 `GetProcessInformation(ProcessPowerThrottling)`：实测在 Windows 10 上无论权限如何都返回
+/// `ERROR_INVALID_PARAMETER`（87），读不出来。可靠的读回方式是 `NtQueryInformationProcess` 的
+/// `ProcessPowerThrottlingState`（77），缓冲区必须正好是 12 字节的 `PROCESS_POWER_THROTTLING_STATE`
+/// （其余长度返回 STATUS_INFO_LENGTH_MISMATCH）。
+fn read_eco(h: &OwnedHandle) -> Result<bool, ProcessControlError> {
+    let mut state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ..Default::default()
+    };
+    let status = unsafe {
+        NtQueryInformationProcess(
+            h.raw(),
+            PROCESSINFOCLASS(PROCESS_POWER_THROTTLING_STATE_CLASS),
+            (&mut state as *mut PROCESS_POWER_THROTTLING_STATE).cast(),
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+            std::ptr::null_mut(),
+        )
+    };
+    if status.is_err() {
+        // 0xC0000022 = STATUS_ACCESS_DENIED
+        return Err(if status.0 as u32 == 0xC000_0022 {
+            ProcessControlError::AccessDenied
+        } else {
+            ProcessControlError::System(SystemError::Other {
+                code: status.0,
+                message: format!("NTSTATUS 0x{:08X}", status.0 as u32),
+            })
+        });
+    }
+    Ok(eco_enabled(state.ControlMask, state.StateMask))
+}
+
+fn write_eco(h: &OwnedHandle, control_mask: u32, state_mask: u32) -> Result<(), ProcessControlError> {
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: control_mask,
+        StateMask: state_mask,
+    };
+    unsafe {
+        SetProcessInformation(
+            h.raw(),
+            ProcessPowerThrottling,
+            (&state as *const PROCESS_POWER_THROTTLING_STATE).cast(),
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    }
+    .map_err(|e| classify(&e))
+}
+
+/// 关闭效率模式：`ControlMask` 置位但 `StateMask` 清零，即“显式禁止节流”（与系统任务管理器关闭效率模式一致）。
+/// 不用 `ControlMask = 0` 回到“系统管理”：系统可能立刻又按后台状态自动节流，用户点了关闭却仍被降速。
+fn clear_eco(h: &OwnedHandle) -> Result<(), ProcessControlError> {
+    write_eco(h, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, 0)
+}
+
+/// `SetProcessInformation` 写入后，读回的状态最多滞后约 1 毫秒才生效；这里最多等 50 毫秒，
+/// 让紧随其后的采样读到新状态。超时不算错误（调用方按期望值返回）。
+fn wait_eco(h: &OwnedHandle, want: bool) {
+    let start = std::time::Instant::now();
+    while read_eco(h) != Ok(want) && start.elapsed() < std::time::Duration::from_millis(50) {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// 读取一个进程当前是否处于效率模式。
+pub fn eco_mode(key: ProcessKey) -> Result<bool, ProcessControlError> {
+    if !eco_supported() {
+        return Err(ProcessControlError::Unsupported);
+    }
+    let h = open_checked(key, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    read_eco(&h)
+}
+
+/// 切换效率模式的结果（均为回读到的实际状态）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EcoOutcome {
+    /// 切换后是否处于效率模式。
+    pub enabled: bool,
+    /// 切换后的优先级类；读不到时为 `None`。
+    pub priority: Option<PriorityClass>,
+    /// 切换之前的优先级类；读不到时为 `None`。界面层据此在关闭时恢复。
+    pub previous_priority: Option<PriorityClass>,
+}
+
+/// 开启或关闭效率模式。
+///
+/// 开启：节流 + 优先级降为“低”；任何一步失败都会把节流恢复到调用前的状态，不留半截。
+/// 关闭：关闭节流；`restore` 为 `Some` 时再把优先级设回该值，为 `None` 则不动优先级
+/// （用户在开启期间改过优先级时由界面层传 `None`，保留用户的选择）。
+pub fn set_eco_mode(
+    key: ProcessKey,
+    on: bool,
+    restore: Option<PriorityClass>,
+) -> Result<EcoOutcome, ProcessControlError> {
+    if !eco_supported() {
+        return Err(ProcessControlError::Unsupported);
+    }
+    if eco_protected_pid(key.pid, std::process::id()) {
+        return Err(ProcessControlError::Protected);
+    }
+    let h = open_checked(
+        key,
+        PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION,
+    )?;
+    let previous_priority = read_priority(&h);
+    if on {
+        let was_on = read_eco(&h).unwrap_or(false);
+        write_eco(
+            &h,
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        )?;
+        let low = PROCESS_CREATION_FLAGS(PriorityClass::Low.win32_class());
+        if let Err(e) = unsafe { SetPriorityClass(h.raw(), low) } {
+            if !was_on {
+                let _ = clear_eco(&h);
+            }
+            return Err(classify(&e));
+        }
+    } else {
+        clear_eco(&h)?;
+        if let Some(class) = restore {
+            unsafe { SetPriorityClass(h.raw(), PROCESS_CREATION_FLAGS(class.win32_class())) }
+                .map_err(|e| classify(&e))?;
+        }
+    }
+    wait_eco(&h, on);
+    Ok(EcoOutcome {
+        enabled: read_eco(&h).unwrap_or(on),
+        priority: read_priority(&h),
+        previous_priority,
+    })
+}
+
+/// 给进程快照填入效率模式状态（`Process::eco_mode`）。只在显示“效率模式”列时由采样器调用；
+/// 系统不支持或进程打不开时为 `None`。
+pub(crate) fn apply_eco_modes(processes: &mut [crate::snapshot::Process]) {
+    let supported = eco_supported();
+    for p in processes {
+        p.eco_mode = if supported && p.key.pid > 4 {
+            open(p.key.pid, PROCESS_QUERY_LIMITED_INFORMATION)
+                .ok()
+                .and_then(|h| read_eco(&h).ok())
+        } else {
+            None
+        };
+    }
 }
 
 #[cfg(test)]
@@ -573,5 +794,107 @@ mod tests {
             create_time: 0,
         };
         assert_eq!(control_state(key), Err(ProcessControlError::AccessDenied));
+    }
+
+    #[test]
+    fn eco_support_threshold_is_windows_10_1709() {
+        assert!(!eco_supported_build(10240));
+        assert!(!eco_supported_build(16298));
+        assert!(eco_supported_build(16299));
+        assert!(eco_supported_build(19045));
+        assert!(eco_supported_build(26100));
+    }
+
+    #[test]
+    fn eco_mask_semantics() {
+        const SPEED: u32 = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+        assert!(eco_enabled(SPEED, SPEED));
+        assert!(!eco_enabled(SPEED, 0), "接管但状态为关：显式禁止节流");
+        assert!(!eco_enabled(0, SPEED), "未接管：状态位无意义");
+        assert!(!eco_enabled(0, 0));
+    }
+
+    #[test]
+    fn eco_protects_idle_system_and_self() {
+        assert!(eco_protected_pid(0, 100));
+        assert!(eco_protected_pid(4, 100));
+        assert!(eco_protected_pid(100, 100));
+        assert!(!eco_protected_pid(101, 100));
+        let own = ProcessKey {
+            pid: std::process::id(),
+            create_time: 0,
+        };
+        if eco_supported() {
+            assert_eq!(set_eco_mode(own, true, None), Err(ProcessControlError::Protected));
+            let system = ProcessKey { pid: 4, create_time: 0 };
+            assert_eq!(set_eco_mode(system, true, None), Err(ProcessControlError::Protected));
+        }
+    }
+
+    #[test]
+    fn eco_mode_toggles_and_links_priority() {
+        if !eco_supported() {
+            return;
+        }
+        let v = Victim::spawn();
+        let key = v.key();
+        assert_eq!(eco_mode(key), Ok(false), "新进程默认不在效率模式");
+        let normal = set_priority(key, PriorityClass::AboveNormal).unwrap();
+        assert_eq!(normal, PriorityClass::AboveNormal);
+
+        let on = set_eco_mode(key, true, None).unwrap();
+        assert!(on.enabled);
+        assert_eq!(on.priority, Some(PriorityClass::Low), "开启时优先级降为低");
+        assert_eq!(on.previous_priority, Some(PriorityClass::AboveNormal));
+        assert_eq!(eco_mode(key), Ok(true), "状态能读回");
+        assert_eq!(control_state(key).unwrap().eco, Some(true));
+
+        // 重复开启是幂等的。
+        assert!(set_eco_mode(key, true, None).unwrap().enabled);
+
+        let off = set_eco_mode(key, false, Some(PriorityClass::AboveNormal)).unwrap();
+        assert!(!off.enabled);
+        assert_eq!(off.priority, Some(PriorityClass::AboveNormal), "关闭后恢复开启前的优先级");
+        assert_eq!(eco_mode(key), Ok(false));
+
+        // 传 None：只关节流，保留用户当前的优先级。
+        set_eco_mode(key, true, None).unwrap();
+        set_priority(key, PriorityClass::High).unwrap();
+        let off = set_eco_mode(key, false, None).unwrap();
+        assert!(!off.enabled);
+        assert_eq!(off.priority, Some(PriorityClass::High));
+    }
+
+    #[test]
+    fn eco_mode_on_gone_process_is_gone() {
+        if !eco_supported() {
+            return;
+        }
+        let key = {
+            let v = Victim::spawn();
+            v.key()
+        };
+        assert_eq!(set_eco_mode(key, true, None), Err(ProcessControlError::Gone));
+        assert_eq!(eco_mode(key), Err(ProcessControlError::Gone));
+    }
+
+
+    #[test]
+    fn sampler_fills_eco_mode_only_when_tracked() {
+        if !eco_supported() {
+            return;
+        }
+        let v = Victim::spawn();
+        let key = v.key();
+        set_eco_mode(key, true, None).unwrap();
+        let find = |s: &crate::sampler::Sample| s.snapshot.processes.iter().find(|p| p.key == key).map(|p| p.eco_mode);
+
+        let mut sampler = crate::Sampler::default();
+        let _ = sampler.sample();
+        assert_eq!(find(&sampler.sample()), Some(None), "未开启跟踪：不读取");
+        sampler.track_eco_mode(true);
+        assert_eq!(find(&sampler.sample()), Some(Some(true)));
+        set_eco_mode(key, false, None).unwrap();
+        assert_eq!(find(&sampler.sample()), Some(Some(false)));
     }
 }
