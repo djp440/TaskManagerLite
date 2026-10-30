@@ -145,6 +145,7 @@ component ConfirmDialog inherits Rectangle {
 
 export component AppWindow inherits Window {
     title: @tr("任务管理器 Lite");
+    icon: @image-url("../../../assets/logo.png");
     // 初始大小由 Rust 在显示前按设置写入。
     in property <length> initial-width: 1080px;
     in property <length> initial-height: 700px;

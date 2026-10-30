@@ -10,5 +10,11 @@ fn main() {
         )
         .expect("嵌入 manifest 失败");
     }
+    if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("../../assets/app.ico");
+        res.compile().expect("嵌入图标失败");
+    }
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../../assets/app.ico");
 }
