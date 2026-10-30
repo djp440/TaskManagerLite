@@ -68,11 +68,15 @@ component NavItem inherits Rectangle {
         stroke: root.active ? Palette.accent-background : Palette.foreground;
     }
 
-    if root.wide: Text {
+    // 文字常驻：宽度固定（不随侧边栏宽度动画而被省略号截断），展开时淡入、折叠时淡出，多出的部分由侧边栏裁掉。
+    Text {
         x: 42px;
         y: 0px;
-        width: parent.width - 42px - 8px;
+        width: 100px;
         height: parent.height;
+        opacity: root.wide ? 1 : 0;
+        visible: self.opacity > 0;
+        animate opacity { duration: 120ms; easing: ease-out; }
         text: root.text;
         vertical-alignment: center;
         overflow: elide;
@@ -94,6 +98,8 @@ export component Sidebar inherits Rectangle {
     callback toggle-clicked();
 
     background: Theme.dark ? #ffffff06 : #00000004;
+    // 宽度过渡时裁掉尚未展开的文字。
+    clip: true;
 
     VerticalLayout {
         padding: 6px;

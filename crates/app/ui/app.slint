@@ -209,6 +209,12 @@ export component AppWindow inherits Window {
     // 页面导航在左侧边栏：窗口够宽且用户没有折叠时图标加文字，否则只有图标。
     out property <bool> sidebar-wide: root.sidebar-expanded && root.width >= 900px;
     out property <length> sidebar-width: root.sidebar-wide ? 160px : 48px;
+    // 画面上的侧边栏宽度：折叠/展开时过渡到 sidebar-width。布局预算与测试只看目标宽度，过渡中右侧内容总比最终更宽，不会被裁。
+    private property <length> sidebar-shown-width: root.sidebar-width;
+    animate sidebar-shown-width {
+        duration: 160ms;
+        easing: ease-out;
+    }
     // 工具栏随窗口变窄依次收缩：
     // 1. 搜索框从 220px 缩到“舒适宽度”，即恰好放下完整的占位文字（由布局完成）；
     // 2. 仍放不下时，“以管理员身份重启”收成盾牌图标按钮（悬停显示提示）；
@@ -328,7 +334,7 @@ export component AppWindow inherits Window {
                 Sidebar {
                     x: 0px;
                     y: 0px;
-                    width: root.sidebar-width;
+                    width: root.sidebar-shown-width;
                     height: parent.height;
                     page: root.page;
                     wide: root.sidebar-wide;
@@ -345,9 +351,9 @@ export component AppWindow inherits Window {
                 }
 
                 VerticalLayout {
-                    x: root.sidebar-width;
+                    x: root.sidebar-shown-width;
                     y: 0px;
-                    width: parent.width - root.sidebar-width;
+                    width: parent.width - root.sidebar-shown-width;
                     height: parent.height;
                     Rectangle {
                         height: 56px;
