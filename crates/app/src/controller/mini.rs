@@ -270,7 +270,11 @@ impl Controller {
         self.apply_mini_opacity();
         // 卡片数据与完整窗口共用，立即按迷你模式（不画大图）重绘一次。
         self.redraw_graphs();
-        self.log.borrow_mut().line(format!("进入迷你模式 位置={pos:?}"));
+        let (drawn, chosen) = {
+            let s = self.state.borrow();
+            (s.graph_window(), s.history_window)
+        };
+        self.log.borrow_mut().line(format!("进入迷你模式 位置={pos:?} 绘制窗口={} 设置窗口={}", drawn.key(), chosen.key()));
         true
     }
 

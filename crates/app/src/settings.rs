@@ -13,6 +13,7 @@ use serde_json::{Map, Number, Value};
 use tml_core::{DetailColumn, SortKey, ViewMode};
 
 use crate::details::{self, Shown};
+use crate::history::Window;
 
 const FILE_NAME: &str = "settings.json";
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -125,6 +126,8 @@ pub struct Settings {
     pub mini: MiniSettings,
     /// “运行新任务”的输入历史，最新在前，最多 [`RUN_HISTORY_MAX`] 条。
     pub run_history: Vec<String>,
+    /// 性能页曲线的时间窗口（#86）；缺失或不认识的值按 60 秒处理。迷你模式固定 60 秒，不受它影响。
+    pub history_window: Window,
     /// 本版本不认识的顶层字段，保存时原样写回。
     extra: Map<String, Value>,
 }
@@ -151,6 +154,7 @@ impl Default for Settings {
             sidebar_collapsed: false,
             mini: MiniSettings::default(),
             run_history: Vec::new(),
+            history_window: Window::default(),
             extra: Map::new(),
         }
     }
@@ -195,6 +199,7 @@ const KNOWN: &[&str] = &[
     "sidebar_collapsed",
     "mini",
     "run_history",
+    "history_window",
 ];
 
 /// `theme` 字段的取值，下标即 [`Settings::theme`]。
@@ -365,6 +370,9 @@ impl Settings {
                 push_run_history(&mut s.run_history, text);
             }
         }
+        if let Some(w) = o.get("history_window").and_then(Value::as_str).and_then(Window::from_key) {
+            s.history_window = w;
+        }
         if let Some(b) = o.get("always_on_top").and_then(Value::as_bool) {
             s.always_on_top = b;
         }
@@ -446,6 +454,7 @@ impl Settings {
         m.insert("opacity".into(), self.mini.opacity.into());
         o.insert("mini".into(), Value::Object(m));
         o.insert("run_history".into(), Value::Array(self.run_history.iter().cloned().map(Value::String).collect()));
+        o.insert("history_window".into(), self.history_window.key().into());
         let mut text = serde_json::to_string_pretty(&Value::Object(o)).unwrap_or_default();
         text.push('\n');
         text
@@ -555,6 +564,7 @@ mod tests {
             sidebar_collapsed: true,
             mini: MiniSettings { active: true, position: Some((-1500, 40)), on_top: false, opacity: 80 },
             run_history: vec!["notepad".into(), r#""C:\Program Files\x\a.exe" --flag"#.into()],
+            history_window: Window::Min10,
             extra: Map::new(),
         }
     }
@@ -664,6 +674,25 @@ mod tests {
         assert_eq!(parse(r#"{"theme": "blue"}"#).theme, 0);
         assert_eq!(parse(r#"{"theme": 2}"#).theme, 0);
         assert!(Settings { theme: 1, ..Settings::default() }.to_json().contains(r#""theme": "light""#));
+    }
+
+    #[test]
+    fn 曲线窗口缺字段或不认识时按_60_秒处理() {
+        assert_eq!(Settings::default().history_window, Window::Sec60);
+        // 旧版本的设置文件没有这个字段。
+        assert_eq!(parse(r#"{"view": "tree"}"#).history_window, Window::Sec60);
+        for (key, want) in [("60s", Window::Sec60), ("5m", Window::Min5), ("10m", Window::Min10), ("1h", Window::Hour1)] {
+            assert_eq!(parse(&format!(r#"{{"history_window": "{key}"}}"#)).history_window, want, "{key}");
+            assert!(Settings { history_window: want, ..Settings::default() }.to_json().contains(&format!(r#""history_window": "{key}""#)));
+        }
+        for bad in ["\"2h\"", "\"\"", "3", "null", "true", "[\"1h\"]"] {
+            let s = parse(&format!(r#"{{"history_window": {bad}, "view": "tree"}}"#));
+            assert_eq!(s.history_window, Window::Sec60, "{bad}");
+            assert_eq!(s.view, ViewMode::Tree, "{bad}：不影响其他设置");
+        }
+        // 旧版文件保存后带上默认值。
+        let out: Value = serde_json::from_str(&parse(r#"{"view": "tree"}"#).to_json()).unwrap();
+        assert_eq!(out["history_window"], "60s");
     }
 
     #[test]

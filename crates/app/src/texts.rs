@@ -10,12 +10,41 @@
 use std::borrow::Cow;
 
 use tml_core::ConnectionKind;
-use tml_core::services::{Action, ServiceError, ServiceState, StartType};
+use tml_core::connections::{ConnectionError, TcpState};
+use tml_core::services::{Action, ServiceError, ServiceState, StartType, StartTypeBlock};
 use tml_core::startup::{SourceError, StartupError, StartupSource};
 use tml_core::{
     AutostartError, DebuggerValue, ElevationError, IfeoError, MediaType, PriorityClass, ProcessControlError, RunError,
     ShellError, SystemError, UnsafeReason, WindowError, WindowOp,
 };
+
+/// TCP 连接状态（连接页“状态”列）；UDP 没有状态，显示为空。
+pub fn tcp_state(state: Option<TcpState>) -> Cow<'static, str> {
+    let Some(state) = state else { return "".into() };
+    match state {
+        TcpState::Closed => "已关闭".into(),
+        TcpState::Listen => "监听".into(),
+        TcpState::SynSent => "已发送 SYN".into(),
+        TcpState::SynReceived => "已收到 SYN".into(),
+        TcpState::Established => "已建立".into(),
+        TcpState::FinWait1 => "FIN 等待 1".into(),
+        TcpState::FinWait2 => "FIN 等待 2".into(),
+        TcpState::CloseWait => "等待关闭".into(),
+        TcpState::Closing => "正在关闭".into(),
+        TcpState::LastAck => "最后确认".into(),
+        TcpState::TimeWait => "等待超时".into(),
+        TcpState::DeleteTcb => "删除 TCB".into(),
+        TcpState::Unknown(v) => format!("未知（{v}）").into(),
+    }
+}
+
+/// 读取连接表失败的原因（连接页底栏）。
+pub fn connection_error(e: &ConnectionError) -> String {
+    match e {
+        ConnectionError::System { protocol, error } => format!("{} 连接表：{error}", protocol.name()),
+        ConnectionError::KeepsGrowing { protocol } => format!("{} 连接表变化太快，多次重试仍未读到", protocol.name()),
+    }
+}
 
 /// 服务状态（服务页“状态”列）。
 pub fn service_state(state: ServiceState) -> &'static str {
@@ -50,6 +79,39 @@ pub fn service_action(action: Action) -> &'static str {
         Action::Start => "启动",
         Action::Stop => "停止",
         Action::Restart => "重启",
+        Action::SetStartType(_) => "修改启动类型",
+    }
+}
+
+/// 服务操作进行中的提示（`hint` 为提权说明，可为空）。
+pub fn service_pending(action: Action, name: &str, hint: &str) -> String {
+    match action {
+        Action::SetStartType(t) => format!("正在将服务“{name}”的启动类型改为“{}”{hint}…", start_type(t)),
+        a => format!("正在{}服务“{name}”{hint}…", service_action(a)),
+    }
+}
+
+/// 服务操作成功的提示。
+pub fn service_done(action: Action, name: &str) -> String {
+    match action {
+        Action::SetStartType(t) => format!("已将服务“{name}”的启动类型改为“{}”", start_type(t)),
+        a => format!("已{}服务“{name}”", service_action(a)),
+    }
+}
+
+/// 服务操作失败的提示。
+pub fn service_failed(action: Action, name: &str, e: &ServiceError) -> String {
+    match action {
+        Action::SetStartType(t) => format!("无法将服务“{name}”的启动类型改为“{}”：{}", start_type(t), service_error(e)),
+        a => format!("无法{}服务“{name}”：{}", service_action(a), service_error(e)),
+    }
+}
+
+/// 不能修改启动类型的原因（菜单标题后缀与失败提示）。
+pub fn start_type_block(b: StartTypeBlock) -> &'static str {
+    match b {
+        StartTypeBlock::Driver => "驱动服务不能在此修改启动类型",
+        StartTypeBlock::Protected => "受系统保护的服务，不能修改启动类型",
     }
 }
 
@@ -72,6 +134,63 @@ pub fn connection_kind(kind: ConnectionKind) -> &'static str {
         ConnectionKind::Ethernet => "以太网",
         ConnectionKind::Other => "其他",
     }
+}
+
+/// 性能页曲线时间窗口的名称（#86）。设置文件里的键在 `history::Window::key`，不是显示文案。
+pub fn window_name(window: crate::history::Window) -> &'static str {
+    use crate::history::Window;
+    match window {
+        Window::Sec60 => "60 秒",
+        Window::Min5 => "5 分钟",
+        Window::Min10 => "10 分钟",
+        Window::Hour1 => "1 小时",
+    }
+}
+
+/// 曲线悬停提示里的“N 秒前”（#81）。不足 1 分钟按秒，不足 1 小时按“M 分 S 秒”，再长按“H 小时 M 分”；
+/// `approx` 为真（聚合点代表一段时间）时前面加“约”。
+pub fn hover_ago(secs: f64, approx: bool) -> String {
+    let n = secs.max(0.0).round() as u64;
+    let text = match n {
+        0..=59 => format!("{n} 秒前"),
+        60..=3599 => match n % 60 {
+            0 => format!("{} 分钟前", n / 60),
+            s => format!("{} 分 {s} 秒前", n / 60),
+        },
+        _ => match n % 3600 / 60 {
+            0 => format!("{} 小时前", n / 3600),
+            m => format!("{} 小时 {m} 分前", n / 3600),
+        },
+    };
+    if approx { format!("约 {text}") } else { text }
+}
+
+/// 悬停处没有数据（采样暂停、窗口不可见且没开后台继续采样，或曲线尚未覆盖到这里）。
+pub fn hover_no_data() -> &'static str {
+    "该时刻没有数据"
+}
+
+/// 聚合点的说明：每个点覆盖的秒数，数值取这段时间内的最大值。
+pub fn hover_bucket(bucket_secs: u64) -> String {
+    format!("每点 {bucket_secs} 秒")
+}
+
+pub fn hover_peak(value: &str) -> String {
+    format!("峰值 {value}")
+}
+
+pub fn hover_mean(value: &str) -> String {
+    format!("均值 {value}")
+}
+
+/// 悬停时刻占用最高的进程。磁盘速率是整机口径（进程的读写不区分物理磁盘），有多块磁盘时注明。
+pub fn hover_top_process(kind: crate::ResourceKind, multi_disk: bool, name: &str, pid: u32) -> String {
+    let label = match kind {
+        crate::ResourceKind::Disk if multi_disk => "全部磁盘读写最高",
+        crate::ResourceKind::Disk => "读写最高",
+        _ => "CPU 最高",
+    };
+    format!("{label}：{name}（PID {pid}）")
 }
 
 /// 物理磁盘介质类型（性能页磁盘详情）。
@@ -104,6 +223,8 @@ pub fn service_error(e: &ServiceError) -> String {
         ServiceError::BadArgumentCount => "参数数量错误".into(),
         ServiceError::BadAction => "操作错误".into(),
         ServiceError::BadNameEncoding => "名称编码错误".into(),
+        ServiceError::StartTypeBlocked(b) => start_type_block(*b).into(),
+        ServiceError::BadStartType => "不支持的启动类型".into(),
     }
 }
 
@@ -616,6 +737,21 @@ mod tests {
         assert_eq!(service_action(Action::Start), "启动");
         assert_eq!(service_action(Action::Stop), "停止");
         assert_eq!(service_action(Action::Restart), "重启");
+    }
+
+    #[test]
+    fn start_type_change_notes_name_service_target_and_reason() {
+        let a = Action::SetStartType(StartType::AutoDelayed);
+        assert_eq!(service_pending(a, "打印", ""), "正在将服务“打印”的启动类型改为“自动（延迟启动）”…");
+        assert_eq!(service_done(a, "打印"), "已将服务“打印”的启动类型改为“自动（延迟启动）”");
+        let blocked = ServiceError::StartTypeBlocked(StartTypeBlock::Protected);
+        assert_eq!(service_failed(a, "打印", &blocked), "无法将服务“打印”的启动类型改为“自动（延迟启动）”：受系统保护的服务，不能修改启动类型");
+        assert_eq!(service_error(&ServiceError::StartTypeBlocked(StartTypeBlock::Driver)), "驱动服务不能在此修改启动类型");
+        assert_eq!(service_error(&ServiceError::BadStartType), "不支持的启动类型");
+        // 启停的提示与改动前逐字相同。
+        assert_eq!(service_pending(Action::Start, "X", "（提权）"), "正在启动服务“X”（提权）…");
+        assert_eq!(service_done(Action::Stop, "X"), "已停止服务“X”");
+        assert_eq!(service_failed(Action::Restart, "X", &ServiceError::NotStopped), "无法重启服务“X”：服务没有停止");
     }
 
     #[test]

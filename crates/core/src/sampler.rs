@@ -58,6 +58,8 @@ pub struct Sample {
     pub memory_hardware: Option<MemoryHardware>,
     /// 本次 `snapshot` 里 `disk_rate` 的来源。
     pub disk_source: DiskSource,
+    /// 本次进程快照里 CPU、磁盘最高的进程（下标指向 `snapshot.processes`；只采系统指标时为空），供曲线悬停提示（#81）。
+    pub peaks: crate::Peaks,
 }
 
 #[derive(Default)]
@@ -258,7 +260,10 @@ impl Sampler {
         readings.extend(disks.iter().map(|d| (format!("disk:{}", d.number), d.active.map(f64::from))));
         readings.extend(networks.iter().map(|n| (n.id.clone(), n.recv.zip(n.send).map(|(r,s)| r+s))));
         readings.extend(gpus.iter().map(|g| (g.id.clone(), g.usage)));
+        // 磁盘速率此时已是最终口径（含 ETW 覆盖）；单次扫描，不排序、不分配。
+        let peaks = snapshot.peaks();
         Sample {
+            peaks,
             gpus,
             readings,
             networks,

@@ -1126,3 +1126,69 @@ fn write_bmp(path: &Path, buf: &SharedPixelBuffer<Rgba8Pixel>) -> std::io::Resul
     }
     std::fs::write(path, out)
 }
+
+/// `--hover-shot <曲线>:<比例>[:light][:<窗口键>]`（#81）：切到性能页的该曲线（cpu / memory / disk / network / gpu），
+/// 暂停采样让画面静止，向曲线区域派发真实的鼠标移动事件（走 Slint 的事件系统，与真实鼠标同一条路径），
+/// 把悬停状态下的整窗截图写到环境变量 `TML_HOVER_SHOT` 指定的 BMP，随后退出。比例 0 为曲线最左、1 为最右；
+/// 窗口键同设置里的 `history_window`（60s / 5m / 10m / 1h）。窗口在屏幕外，不打扰桌面。
+pub fn run_hover_shot(ui: &AppWindow, spec: &str, warmup: Duration) {
+    ui.window().set_position(PhysicalPosition::new(-6000, -6000));
+    let parts: Vec<&str> = spec.split(':').collect();
+    let kind = match parts.first().copied().unwrap_or("cpu") {
+        "memory" => crate::ResourceKind::Memory,
+        "disk" => crate::ResourceKind::Disk,
+        "network" => crate::ResourceKind::Network,
+        "gpu" => crate::ResourceKind::Gpu,
+        _ => crate::ResourceKind::Cpu,
+    };
+    let ratio: f32 = parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0.5);
+    let dark = !parts.contains(&"light");
+    let window = parts.iter().find_map(|p| crate::history::Window::from_key(p)).unwrap_or_default();
+    let weak = ui.as_weak();
+    Timer::single_shot(warmup, move || {
+        let Some(ui) = weak.upgrade() else { return };
+        ui.invoke_set_dark(dark);
+        ui.set_page(1);
+        ui.set_history_window_index(window.index());
+        ui.invoke_history_window_changed(window.index());
+        let resources = ui.get_resources();
+        for i in 0..resources.row_count() {
+            let row = resources.row_data(i).unwrap();
+            if row.kind == kind {
+                ui.invoke_resource_selected(row.id);
+                break;
+            }
+        }
+        // 暂停采样：曲线与提示在截图前不再变化。
+        ui.set_interval_index(3);
+        ui.invoke_interval_changed(3);
+        Timer::single_shot(Duration::from_millis(700), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let (x, y) = (ui.get_graph_x(), ui.get_graph_y());
+            let (w, h) = (ui.get_graph_width(), ui.get_graph_height());
+            let w_ = ui.window();
+            let outside = LogicalPosition::new(x - 20.0, y - 20.0);
+            let at = LogicalPosition::new(x + w * ratio, y + h * 0.4);
+            // 先从区域外进入再移动几步，和真实鼠标一样。
+            w_.dispatch_event(WindowEvent::PointerMoved { position: outside });
+            w_.dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(at.x - 30.0, at.y) });
+            w_.dispatch_event(WindowEvent::PointerMoved { position: at });
+            eprintln!("悬停截图 曲线区域 x={x} y={y} w={w} h={h} 鼠标=({}, {})", at.x, at.y);
+            Timer::single_shot(Duration::from_millis(700), move || {
+                let Some(ui) = weak.upgrade() else { return };
+                match (std::env::var_os("TML_HOVER_SHOT"), ui.window().take_snapshot()) {
+                    (Some(path), Ok(buf)) => {
+                        if let Err(e) = write_bmp(Path::new(&path), &buf) {
+                            eprintln!("写入截图失败：{e}");
+                        }
+                    }
+                    (None, _) => eprintln!("未设置 TML_HOVER_SHOT"),
+                    (_, Err(e)) => eprintln!("截图失败：{e}"),
+                }
+                let hover = ui.get_graph_hover();
+                eprintln!("悬停状态 active={} 行数={}", hover.active, hover.lines.row_count());
+                let _ = slint::quit_event_loop();
+            });
+        });
+    });
+}

@@ -85,3 +85,18 @@ export struct Resource {
     adapter-description: string,
     volumes: [string],
 }
+
+// 性能页曲线的悬停提示（#81）：引导线、曲线上的圆点与提示卡片，位置都相对曲线区域，由 Rust 计算。
+export struct GraphHover {
+    active: bool,
+    guide-x: length,
+    dot-visible: bool,
+    dot-x: length,
+    dot-y: length,
+    card-x: length,
+    card-y: length,
+    card-width: length,
+    card-height: length,
+    // 卡片的每一行，第一行是主数值（加粗）。
+    lines: [string],
+}

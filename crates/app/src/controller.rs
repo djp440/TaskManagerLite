@@ -16,8 +16,10 @@ use tml_core::{
 };
 
 mod columns;
+mod connections_page;
 mod cpu;
 mod export;
+mod graph_hover;
 mod memory;
 mod mini;
 mod process_control;
@@ -36,6 +38,7 @@ mod resources;
 
 use crate::details::{InfoCache, InfoWorker, Shown};
 use crate::format;
+use crate::history::Window;
 use crate::icons::{self, IconCache, IconWorker};
 use crate::logging::Log;
 use crate::sampling::{Command, SamplerHandle};
@@ -75,7 +78,11 @@ pub struct Controller {
     /// 启动项页：最近一次枚举到的全部启动项与图标（未过滤）。
     startup_all: RefCell<Vec<(tml_core::startup::Entry, Option<tml_core::IconBitmap>)>>,
     services: services_page::ServicesState,
+    /// 连接页（#77）。
+    connections: connections_page::ConnectionsState,
     export: export::ExportState,
+    /// 性能曲线悬停提示的鼠标位置与显示状态（#81）。
+    hover: graph_hover::HoverState,
     /// “设置亲和性”对话框当前针对的进程。
     affinity_target: RefCell<Option<ProcessKey>>,
     /// 效率模式的优先级联动记忆与待确认的批量操作（#68）。
@@ -114,6 +121,8 @@ pub struct Controller {
     mini: OnceCell<crate::MiniWindow>,
     /// 已安排在本次事件处理之后开始系统拖动，避免一次拖动里重复投递。
     drag_pending: Cell<bool>,
+    /// `--history-prefill <秒>`：下一次采样时给全部曲线灌入合成历史（测各窗口填满后的内存，见 `History::prefill`）。
+    history_prefill: Cell<Option<u64>>,
 }
 
 #[derive(Default)]
@@ -140,6 +149,8 @@ struct State {
     /// 采样中断后，下一个点前需要先插入断点。
     gap: bool,
     paused: bool,
+    /// 性能页曲线的时间窗口（#86，设置里保存的那个）；迷你模式固定 60 秒，见 `graph_window`。
+    history_window: Window,
     visible: bool,
     /// 迷你模式：只显示资源卡片，只采系统指标，卡片不画详情大图。
     mini: bool,
@@ -147,6 +158,10 @@ struct State {
     background: bool,
     /// 恢复可见后的下一次完整采样把曲线连续性写进日志（供自动化验收核对）。
     report_history: bool,
+    /// 曲线峰值进程的名称表（#81）：每个历史点只存一个小标识，名字在这里去重保存。
+    peak_names: crate::peak::ProcNames,
+    /// 最近一次画详情大图时的时间基准、量程与区域尺寸，悬停提示据此定位（#81）。
+    drawn: Cell<Option<graph_hover::Drawn>>,
     /// 等待用户确认要结束的进程，按结束顺序排列。
     pending: Vec<ProcessKey>,
     first_data: bool,
@@ -173,6 +188,11 @@ impl State {
     fn sampling(&self) -> bool {
         crate::sampling::plan(self.visible, self.mini, self.background, self.paused)
             != crate::sampling::Plan::Idle
+    }
+
+    /// 当前实际绘制曲线用的时间窗口：迷你模式保持 60 秒，不受设置影响。
+    fn graph_window(&self) -> Window {
+        if self.mini { Window::Sec60 } else { self.history_window }
     }
 }
 
@@ -252,6 +272,7 @@ impl Controller {
         let mut state = State {
             visible: true,
             background: settings.background_sampling,
+            history_window: settings.history_window,
             resources: set,
             ..Default::default()
         };
@@ -268,6 +289,7 @@ impl Controller {
         ui.set_view_mode(view_mode_index(settings.view));
         ui.set_page(settings.page);
         ui.set_sidebar_expanded(!settings.sidebar_collapsed);
+        ui.set_history_window_index(settings.history_window.index());
         let cols = ui.global::<Columns>();
         cols.set_pid(settings.columns.pid);
         cols.set_cpu(settings.columns.cpu);
@@ -293,7 +315,9 @@ impl Controller {
             startup_entries: RefCell::new(Vec::new()),
             startup_all: RefCell::new(Vec::new()),
             services: Default::default(),
+            connections: Default::default(),
             export: Default::default(),
+            hover: Default::default(),
             affinity_target: RefCell::new(None),
             eco: Default::default(),
             suspend: Default::default(),
@@ -325,6 +349,7 @@ impl Controller {
             hidden: Cell::new(false),
             mini: OnceCell::new(),
             drag_pending: Cell::new(false),
+            history_prefill: Cell::new(None),
         });
         // 恢复上次选中的资源实例；实例暂时不存在时先用 CPU，实例出现后自动切回。
         let restored = c.state.borrow_mut().resources.restore(&settings.resource);
@@ -336,6 +361,7 @@ impl Controller {
                 settings.resource
             ));
         }
+        c.log.borrow_mut().line(format!("曲线窗口 {}", settings.history_window.key()));
         c.bind(ui);
         c.bind_process_menu(ui);
         c.bind_columns(ui);
@@ -343,11 +369,13 @@ impl Controller {
         c.bind_settings(ui);
         c.bind_startup(ui);
         c.bind_services(ui);
+        c.bind_connections(ui);
         c.bind_run_task(ui);
         c.bind_process_control(ui);
         c.bind_suspend(ui);
         c.bind_window_ops(ui);
         c.bind_export(ui);
+        c.bind_graph_hover(ui);
         ui.set_pinned(settings.always_on_top);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
         if settings.interval_index != 1 {
@@ -504,6 +532,52 @@ impl Controller {
                 c.set_interval(i);
             }
         });
+        let c = Rc::downgrade(self);
+        ui.on_history_window_changed(move |i| {
+            if let Some(c) = c.upgrade() {
+                c.set_history_window(Window::from_index(i));
+            }
+        });
+    }
+
+    /// 性能页切换曲线时间窗口（#86）：所有资源曲线（含逻辑处理器小图）同步改用新窗口，立即重画，写入设置。
+    /// 历史数据一直按所有窗口分层保存，所以切换不需要等待积累。
+    fn set_history_window(&self, window: Window) {
+        {
+            let mut s = self.state.borrow_mut();
+            if s.history_window == window {
+                return;
+            }
+            s.history_window = window;
+        }
+        self.settings.borrow_mut().history_window = window;
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_history_window_index(window.index());
+        }
+        self.redraw_graphs();
+        self.log.borrow_mut().line(format!("曲线窗口 切换为 {}", window.key()));
+        self.save_settings();
+    }
+
+    /// 测试钩子 `--history-prefill <秒>`：第二次采样时给全部曲线灌入这么长的合成历史，并把状态写进日志。
+    pub fn queue_history_prefill(&self, secs: u64) {
+        self.history_prefill.set(Some(secs.min(24 * 3600)));
+    }
+
+    /// 曲线历史的状态写进日志（只有数值）：当前窗口、CPU 曲线在该窗口内的点数 / 缺口数 / 时间跨度，以及全部曲线历史的估算内存。
+    fn log_history(&self, why: &str) {
+        let s = self.state.borrow();
+        let window = s.history_window;
+        let (points, gaps, span) = s.resources.history(resources::CPU).window_shape(Instant::now(), window);
+        let bytes = s.resources.history_bytes() + s.cpu.history_bytes();
+        let (raw, _, _) = s.resources.history(resources::CPU).stats();
+        self.log.borrow_mut().line(format!(
+            "曲线历史 {why} 窗口={} 绘制窗口={} CPU曲线 窗口点数={points} 窗口缺口={gaps} 跨度={} ms 原始点数={raw} 全部曲线估算内存={} B",
+            window.key(),
+            s.graph_window().key(),
+            span.as_millis(),
+            bytes
+        ));
     }
 
     /// 切换视图模式。分组视图需要采样线程枚举窗口：切到分组时通知它并等下一个快照带着应用进程回来再刷新列表。
@@ -565,6 +639,7 @@ impl Controller {
             settings.view = s.opts.mode;
             settings.resource = s.resources.selected_for_save().to_owned();
             settings.details = s.details.clone();
+            settings.history_window = s.history_window;
         }
         settings.mini.active = self.is_mini();
         settings.interval_index = ui.get_interval_index();
@@ -589,6 +664,10 @@ impl Controller {
         match result {
             Ok(()) => log.line(format!("设置已保存 {}", store.path().display())),
             Err(e) => log.line(format!("设置保存失败 {e}")),
+        }
+        drop(log);
+        if self.state.borrow().first_data {
+            self.log_history("保存设置");
         }
     }
 
@@ -832,6 +911,12 @@ impl Controller {
             s.resources
                 .sync_devices(&sample.disks, &sample.networks);
             s.resources.sync_gpus(&sample.gpus);
+            // 测试钩子：第二次采样、本次的点写入之前灌入合成历史（它会替换已有的点，所以必须在前面）。
+            if s.first_data && let Some(secs) = self.history_prefill.take() {
+                s.resources.prefill(now, secs);
+                s.cpu.prefill(now, secs);
+                self.log.borrow_mut().line(format!("曲线历史 灌入合成数据 {secs} 秒"));
+            }
             let gpu_gap = s.gap;
             s.resources.push_gpu_memory(&sample.gpus, now, gpu_gap);
             let resumed = std::mem::take(&mut s.gap);
@@ -841,8 +926,20 @@ impl Controller {
             }
             // 首次采样没有基线，CPU、磁盘、网络都是 0，不画进曲线。
             if s.first_data {
+                // 这次采样 CPU、磁盘占用最高的进程（#81）：采样线程单次扫描已选出，这里只做一次哈希查找，
+                // 同一进程连续成为峰值时不分配；只采系统指标的采样没有进程快照，也就没有峰值进程。
+                let mut who_of = |at: Option<usize>| {
+                    at.and_then(|i| sample.snapshot.processes.get(i))
+                        .map_or(crate::peak::NO_PROC, |p| s.peak_names.intern(p.key, &p.name))
+                };
+                let (cpu_who, disk_who) = (who_of(sample.peaks.cpu), who_of(sample.peaks.disk));
                 for (id, value) in &sample.readings {
-                    s.resources.push(id, now, if resumed { None } else { *value });
+                    let who = match id.as_str() {
+                        resources::CPU => cpu_who,
+                        id if id == resources::DISK || id.starts_with("disk:") => disk_who,
+                        _ => crate::peak::NO_PROC,
+                    };
+                    s.resources.push_with(id, now, if resumed { None } else { *value }, who);
                 }
                 // 恢复后的第一份差值覆盖了暂停区间，只用来刷新读数与基线，不计入窗口统计。
                 if !resumed {
@@ -851,6 +948,7 @@ impl Controller {
             }
             let with_history = s.first_data;
             s.cpu.record(now, sample.cpu, with_history);
+
             if fresh {
                 s.snapshot = sample.snapshot;
                 s.app_pids = sample.app_pids;
@@ -869,10 +967,13 @@ impl Controller {
             if fresh || s.mini {
                 if fresh && std::mem::take(&mut s.report_history) {
                     let (points, gaps, step) = s.resources.history(resources::CPU).stats();
+                    let (wp, wg, span) = s.resources.history(resources::CPU).window_shape(now, s.history_window);
                     self.log.borrow_mut().line(format!(
-                        "恢复可见 后台采样={} CPU曲线 点数={points} 断点={gaps} 最大间隔={} ms",
+                        "恢复可见 后台采样={} CPU曲线 点数={points} 断点={gaps} 最大间隔={} ms 窗口={} 窗口点数={wp} 窗口缺口={wg} 跨度={} ms",
                         s.background,
-                        step.as_millis()
+                        step.as_millis(),
+                        s.history_window.key(),
+                        span.as_millis()
                     ));
                 }
                 self.update_resources(&s, now);
@@ -885,6 +986,7 @@ impl Controller {
             self.track_info();
             self.refresh_rows();
             self.services_tick();
+            self.connections_tick();
         }
     }
 
@@ -963,6 +1065,7 @@ impl Controller {
             (w, h) if w > 1.0 && h > 1.0 => (w, h),
             _ => (600.0, 300.0),
         };
+        let window = s.graph_window();
         let mem_pct = if m.memory_total > 0 {
             m.memory_used as f64 / m.memory_total as f64 * 100.0
         } else {
@@ -1029,7 +1132,7 @@ impl Controller {
                               memory_ratio(g.shared, g.shared_total)])
                     }
                     ResourceKind::Network => {
-                        let scale = format::nice_scale(history.max(), 100.0 * 1024.0);
+                        let scale = format::nice_scale(history.max_in(now, window), 100.0 * 1024.0);
                         (
                             scale,
                             format!(
@@ -1042,20 +1145,24 @@ impl Controller {
                         )
                     }
                 };
+                // 悬停提示（#81）按这一次画曲线用的时间基准与量程定位。
+                if !s.mini && s.resources.selected() == inst.id {
+                    s.drawn.set(Some(graph_hover::Drawn { now, scale, size: detail }));
+                }
                 // 迷你模式下完整窗口隐藏，详情大图不画；回到完整模式时 redraw_graphs 立即补画。
                 let (line, area) = if s.mini || s.resources.selected() != inst.id {
                     Default::default()
                 } else {
-                    history.paths(now, scale, detail)
+                    history.paths(now, scale, detail, window)
                 };
-                let (mini_line, mini_area) = history.paths(now, scale, Self::MINI);
-                let memory_graphs = gpu.map(|g| s.resources.gpu_memory_paths(g, now, (detail.0, 64.0))).unwrap_or_default();
+                let (mini_line, mini_area) = history.paths(now, scale, Self::MINI, window);
+                let memory_graphs = gpu.map(|g| s.resources.gpu_memory_paths(g, now, (detail.0, 64.0), window)).unwrap_or_default();
                 let detail = match (&mem_text, inst.kind) {
                     (Some(t), ResourceKind::Memory) => t.header.clone(),
                     (_, ResourceKind::Gpu) => gpu.map(|g| g.name.clone()).unwrap_or_default(),
                     _ => network.map(|n| format!("{} · 链路 {:.0} Mbps{}\n{}\n{}", crate::texts::connection_kind(n.connection), n.link_speed as f64 / 1e6,
                         if n.ssid.is_empty() { String::new() } else { format!(" · SSID {}", n.ssid) },
-                        if n.addresses.is_empty() { "地址不可用" } else { &n.addresses }, s.resources.network_stats(&n.id, now))).unwrap_or_default(),
+                        if n.addresses.is_empty() { "地址不可用" } else { &n.addresses }, s.resources.network_stats(&n.id, now, window))).unwrap_or_default(),
                 };
 
                 Resource {
@@ -1129,6 +1236,7 @@ impl Controller {
             })
             .collect();
         self.apply_resources(s, rows);
+        self.refresh_hover(s);
         if s.mini {
             return;
         }
@@ -1138,6 +1246,7 @@ impl Controller {
             s.snapshot.processes.len(),
             &cpu,
             s.resources.selected() == resources::CPU,
+            window,
         );
         if let Some(t) = mem_text {
             ui.set_memory_view(memory::view(t));
@@ -1535,5 +1644,16 @@ mod tests {
         assert_eq!(pid_at(4), Some(30));
         // 越界不 panic。
         assert_eq!(pid_at(99), None);
+    }
+
+    #[test]
+    fn mini_mode_always_draws_the_sixty_second_window() {
+        let mut s = State { history_window: Window::Hour1, ..Default::default() };
+        assert_eq!(s.graph_window(), Window::Hour1);
+        s.mini = true;
+        assert_eq!(s.graph_window(), Window::Sec60, "迷你模式不受设置影响");
+        assert_eq!(s.history_window, Window::Hour1, "设置本身不被改动，回到完整窗口后恢复");
+        s.mini = false;
+        assert_eq!(s.graph_window(), Window::Hour1);
     }
 }

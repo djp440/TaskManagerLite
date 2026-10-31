@@ -1,6 +1,6 @@
 # 键盘快捷键端到端验收（#71）。启动自己的实例（--allow-multiple，临时 TML_SETTINGS_DIR / TML_LOG_DIR / TML_INSTANCE_ID），
 # 用 SendInput 向前台窗口发真实按键，再读应用日志里的「界面事件」「搜索」「重新枚举」等行核对；结束时只结束自己的进程。
-#   1. Ctrl+1…5 依次切到 进程 / 性能 / 启动项 / 服务 / 设置（页面编号 0/1/3/4/2），Ctrl+5 在设置页再按不会回退。
+#   1. Ctrl+1…6 依次切到 进程 / 性能 / 启动项 / 服务 / 连接 / 设置（页面编号 0/1/3/4/5/2），Ctrl+6 在设置页再按不会回退。
 #   2. Ctrl+F 在进程页、启动项页、服务页聚焦各自的搜索框；在性能页按则跳到进程页的搜索框。
 #   3. 搜索框里输入的纯数字不会切页；搜索框有焦点时按 Ctrl+数字仍可切页，且数字不会写进搜索框。
 #   4. 搜索框里输入后列表被过滤；Esc 清空搜索、恢复全部行并把焦点还给列表（三个页面各验一次）。
@@ -159,11 +159,12 @@ try {
     Check (WaitUntil { (Log-Count '首个快照帧') -gt 0 } 10) '应用已出首个快照'
     Focus-App
 
-    '=== 1. Ctrl+1…5 切页 ==='
+    '=== 1. Ctrl+1…6 切页 ==='
     Expect-Log { Ctrl-Key ([uint16]0x33) } '界面事件 page=3\b' 'Ctrl+3 切到启动项页（页面 3）'
     Expect-Log { Ctrl-Key ([uint16]0x34) } '界面事件 page=4\b' 'Ctrl+4 切到服务页（页面 4）'
-    Expect-Log { Ctrl-Key ([uint16]0x35) } '界面事件 page=2\b' 'Ctrl+5 切到设置页（页面 2）'
-    Expect-No-Log { Ctrl-Key ([uint16]0x35) } '界面事件 page=' '已在设置页时再按 Ctrl+5 不再切换（不回退）'
+    Expect-Log { Ctrl-Key ([uint16]0x35) } '界面事件 page=5\b' 'Ctrl+5 切到连接页（页面 5）'
+    Expect-Log { Ctrl-Key ([uint16]0x36) } '界面事件 page=2\b' 'Ctrl+6 切到设置页（页面 2）'
+    Expect-No-Log { Ctrl-Key ([uint16]0x36) } '界面事件 page=' '已在设置页时再按 Ctrl+6 不再切换（不回退）'
     Expect-Log { Ctrl-Key ([uint16]0x32) } '界面事件 page=1\b' 'Ctrl+2 切到性能页（页面 1）'
     Shot '1-性能页'
     Expect-Log { Ctrl-Key ([uint16]0x31) } '界面事件 page=0\b' 'Ctrl+1 切到进程页（页面 0）'
@@ -249,7 +250,7 @@ try {
     Press $VK_ESC
 
     '=== 7. 设置页的快捷键说明 ==='
-    Ctrl-Key ([uint16]0x35)
+    Ctrl-Key ([uint16]0x36)
     Check (WaitUntil { (Log-Last '界面事件 page=(\d)') -eq '2' } 3) '在设置页'
     Shot '7-设置页-顶部'
     $r = New-Object Win+RECT; [void][Win]::GetWindowRect($main, [ref]$r)

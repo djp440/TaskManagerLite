@@ -46,6 +46,32 @@ pub struct ProcessSnapshot {
     pub processes: Vec<Process>,
 }
 
+/// 一次进程快照里各项指标最高的进程在 `ProcessSnapshot::processes` 里的下标（性能曲线悬停提示用，#81）。
+/// 取值为 0 的指标没有“最高进程”，对应字段为 `None`。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Peaks {
+    /// CPU 占用最高的进程。
+    pub cpu: Option<usize>,
+    /// 磁盘速率最高的进程（口径随 `DiskSource` 变化）。
+    pub disk: Option<usize>,
+}
+
+impl ProcessSnapshot {
+    /// 单次扫描取 CPU 占用与磁盘速率最高的进程：只取最大值，不排序、不分配。并列时取先出现的。
+    pub fn peaks(&self) -> Peaks {
+        let (mut cpu, mut disk) = ((0.0f32, None), (0.0f64, None));
+        for (i, p) in self.processes.iter().enumerate() {
+            if p.cpu_usage > cpu.0 {
+                cpu = (p.cpu_usage, Some(i));
+            }
+            if p.disk_rate > disk.0 {
+                disk = (p.disk_rate, Some(i));
+            }
+        }
+        Peaks { cpu: cpu.1, disk: disk.1 }
+    }
+}
+
 /// 上一次采样留下的计数器，用来做差。
 #[derive(Default)]
 pub struct Baseline {
@@ -164,5 +190,26 @@ mod tests {
         // 同一 PID、不同创建时间：是新进程，不能和旧进程做差。
         let s = b.advance(vec![raw(10, 9, 1_000, 0)], 120_000_000, 1.0, &mut |_| false);
         assert_eq!(s.processes[0].cpu_usage, 0.0);
+    }
+
+    /// 悬停提示（#81）：单次扫描取 CPU、磁盘各自最高的进程；全为 0 时没有“最高进程”；并列取先出现的。
+    #[test]
+    fn peaks_pick_the_maximum_without_sorting() {
+        let mut b = Baseline::default();
+        b.advance(vec![raw(10, 1, 0, 0), raw(11, 1, 0, 0), raw(12, 1, 0, 0)], 0, 0.0, &mut |_| false);
+        // 总可用时间 100_000_000：pid 11、12 各用 30%（并列），pid 10 用 10%；磁盘 pid 10 最大。
+        let s = b.advance(
+            vec![raw(10, 1, 10_000_000, 9000), raw(11, 1, 30_000_000, 1000), raw(12, 1, 30_000_000, 0)],
+            100_000_000,
+            1.0,
+            &mut |_| false,
+        );
+        let peaks = s.peaks();
+        assert_eq!(peaks, Peaks { cpu: Some(1), disk: Some(0) });
+        assert_eq!(s.processes[peaks.cpu.unwrap()].key.pid, 11);
+        // 两次采样之间没有任何增量：没有最高进程。
+        let idle = b.advance(vec![raw(10, 1, 10_000_000, 9000), raw(11, 1, 30_000_000, 1000)], 100_000_000, 1.0, &mut |_| false);
+        assert_eq!(idle.peaks(), Peaks::default());
+        assert_eq!(ProcessSnapshot::default().peaks(), Peaks::default());
     }
 }

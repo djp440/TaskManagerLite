@@ -27,6 +27,15 @@ export global ServiceData {
     // 0 启动，1 停止，2 重启。
     callback act(int);
     callback goto-process();
+    // 右键菜单“启动类型”子菜单（#72）：start-type 是所选服务当前值的序号
+    // （0 自动，1 自动（延迟启动），2 手动，3 已禁用，-1 其他或未知，不打勾）；
+    // 驱动、受保护的服务 can-set-start-type 为假（四项置灰），start-type-title 带上原因。
+    in property <int> start-type: -1;
+    in property <bool> can-set-start-type;
+    in property <string> start-type-title: @tr("启动类型");
+    // 右键按下、菜单弹出前：读取所选服务能否修改启动类型。
+    callback menu-opening();
+    callback set-start-type(int);
 }
 component Cell inherits Rectangle {
     in property <string> text;
@@ -57,6 +66,8 @@ export component ServicesPage inherits Rectangle {
     private property <bool> show-tip;
     private property <bool> has-selection: ServiceData.selected >= 0 && ServiceData.selected < ServiceData.rows.length;
     private property <ServiceRow> current: root.has-selection ? ServiceData.rows[ServiceData.selected] : { };
+    // 菜单项无法嵌入 ShieldIcon 组件，未提权时用同形的图片作为菜单图标。
+    private property <image> menu-shield: ServiceData.elevated ? @image-url("") : @image-url("icons/shield.svg");
     changed hovered => { root.show-tip = false; }
     Timer { interval: 500ms; running: root.hovered >= 0 && !root.show-tip; triggered => { root.show-tip = true; } }
     init => { ServiceData.refresh(); }
@@ -101,6 +112,29 @@ export component ServicesPage inherits Rectangle {
             for row[i] in ServiceData.rows: Rectangle {
                 height: Theme.row-height;
                 background: ServiceData.selected == i ? Theme.selected : touch.has-hover ? Theme.hover : transparent;
+                menu := ContextMenuArea {
+                    width: 100%;
+                    height: 100%;
+                    Menu {
+                        Menu {
+                            title: ServiceData.start-type-title;
+                            for label[k] in [@tr("自动"), @tr("自动（延迟启动）"), @tr("手动"), @tr("已禁用")]: MenuItem {
+                                title: label;
+                                icon: root.menu-shield;
+                                checkable: true;
+                                checked: ServiceData.start-type == k;
+                                enabled: ServiceData.can-set-start-type && !ServiceData.busy;
+                                activated => { ServiceData.set-start-type(k); }
+                            }
+                        }
+                        MenuSeparator {}
+                        MenuItem {
+                            title: @tr("转到进程");
+                            enabled: row.pid > 0;
+                            activated => { ServiceData.goto-process(); }
+                        }
+                    }
+                }
                 HorizontalLayout {
                     padding-left: 10px; padding-right: 10px; spacing: 0px;
                     Cell { text: row.name; width: 170px; }
@@ -111,6 +145,14 @@ export component ServicesPage inherits Rectangle {
                     Cell { text: row.group; width: 150px; }
                 }
                 touch := TouchArea {
+                    // TouchArea 会吞掉右键：右键按下时选中该行、读取菜单状态并弹出菜单。
+                    pointer-event(e) => {
+                        if e.button == PointerEventButton.right && e.kind == PointerEventKind.down {
+                            ServiceData.selected = i;
+                            ServiceData.menu-opening();
+                            menu.show({ x: self.mouse-x, y: self.mouse-y });
+                        }
+                    }
                     clicked => { ServiceData.selected = i; }
                     double-clicked => { ServiceData.selected = i; ServiceData.goto-process(); }
                     changed has-hover => {

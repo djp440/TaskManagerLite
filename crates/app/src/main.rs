@@ -4,8 +4,11 @@ mod controller;
 mod details;
 mod file_dialog;
 mod format;
+mod history;
+mod hover;
 mod icons;
 mod logging;
+mod peak;
 mod placement;
 mod sampling;
 mod screenshot;
@@ -32,13 +35,17 @@ thread_local! {
 const RENDERER: &str = if cfg!(feature = "renderer-software") { "software" } else { "femtovg" };
 
 /// 开发用参数：测量、截图与 `--allow-multiple` 不受单实例限制，也不占用单实例锁。
-const UNRESTRICTED_FLAGS: [&str; 7] = [
+const UNRESTRICTED_FLAGS: [&str; 11] = [
     "--measure-startup",
     "--screenshot",
     "--menu-shot",
     "--menu-action",
     "--service-action",
+    "--connections-action",
     "--export-csv",
+    "--history-prefill",
+    "--hover",
+    "--hover-shot",
     "--allow-multiple",
 ];
 
@@ -73,7 +80,7 @@ fn main() -> Result<(), slint::PlatformError> {
     log.line(format!("进入 main {entered:.1} ms"));
 
     // 设置在创建窗口前读取（一个很小的文件）；开发模式不读写用户设置，保证截图与测量可复现。
-    let dev_mode = measure || std::env::args().any(|a| a == "--screenshot" || a == "--menu-shot" || a == "--menu-action" || a == "--service-action");
+    let dev_mode = measure || std::env::args().any(|a| a == "--screenshot" || a == "--menu-shot" || a == "--menu-action" || a == "--service-action" || a == "--connections-action" || a == "--hover-shot");
     let store = if dev_mode { None } else { settings::Store::from_env() };
     let (loaded, outcome) = store.as_ref().map_or((settings::Settings::default(), None), |s| {
         let (settings, outcome) = s.load();
@@ -175,10 +182,30 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Some(spec) = std::env::args().skip_while(|a| a != "--service-action").nth(1) {
         controller.queue_service_action(&spec);
     }
+    // `--connections-action <dump|goto:<pid>[:<本地端口>]>`：自动化验收连接页（#77，数据经 TML_CONNECTIONS_DUMP 写出，结果写日志）。
+    if let Some(spec) = std::env::args().skip_while(|a| a != "--connections-action").nth(1) {
+        controller.queue_connections_action(&spec);
+    }
 
     // `--export-csv <process|performance>=<路径>`：自动化验收 CSV 导出（不弹对话框，写完即退出，读写设置与正常启动相同）。
     if let Some(spec) = std::env::args().skip_while(|a| a != "--export-csv").nth(1) {
         controller.queue_export(&spec);
+    }
+
+    // `--history-prefill <秒>`：测试钩子，给全部曲线灌入合成历史，用来测各窗口填满后的内存与开销（#86）。
+    if let Some(secs) = std::env::args().skip_while(|a| a != "--history-prefill").nth(1).and_then(|v| v.parse().ok()) {
+        controller.queue_history_prefill(secs);
+    }
+
+    // `--hover <曲线>:<比例|peak|pid=<N>>[,…][@秒]`：测试钩子，启动后若干秒（默认 12）把性能页切到该曲线、鼠标移到指定横向位置
+    // （0 最左 1 最右；`peak` 为该曲线数值最高的位置），把悬停提示读到的数值 / 时间 / 进程 PID 写进日志（#81）。
+    if let Some(spec) = std::env::args().skip_while(|a| a != "--hover").nth(1) {
+        controller.queue_hover(&spec);
+    }
+
+    // `--hover-shot <曲线>:<比例>[:light][:<窗口键>]`：离屏截图，真实走一遍 Slint 的鼠标事件，把悬停状态下的整窗截图写到环境变量 TML_HOVER_SHOT 指定的 BMP（#81）。
+    if let Some(spec) = std::env::args().skip_while(|a| a != "--hover-shot").nth(1) {
+        screenshot::run_hover_shot(&ui, &spec, Duration::from_secs(8));
     }
 
     // 其他实例请求唤起时，在界面线程还原并前置窗口（窗口隐藏在托盘时先重新显示）。
