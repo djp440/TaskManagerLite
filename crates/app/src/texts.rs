@@ -107,6 +107,17 @@ pub fn connection_kind(kind: ConnectionKind) -> &'static str {
     }
 }
 
+/// 性能页曲线时间窗口的名称（#86）。设置文件里的键在 `history::Window::key`，不是显示文案。
+pub fn window_name(window: crate::history::Window) -> &'static str {
+    use crate::history::Window;
+    match window {
+        Window::Sec60 => "60 秒",
+        Window::Min5 => "5 分钟",
+        Window::Min10 => "10 分钟",
+        Window::Hour1 => "1 小时",
+    }
+}
+
 /// 物理磁盘介质类型（性能页磁盘详情）。
 pub fn media_type(kind: MediaType) -> &'static str {
     match kind {

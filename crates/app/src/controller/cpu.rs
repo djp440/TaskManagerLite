@@ -12,6 +12,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use tml_core::{CpuInfo, CpuSample};
 
 use crate::format::History;
+use crate::history::Window;
 use crate::{AppWindow, CoreGraph, CpuData, GridLayout, StatItem};
 
 /// 单张小图在布局尚未给出网格区尺寸前的默认绘制尺寸。
@@ -68,6 +69,18 @@ impl CpuState {
         self.latest = CpuSample { info, ..sample };
     }
 
+    /// 测试钩子：给每个逻辑处理器的曲线灌入合成历史。
+    pub fn prefill(&mut self, now: Instant, secs: u64) {
+        for h in &mut self.histories {
+            h.prefill(now, secs);
+        }
+    }
+
+    /// 全部逻辑处理器曲线历史占用的堆内存估算（字节）。
+    pub fn history_bytes(&self) -> usize {
+        self.histories.iter().map(History::heap_bytes).sum()
+    }
+
     /// 采样中断：所有逻辑处理器的曲线在此断开。
     pub fn push_gap(&mut self, now: Instant) {
         for h in &mut self.histories {
@@ -101,8 +114,8 @@ impl CpuState {
         ]
     }
 
-    /// 每个逻辑处理器的小图：路径按小图的实际绘制尺寸 `cell` 生成，纵轴 0–100%，横轴为 60 秒窗口。
-    fn core_graphs(&self, now: Instant, cell: (f64, f64)) -> Vec<CoreGraph> {
+    /// 每个逻辑处理器的小图：路径按小图的实际绘制尺寸 `cell` 生成，纵轴 0–100%，横轴为 `window`（与整体曲线同步切换）。
+    fn core_graphs(&self, now: Instant, cell: (f64, f64), window: Window) -> Vec<CoreGraph> {
         let demo;
         let histories = if self.demo {
             let n = if self.demo_cores > 0 { self.demo_cores } else { self.latest.per_core.len() };
@@ -116,7 +129,7 @@ impl CpuState {
             .enumerate()
             .map(|(i, h)| {
                 let u = self.latest.per_core.get(i).copied().unwrap_or(50.0);
-                let (line, area) = h.paths(now, 100.0, cell);
+                let (line, area) = h.paths(now, 100.0, cell, window);
                 CoreGraph {
                     label: i.to_string().into(),
                     value: crate::format::percent(u).into(),
@@ -136,7 +149,7 @@ impl CpuState {
     /// 把最新的统计项、基本信息与小图写入界面，只整形当前看得见的部分（见 `Scope::of`）。
     /// 小图尺寸由网格布局经 `CpuData` 报告。切换选中项由 `select_resource` 触发刷新，
     /// 切到“逻辑处理器”视图时网格创建，其 init 会上报尺寸并触发刷新，所以都不必等下一次采样。
-    pub fn refresh(&self, ui: &AppWindow, now: Instant, processes: usize, usage: &str, selected: bool) {
+    pub fn refresh(&self, ui: &AppWindow, now: Instant, processes: usize, usage: &str, selected: bool, window: Window) {
         let data = ui.global::<CpuData>();
         let scope = Scope::of(selected, data.get_per_core());
         if scope.stats {
@@ -147,7 +160,7 @@ impl CpuState {
         if scope.cores {
             let cell = self.expected_cell(&data);
             self.last_cell.set(Some(cell));
-            sync(&self.cores, self.core_graphs(now, cell));
+            sync(&self.cores, self.core_graphs(now, cell, window));
         }
     }
 }
@@ -351,9 +364,9 @@ mod tests {
         let t0 = Instant::now();
         cpu.record(t0, sample(&[0.0, 0.0, 0.0]), false);
         assert_eq!(cpu.histories.len(), 3);
-        assert!(cpu.histories.iter().all(|h| h.max() == 0.0));
+        assert!(cpu.histories.iter().all(|h| h.max_in(t0, Window::Sec60) == 0.0));
         cpu.record(t0 + Duration::from_secs(1), sample(&[10.0, 90.0, 40.0]), true);
-        let maxes: Vec<f64> = cpu.histories.iter().map(|h| h.max()).collect();
+        let maxes: Vec<f64> = cpu.histories.iter().map(|h| h.max_in(t0 + Duration::from_secs(1), Window::Sec60)).collect();
         assert_eq!(maxes, [10.0, 90.0, 40.0]);
     }
 
@@ -374,7 +387,7 @@ mod tests {
             cpu.record(now - Duration::from_secs(60 - sec), sample(&[v, 100.0]), true);
         }
         for cell in [(176.0, 96.0), (64.0, 40.0), (300.0, 180.0)] {
-            let graphs = cpu.core_graphs(now, cell);
+            let graphs = cpu.core_graphs(now, cell, Window::Sec60);
             assert_eq!(graphs.len(), 2);
             let ramp = coords(&graphs[0].line);
             let (min_x, max_x) = ramp.iter().fold((f64::MAX, f64::MIN), |a, p| (a.0.min(p.0), a.1.max(p.0)));
@@ -429,9 +442,27 @@ mod tests {
         cpu.push_gap(t0 + Duration::from_secs(1));
         cpu.record(t0 + Duration::from_secs(30), sample(&[30.0, 40.0]), true);
         for h in &cpu.histories {
-            let (line, _) = h.paths(t0 + Duration::from_secs(30), 100.0, (100.0, 50.0));
+            let (line, _) = h.paths(t0 + Duration::from_secs(30), 100.0, (100.0, 50.0), Window::Sec60);
             assert_eq!(line.matches('M').count(), 2, "{line}");
         }
+    }
+
+    #[test]
+    fn core_graphs_follow_the_history_window() {
+        // 每秒一点跑 5 分钟，前半段 0%、后半段 100%：5 分钟窗口里横跨整个格子，60 秒窗口里只有 100% 的一条线。
+        let mut cpu = CpuState::default();
+        let t0 = Instant::now();
+        for sec in 0..=300u64 {
+            let v = if sec < 150 { 0.0 } else { 100.0 };
+            cpu.record(t0 + Duration::from_secs(sec), sample(&[v]), true);
+        }
+        let now = t0 + Duration::from_secs(300);
+        let cell = (300.0, 100.0);
+        let long = coords(&cpu.core_graphs(now, cell, Window::Min5)[0].line);
+        let short = coords(&cpu.core_graphs(now, cell, Window::Sec60)[0].line);
+        assert!(long.iter().any(|p| p.1 > 99.0) && long.iter().any(|p| p.1 < 1.0), "5 分钟窗口应同时有 0% 与 100%");
+        assert!(long.first().unwrap().0 < 3.0 && (long.last().unwrap().0 - cell.0).abs() < 0.2);
+        assert!(short.iter().all(|p| p.1 < 1.0), "60 秒窗口里只有 100%");
     }
 
     #[test]

@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::format::History;
+use crate::history::Window;
 use crate::{ResourceKind, ResourceTint};
 
 /// 汇总卡片的实例 id。设置里持久化“性能页选中的资源”时保存的就是实例 id。
@@ -229,12 +230,12 @@ impl ResourceSet {
         }
     }
 
-    pub fn gpu_memory_paths(&self, gpu: &tml_core::Gpu, now: Instant, size: (f64, f64)) -> Vec<(String, String, String)> {
+    pub fn gpu_memory_paths(&self, gpu: &tml_core::Gpu, now: Instant, size: (f64, f64), window: Window) -> Vec<(String, String, String)> {
         self.gpu_memory.get(&gpu.id).map(|h| h.iter().enumerate().map(|(index,h)| {
             let total = if index == 0 { gpu.dedicated_total } else { gpu.shared_total };
-            let scale = if total > 0 { total as f64 } else { h.max().max(1.0) };
+            let scale = if total > 0 { total as f64 } else { h.max_in(now, window).max(1.0) };
             let label = if total > 0 { crate::format::gigabytes(total) } else { "容量不可用".into() };
-            let (line, area) = h.paths(now, scale, size);
+            let (line, area) = h.paths(now, scale, size, window);
             (line, label, area)
         }).collect()).unwrap_or_default()
     }
@@ -254,11 +255,39 @@ impl ResourceSet {
         self.gpu_memory.get(id)
     }
 
-    pub fn network_stats(&self, id: &str, now: Instant) -> String {
-        let describe = |map: &HashMap<String, History>| map.get(id).and_then(|h| h.window_stats(now))
-            .map(|(min,max,mean)| format!("峰值 {} · 谷值 {} · 均值 {}", crate::format::rate(max), crate::format::rate(min), crate::format::rate(mean)))
-            .unwrap_or_else(|| "—".into());
-        format!("最近 60 秒 接收：{}\n最近 60 秒 发送：{}", describe(&self.receive), describe(&self.send))
+    /// 网络详情里的收发统计。60 秒窗口取原始采样（峰值、谷值、均值）；更长的窗口取聚合层（峰值、均值，不含谷值）。
+    pub fn network_stats(&self, id: &str, now: Instant, window: Window) -> String {
+        let describe = |map: &HashMap<String, History>| -> String {
+            let Some(h) = map.get(id) else { return "—".into() };
+            if window == Window::Sec60 {
+                h.window_stats(now).map(|(min, max, mean)| {
+                    format!("峰值 {} · 谷值 {} · 均值 {}", crate::format::rate(max), crate::format::rate(min), crate::format::rate(mean))
+                })
+            } else {
+                h.layer_summary(now, window).map(|(max, mean)| {
+                    format!("峰值 {} · 均值 {}", crate::format::rate(max), crate::format::rate(mean))
+                })
+            }
+            .unwrap_or_else(|| "—".into())
+        };
+        let name = crate::texts::window_name(window);
+        format!("最近 {name} 接收：{}\n最近 {name} 发送：{}", describe(&self.receive), describe(&self.send))
+    }
+
+    /// 测试钩子：给全部已有的曲线灌入合成历史，见 `History::prefill`。
+    pub fn prefill(&mut self, now: Instant, secs: u64) {
+        for h in self.histories.values_mut().chain(self.receive.values_mut()).chain(self.send.values_mut()) {
+            h.prefill(now, secs);
+        }
+        for h in self.gpu_memory.values_mut().flatten() {
+            h.prefill(now, secs);
+        }
+    }
+
+    /// 全部曲线历史占用的堆内存估算（字节），供日志核对内存增量。
+    pub fn history_bytes(&self) -> usize {
+        self.histories.values().chain(self.receive.values()).chain(self.send.values()).map(History::heap_bytes).sum::<usize>()
+            + self.gpu_memory.values().flatten().map(History::heap_bytes).sum::<usize>()
     }
 
     pub fn instances(&self) -> &[Instance] {
@@ -361,7 +390,7 @@ mod tests {
         set.push(&a.id, now, a.recv.zip(a.send).map(|(r,s)| r+s));
         set.push(&b.id, now, b.recv.zip(b.send).map(|(r,s)| r+s));
         set.push_gap(now);
-        assert_eq!(set.history(&a.id).max(), 3072.0);
+        assert_eq!(set.history(&a.id).max_in(now, Window::Sec60), 3072.0);
         assert_eq!(set.receive[&a.id].window_stats(now), Some((1024.0,1024.0,1024.0)));
         assert_eq!(set.send[&b.id].window_stats(now), None);
         set.select(&b.id);
@@ -370,7 +399,7 @@ mod tests {
         assert!(!set.receive.contains_key(&b.id));
         set.sync_devices(&[], &[a,b]);
         assert_eq!(set.selected(), "network:2");
-        assert_eq!(set.history("network:2").max(), 0.0);
+        assert_eq!(set.history("network:2").max_in(now, Window::Sec60), 0.0);
     }
     #[test]
     fn physical_disks_replace_summary_and_hotplug_preserves_selection() {
@@ -549,13 +578,13 @@ mod tests {
         let mut set = ResourceSet::new(insts(&["cpu", "disk0"]));
         set.push("cpu", now, Some(10.0));
         set.push("disk0", now, Some(50.0));
-        assert_eq!(set.history("disk0").max(), 50.0);
+        assert_eq!(set.history("disk0").max_in(now, Window::Sec60), 50.0);
 
         // 新增实例从空开始，已有实例的历史不受影响。
         set.update(insts(&["cpu", "disk0", "disk1"]));
-        assert_eq!(set.history("disk1").max(), 0.0);
-        assert_eq!(set.history("disk0").max(), 50.0);
-        assert_eq!(set.history("cpu").max(), 10.0);
+        assert_eq!(set.history("disk1").max_in(now, Window::Sec60), 0.0);
+        assert_eq!(set.history("disk0").max_in(now, Window::Sec60), 50.0);
+        assert_eq!(set.history("cpu").max_in(now, Window::Sec60), 10.0);
 
         // 移除时清理，之后同 id 再出现也是空历史。
         set.push("disk1", now, Some(70.0));
@@ -563,7 +592,25 @@ mod tests {
         assert_eq!(set.histories.len(), 2);
         assert!(!set.histories.contains_key("disk1"));
         set.update(insts(&["cpu", "disk0", "disk1"]));
-        assert_eq!(set.history("disk1").max(), 0.0);
+        assert_eq!(set.history("disk1").max_in(now, Window::Sec60), 0.0);
+    }
+
+    #[test]
+    fn network_stats_follow_the_window() {
+        let t0 = Instant::now();
+        let a = tml_core::NetworkAdapter { id: "network:1".into(), recv: Some(1024.0), send: Some(2048.0), ..Default::default() };
+        let mut set = ResourceSet::new(summary_instances());
+        set.sync_devices(&[], &[a.clone()]);
+        for i in 0..100u64 {
+            set.push_network(&a, t0 + std::time::Duration::from_secs(i));
+        }
+        let now = t0 + std::time::Duration::from_secs(99);
+        let short = set.network_stats("network:1", now, Window::Sec60);
+        assert!(short.starts_with("最近 60 秒 接收：峰值") && short.contains("谷值"), "{short}");
+        let long = set.network_stats("network:1", now, Window::Min5);
+        assert!(long.starts_with("最近 5 分钟 接收：峰值") && !long.contains("谷值"), "{long}");
+        // 没有数据的网卡显示“—”。
+        assert!(set.network_stats("network:9", now, Window::Hour1).contains("接收：—"));
     }
 
     #[test]
@@ -574,7 +621,7 @@ mod tests {
         set.push_gap(now);
         set.push("cpu", now, Some(2.0));
         // 断点把曲线分成两段：折线里有两个 M。
-        let (line, _) = set.history("cpu").paths(now, 100.0, (100.0, 50.0));
+        let (line, _) = set.history("cpu").paths(now, 100.0, (100.0, 50.0), Window::Sec60);
         assert_eq!(line.matches('M').count(), 2);
     }
 }

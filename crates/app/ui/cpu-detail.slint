@@ -39,7 +39,7 @@ export global CpuData {
     pure callback grid-layout(int, length, length) -> GridLayout;
 }
 
-component Segment inherits Rectangle {
+export component Segment inherits Rectangle {
     in property <string> text;
     in property <bool> active;
     callback clicked;

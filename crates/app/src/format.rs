@@ -1,11 +1,6 @@
-//! 数值格式化与资源曲线路径生成。
+//! 数值格式化。资源曲线的历史与路径生成在 `history.rs`。
 
-use std::collections::VecDeque;
-use std::fmt::Write;
-use std::time::{Duration, Instant};
-
-/// 资源曲线显示的时间窗口。
-pub const WINDOW: Duration = Duration::from_secs(60);
+pub use crate::history::History;
 
 pub fn percent(v: f32) -> String {
     if v < 0.05 { "0%".into() } else { format!("{v:.1}%") }
@@ -39,88 +34,6 @@ pub fn disk_rate(bytes_per_sec: f64) -> String {
     if mb < 0.05 { "0 MB/s".into() } else { format!("{mb:.1} MB/s") }
 }
 
-/// 一类资源最近一段时间的取值。`None` 表示采样中断（窗口不可见或暂停），曲线在此断开。
-#[derive(Default)]
-pub struct History {
-    points: VecDeque<(Instant, Option<f64>)>,
-}
-
-impl History {
-    pub fn push(&mut self, at: Instant, value: Option<f64>) {
-        self.points.push_back((at, value));
-        // 保留一个窗口外的点，让曲线从左边缘连续进入。
-        while self.points.len() > 2 && at.duration_since(self.points[1].0) > WINDOW {
-            self.points.pop_front();
-        }
-    }
-
-    /// 供日志核对曲线是否连续：(点数, 断点数, 相邻记录之间的最大间隔)。
-    pub fn stats(&self) -> (usize, usize, Duration) {
-        let gaps = self.points.iter().filter(|p| p.1.is_none()).count();
-        let step = self.points.iter().zip(self.points.iter().skip(1)).map(|(a, b)| b.0.duration_since(a.0)).max();
-        (self.points.len(), gaps, step.unwrap_or_default())
-    }
-
-    /// 只统计当前窗口内的有效样本，不含用于左边缘连线的过期点。
-    pub fn window_stats(&self, now: Instant) -> Option<(f64, f64, f64)> {
-        let values: Vec<_> = self.points.iter().filter(|(at,_)| now.saturating_duration_since(*at) <= WINDOW)
-            .filter_map(|(_,v)| *v).filter(|v| v.is_finite()).collect();
-        if values.is_empty() { return None; }
-        Some((values.iter().copied().fold(f64::INFINITY, f64::min), values.iter().copied().fold(0.0, f64::max), values.iter().sum::<f64>() / values.len() as f64))
-    }
-
-    /// 当前窗口内的有效样本：(距 `now` 的秒数, 值)，旧的在前。
-    /// 不含采样中断的断点与窗口外用于左边缘连线的过期点；导出曲线数据用。
-    pub fn samples(&self, now: Instant) -> Vec<(f64, f64)> {
-        self.points
-            .iter()
-            .filter_map(|&(at, v)| {
-                let age = now.saturating_duration_since(at);
-                v.filter(|v| v.is_finite() && age <= WINDOW).map(|v| (age.as_secs_f64(), v))
-            })
-            .collect()
-    }
-
-    pub fn max(&self) -> f64 {
-        self.points.iter().filter_map(|p| p.1).fold(0.0, f64::max)
-    }
-
-    /// 按图表的实际尺寸（逻辑像素）生成 (折线, 填充区域) 两条 SVG 路径；`scale` 对应图表顶端的取值。
-    /// Slint 的 Path 会等比缩放 viewbox，所以坐标必须与图表尺寸一致，不能用固定坐标系。
-    pub fn paths(&self, now: Instant, scale: f64, (view_w, view_h): (f64, f64)) -> (String, String) {
-        let mut segments: Vec<Vec<(f64, f64)>> = vec![Vec::new()];
-        for &(at, value) in &self.points {
-            match value {
-                Some(v) => {
-                    let age = now.saturating_duration_since(at).as_secs_f64();
-                    let x = view_w * (1.0 - age / WINDOW.as_secs_f64());
-                    let y = view_h * (1.0 - (v / scale).clamp(0.0, 1.0));
-                    segments.last_mut().unwrap().push((x, y));
-                }
-                None => segments.push(Vec::new()),
-            }
-        }
-        let (mut line, mut area) = (String::new(), String::new());
-        for seg in segments.iter().filter(|s| !s.is_empty()) {
-            for (i, (x, y)) in seg.iter().enumerate() {
-                let _ = write!(line, "{}{x:.1} {y:.1} ", if i == 0 { "M " } else { "L " });
-            }
-            let (x0, xn) = (seg[0].0, seg[seg.len() - 1].0);
-            let _ = write!(area, "M {x0:.1} {view_h:.1} ");
-            for (x, y) in seg {
-                let _ = write!(area, "L {x:.1} {y:.1} ");
-            }
-            let _ = write!(area, "L {xn:.1} {view_h:.1} Z ");
-        }
-        // 空路径会让 Path 元素报警告，用一个不可见的点占位。
-        if line.is_empty() {
-            line = format!("M {view_w:.1} {view_h:.1}");
-            area = line.clone();
-        }
-        (line, area)
-    }
-}
-
 /// 自动量程：向上取到 1、2、5 × 10ⁿ，最小 `floor`。
 pub fn nice_scale(max: f64, floor: f64) -> f64 {
     let v = max.max(floor);
@@ -133,31 +46,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn window_statistics_ignore_gaps_and_expired_edge_point() {
-        let t = Instant::now();
-        let mut h = History::default();
-        h.push(t, Some(999.0));
-        h.push(t + Duration::from_secs(2), Some(10.0));
-        h.push(t + Duration::from_secs(3), None);
-        h.push(t + Duration::from_secs(61), Some(30.0));
-        assert_eq!(h.window_stats(t + Duration::from_secs(61)), Some((10.0, 30.0, 20.0)));
-        assert_eq!(h.window_stats(t + Duration::from_secs(122)), None);
-    }
-
-    #[test]
-    fn samples_skip_gaps_and_expired_edge_point() {
-        let t = Instant::now();
-        let mut h = History::default();
-        h.push(t, Some(999.0));
-        h.push(t + Duration::from_secs(2), Some(10.0));
-        h.push(t + Duration::from_secs(3), None);
-        h.push(t + Duration::from_secs(61), Some(30.0));
-        // 第一个点距 now 61 秒，已出窗口；断点不导出。
-        assert_eq!(h.samples(t + Duration::from_secs(61)), vec![(59.0, 10.0), (0.0, 30.0)]);
-        assert!(h.samples(t + Duration::from_secs(200)).is_empty());
-    }
-
-    #[test]
     fn formats_like_native_task_manager() {
         assert_eq!(percent(0.01), "0%");
         assert_eq!(percent(12.345), "12.3%");
@@ -166,41 +54,6 @@ mod tests {
         assert_eq!(disk_rate(2.0 * 1024.0 * 1024.0), "2.0 MB/s");
         assert_eq!(rate(10.0 * 1024.0), "10 KB/s");
         assert_eq!(rate(3.5 * 1024.0 * 1024.0), "3.5 MB/s");
-    }
-
-    #[test]
-    fn graph_breaks_at_gap_and_maps_to_viewbox() {
-        let t0 = Instant::now();
-        let mut h = History::default();
-        h.push(t0, Some(0.0));
-        h.push(t0 + Duration::from_secs(1), Some(50.0));
-        h.push(t0 + Duration::from_secs(2), None);
-        h.push(t0 + Duration::from_secs(30), Some(100.0));
-        let (line, area) = h.paths(t0 + Duration::from_secs(30), 100.0, (600.0, 100.0));
-        assert_eq!(line.matches('M').count(), 2, "{line}");
-        assert!(line.ends_with("M 600.0 0.0 "), "{line}");
-        assert_eq!(area.matches('Z').count(), 2);
-    }
-
-    #[test]
-    fn history_stats_expose_gaps_and_largest_step() {
-        let t0 = Instant::now();
-        let mut h = History::default();
-        h.push(t0, Some(1.0));
-        h.push(t0 + Duration::from_secs(1), Some(1.0));
-        assert_eq!(h.stats(), (2, 0, Duration::from_secs(1)));
-        h.push(t0 + Duration::from_secs(9), None);
-        assert_eq!(h.stats(), (3, 1, Duration::from_secs(8)));
-    }
-
-    #[test]
-    fn history_drops_points_outside_window() {
-        let t0 = Instant::now();
-        let mut h = History::default();
-        for s in 0..200 {
-            h.push(t0 + Duration::from_secs(s), Some(1.0));
-        }
-        assert!(h.points.len() <= 62);
     }
 
     #[test]

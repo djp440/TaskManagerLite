@@ -20,6 +20,7 @@
 - 右键菜单验收截图：`pwsh scripts/menu-screenshots.ps1 -Out <目录>`（原生菜单，菜单会在屏幕上短暂出现；用 `--menu-shot` 参数启动应用）
 - 右键菜单动作端到端验收：`pwsh scripts/test-menu-actions.ps1`（自己启动的子进程；用 `--menu-action <动作>:<pid>` 触发动作，检查资源管理器窗口、属性对话框与剪贴板；会临时改写剪贴板并在结束时还原）
 - 单实例限制的 Win32 自动化验收：`pwsh scripts/test-single-instance.ps1`（需先关闭已有实例）；开发时想多开用 `--allow-multiple`（`--measure-startup`、`--screenshot` 同样不受限制）
+- 性能页曲线窗口（#86）：曲线下方的选择器切换 60 秒 / 5 分钟 / 10 分钟 / 1 小时，设置字段 `history_window`（`60s|5m|10m|1h`，缺失按 60 秒），迷你模式固定 60 秒；分层环形缓冲在 `crates/app/src/history.rs`（原始 60 秒层 + 三个聚合层，每桶保存最大值与均值，曲线按最大值绘制，按时间戳定位，采样中断写空点）。定向测试：`cargo test -p tml-app history`、`cargo test -p tml-app settings`；端到端验收：`pwsh scripts/test-history-window.ps1`（`--allow-multiple` 实例 + 临时设置目录，不依赖 SendInput；日志行“曲线历史 …”记录窗口点数 / 缺口 / 估算内存），人工项见 `docs/checklist/issue-86.md`；`measure-idle.ps1 -HistoryWindow <键>` 测不同窗口的常驻开销。
 - 后台继续采样（设置字段 `background_sampling`）端到端验收：`pwsh scripts/test-background-sampling.ps1`（最小化自己启动的实例，核对曲线连续性并测最小化期间 CPU）
 - 托盘常驻（设置字段 `close_to_tray`）端到端验收：`pwsh scripts/test-tray.ps1`（用 `TML_INSTANCE_ID` 隔离单实例对象名，机器上已有真实实例也可运行；向托盘消息窗口发消息模拟单击/右键/菜单命令，验证隐藏/显示、WM_CLOSE 后常驻、再次启动唤起、隐藏期间 CPU；截图输出到 `-Out`）
 - 键盘快捷键（#71）：Ctrl+F 聚焦当前页搜索框（进程 / 启动项 / 服务页各有一个，性能、设置页跳到进程页的搜索框）、Esc（搜索框内）清空并回到列表、Ctrl+1…5 切页（进程 / 性能 / 启动项 / 服务 / 设置）、F5 立即刷新当前页；说明写在设置页底部“键盘快捷键”。端到端验收：`pwsh scripts/test-shortcuts.ps1`（自己启动 `--allow-multiple` 实例，用 SendInput 发真实按键，读日志里的“界面事件”等行核对，并保存截图；运行期间不要动键盘鼠标，需交互式桌面）

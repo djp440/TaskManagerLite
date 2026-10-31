@@ -4,6 +4,7 @@ mod controller;
 mod details;
 mod file_dialog;
 mod format;
+mod history;
 mod icons;
 mod logging;
 mod placement;
@@ -32,13 +33,14 @@ thread_local! {
 const RENDERER: &str = if cfg!(feature = "renderer-software") { "software" } else { "femtovg" };
 
 /// 开发用参数：测量、截图与 `--allow-multiple` 不受单实例限制，也不占用单实例锁。
-const UNRESTRICTED_FLAGS: [&str; 7] = [
+const UNRESTRICTED_FLAGS: [&str; 8] = [
     "--measure-startup",
     "--screenshot",
     "--menu-shot",
     "--menu-action",
     "--service-action",
     "--export-csv",
+    "--history-prefill",
     "--allow-multiple",
 ];
 
@@ -179,6 +181,11 @@ fn main() -> Result<(), slint::PlatformError> {
     // `--export-csv <process|performance>=<路径>`：自动化验收 CSV 导出（不弹对话框，写完即退出，读写设置与正常启动相同）。
     if let Some(spec) = std::env::args().skip_while(|a| a != "--export-csv").nth(1) {
         controller.queue_export(&spec);
+    }
+
+    // `--history-prefill <秒>`：测试钩子，给全部曲线灌入合成历史，用来测各窗口填满后的内存与开销（#86）。
+    if let Some(secs) = std::env::args().skip_while(|a| a != "--history-prefill").nth(1).and_then(|v| v.parse().ok()) {
+        controller.queue_history_prefill(secs);
     }
 
     // 其他实例请求唤起时，在界面线程还原并前置窗口（窗口隐藏在托盘时先重新显示）。
