@@ -2,7 +2,7 @@ use super::*;
 use crate::{ServiceData, ServiceRow};
 use std::sync::{Arc, Mutex};
 use crate::texts;
-use tml_core::services::{Action, Service, ServiceError, ServiceList};
+use tml_core::services::{Action, Service, ServiceError, ServiceList, StartType, StartTypeBlock};
 
 /// 服务页的页面编号（与 app.slint 中的 `page` 一致）。
 pub const SERVICES_PAGE: i32 = 4;
@@ -88,6 +88,20 @@ impl Controller {
             }
         });
         let weak = Rc::downgrade(self);
+        data.on_menu_opening(move || {
+            if let Some(c) = weak.upgrade() {
+                c.service_menu_opening();
+            }
+        });
+        let weak = Rc::downgrade(self);
+        data.on_set_start_type(move |i| {
+            if let Some(c) = weak.upgrade()
+                && let Some(&t) = StartType::SETTABLE.get(i as usize)
+            {
+                c.service_action(Action::SetStartType(t), true);
+            }
+        });
+        let weak = Rc::downgrade(self);
         data.on_goto_process(move || {
             if let Some(c) = weak.upgrade() {
                 c.goto_service_process();
@@ -125,6 +139,19 @@ impl Controller {
         self.services.entries.borrow().get(i).cloned()
     }
 
+    /// 右键菜单弹出前：按所选服务的当前启动类型打勾，驱动 / 受保护的服务置灰并在子菜单标题注明原因。
+    fn service_menu_opening(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let data = ui.global::<ServiceData>();
+        let menu = match self.selected_service() {
+            Some(s) => start_type_menu(s.config.start_type, tml_core::services::start_type_block_of(&s.name).ok().flatten()),
+            None => start_type_menu(StartType::Unknown, None),
+        };
+        data.set_start_type(menu.checked);
+        data.set_can_set_start_type(menu.enabled);
+        data.set_start_type_title(menu.title.into());
+    }
+
     fn service_action(&self, action: Action, elevate: bool) {
         let Some(ui) = self.ui.upgrade() else { return };
         let data = ui.global::<ServiceData>();
@@ -133,8 +160,15 @@ impl Controller {
         }
         let Some(service) = self.selected_service() else { return };
         let name = service.display_name.clone();
+        if let Action::SetStartType(t) = action
+            && service.config.start_type == t
+        {
+            data.set_note(texts::service_done(action, &name).into());
+            self.log.borrow_mut().line(format!("服务启动类型 服务={} 目标={} 结果=未改变", service.name, t.key().unwrap_or("?")));
+            return;
+        }
         let hint = if tml_core::is_elevated() || !elevate { "" } else { "（需要管理员权限，请在 UAC 对话框中确认）" };
-        data.set_note(format!("正在{}服务“{name}”{hint}…", texts::service_action(action)).into());
+        data.set_note(texts::service_pending(action, &name, hint).into());
         data.set_busy(true);
         self.services_work(Some((service.name, name, action, elevate)), false);
     }
@@ -148,17 +182,28 @@ impl Controller {
         let work = std::thread::Builder::new()
             .name("services".into())
             .spawn(move || {
-                let note = action.map(|(name, display, action, elevate)| {
-                    match tml_core::services::control(&name, action, elevate) {
-                        Ok(()) => format!("已{}服务“{display}”", texts::service_action(action)),
-                        Err(e) => format!("无法{}服务“{display}”：{}", texts::service_action(action), texts::service_error(&e)),
-                    }
+                let note = action.as_ref().map(|(name, display, action, elevate)| {
+                    let result = tml_core::services::control(name, *action, *elevate);
+                    let text = match &result {
+                        Ok(()) => texts::service_done(*action, display),
+                        Err(e) => texts::service_failed(*action, display, e),
+                    };
+                    let log = match action {
+                        // 修改启动类型只记服务名、目标类型、结果与错误码。
+                        Action::SetStartType(t) => start_type_log(name, *t, &result),
+                        _ => format!("服务操作 {text}"),
+                    };
+                    (text, log)
                 });
                 let started = Instant::now();
                 let result = {
                     let mut list = list.lock().unwrap_or_else(|e| e.into_inner());
                     if reload {
                         list.clear_cache();
+                    }
+                    // 修改启动类型后重新读取该服务的配置（无论成败，以系统实际值为准）。
+                    if let Some((name, _, Action::SetStartType(_), _)) = &action {
+                        list.forget(name);
                     }
                     list.list()
                 };
@@ -184,7 +229,7 @@ impl Controller {
     fn services_done(
         &self,
         seq: u64,
-        note: Option<String>,
+        note: Option<(String, String)>,
         result: Result<Vec<Service>, ServiceError>,
         elapsed: Duration,
     ) {
@@ -193,10 +238,10 @@ impl Controller {
         if seq == self.services.issued.get() {
             self.services.loading.set(false);
         }
-        if let Some(note) = &note {
+        if let Some((note, log)) = &note {
             data.set_busy(false);
             data.set_note(note.as_str().into());
-            self.log.borrow_mut().line(format!("服务操作 {note}"));
+            self.log.borrow_mut().line(log.as_str());
         }
         if seq < self.services.applied.get() {
             return;
@@ -340,7 +385,12 @@ impl Controller {
         }
         let Some(spec) = self.services.hook.borrow_mut().take() else { return };
         let Some(ui) = self.ui.upgrade() else { return };
-        let (verb, name) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
+        let (verb, rest) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
+        // `set-start:<服务名>:<类型>`：类型在最后一个冒号之后（服务名不含冒号）。
+        let (name, kind) = match verb {
+            "set-start" => rest.rsplit_once(':').unwrap_or((rest, "")),
+            _ => (rest, ""),
+        };
         let index = self
             .services
             .entries
@@ -354,11 +404,59 @@ impl Controller {
         ui.global::<ServiceData>().set_selected(index as i32);
         match verb {
             "goto" => self.goto_service_process(),
+            // 菜单状态（置灰判断）也走一遍，写进日志供脚本核对。
+            "menu" => {
+                self.service_menu_opening();
+                let d = ui.global::<ServiceData>();
+                self.log.borrow_mut().line(format!(
+                    "服务菜单 服务={} 当前={} 可修改={} 标题={}",
+                    name,
+                    d.get_start_type(),
+                    d.get_can_set_start_type(),
+                    d.get_start_type_title()
+                ));
+            }
+            "set-start" => match StartType::parse_key(kind) {
+                Some(t) => self.service_action(Action::SetStartType(t), false),
+                None => self.log.borrow_mut().line(format!("服务操作 未知启动类型 {kind}")),
+            },
             v => match Action::parse(v) {
                 Some(action) => self.service_action(action, false),
                 None => self.log.borrow_mut().line(format!("服务操作 未知动作 {v}")),
             },
         }
+    }
+}
+
+/// “启动类型”子菜单的状态。
+#[derive(Debug, PartialEq, Eq)]
+struct StartTypeMenu {
+    /// 打勾项在 [`StartType::SETTABLE`] 中的序号，-1 不打勾。
+    checked: i32,
+    enabled: bool,
+    title: String,
+}
+
+/// 由当前启动类型与预知的阻止原因得出子菜单状态：驱动（含引导 / 系统启动类型）与受保护服务置灰，
+/// 标题注明原因；读不到配置（未知）时仍可用，执行时由系统给出原因。
+fn start_type_menu(current: StartType, block: Option<StartTypeBlock>) -> StartTypeMenu {
+    let block = block.or(matches!(current, StartType::Boot | StartType::System).then_some(StartTypeBlock::Driver));
+    StartTypeMenu {
+        checked: StartType::SETTABLE.iter().position(|&t| t == current).map_or(-1, |i| i as i32),
+        enabled: block.is_none(),
+        title: match block {
+            None => "启动类型".into(),
+            Some(b) => format!("启动类型（{}）", texts::start_type_block(b)),
+        },
+    }
+}
+
+/// 修改启动类型的日志：只记服务名、目标类型、结果与错误码。
+fn start_type_log(name: &str, target: StartType, result: &Result<(), ServiceError>) -> String {
+    let target = target.key().unwrap_or("?");
+    match result {
+        Ok(()) => format!("服务启动类型 服务={name} 目标={target} 结果=成功"),
+        Err(e) => format!("服务启动类型 服务={name} 目标={target} 结果=失败 错误码={} 原因={e:?}", e.exit_code()),
     }
 }
 
@@ -412,6 +510,33 @@ mod tests {
         // 未运行的服务 PID 为 0，不会被任何有效 PID 过滤选中。
         assert!(visible_services(&all, "stopped", 900).is_empty());
         assert!(visible_services(&all, "", 12345).is_empty());
+    }
+
+    #[test]
+    fn start_type_menu_checks_current_and_greys_out_blocked_services() {
+        use StartType as T;
+        for (i, t) in T::SETTABLE.into_iter().enumerate() {
+            let m = start_type_menu(t, None);
+            assert_eq!((m.checked, m.enabled, m.title.as_str()), (i as i32, true, "启动类型"), "{t:?}");
+        }
+        // 读不到配置：不打勾但可用，执行时由系统给出原因。
+        assert_eq!(start_type_menu(T::Unknown, None), StartTypeMenu { checked: -1, enabled: true, title: "启动类型".into() });
+        let p = start_type_menu(T::Auto, Some(StartTypeBlock::Protected));
+        assert_eq!((p.checked, p.enabled), (0, false));
+        assert_eq!(p.title, "启动类型（受系统保护的服务，不能修改启动类型）");
+        for t in [T::Boot, T::System] {
+            let d = start_type_menu(t, None);
+            assert_eq!((d.checked, d.enabled), (-1, false));
+            assert!(d.title.contains("驱动"));
+        }
+    }
+
+    #[test]
+    fn start_type_log_has_only_name_target_result_and_code() {
+        assert_eq!(start_type_log("Spooler", StartType::Manual, &Ok(())), "服务启动类型 服务=Spooler 目标=manual 结果=成功");
+        let denied = Err(ServiceError::System(tml_core::SystemError::Win32(5)));
+        let line = start_type_log("Spooler", StartType::AutoDelayed, &denied);
+        assert!(line.starts_with("服务启动类型 服务=Spooler 目标=auto-delayed 结果=失败 错误码=5"), "{line}");
     }
 
     #[test]

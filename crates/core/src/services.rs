@@ -13,7 +13,7 @@ use windows::{
         },
         System::Services::*,
     },
-    core::{HSTRING, PWSTR},
+    core::{HSTRING, PCWSTR, PWSTR},
 };
 
 /// 服务的运行状态，取值与 `SERVICE_STATUS::dwCurrentState` 对应。
@@ -70,6 +70,55 @@ impl StartType {
             _ => Self::Unknown,
         }
     }
+
+    /// 服务页可以设置的四种启动类型（引导、系统只属于驱动，未知不可设置）。
+    pub const SETTABLE: [StartType; 4] = [Self::Auto, Self::AutoDelayed, Self::Manual, Self::Disabled];
+
+    /// 设置时写入 `dwStartType` 的值与延迟启动标志；不可设置的类型为 `None`。
+    pub fn to_raw(self) -> Option<(u32, bool)> {
+        match self {
+            Self::Auto => Some((2, false)),
+            Self::AutoDelayed => Some((2, true)),
+            Self::Manual => Some((3, false)),
+            Self::Disabled => Some((4, false)),
+            Self::Boot | Self::System | Self::Unknown => None,
+        }
+    }
+
+    /// 命令行与测试钩子里的写法：`auto`、`auto-delayed`、`manual`、`disabled`。
+    pub fn key(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => Some("auto"),
+            Self::AutoDelayed => Some("auto-delayed"),
+            Self::Manual => Some("manual"),
+            Self::Disabled => Some("disabled"),
+            Self::Boot | Self::System | Self::Unknown => None,
+        }
+    }
+
+    pub fn parse_key(s: &str) -> Option<Self> {
+        Self::SETTABLE.into_iter().find(|t| t.key() == Some(s))
+    }
+}
+
+/// 不能修改启动类型的原因（可在修改前预知，菜单据此置灰）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartTypeBlock {
+    /// 驱动服务（服务页不列出驱动，直接按名称操作时仍会拒绝）。
+    Driver,
+    /// 受保护的服务（`SERVICE_CONFIG_LAUNCH_PROTECTED` 不为 NONE），管理员也无法修改配置。
+    Protected,
+}
+
+/// 由服务类型（`dwServiceType`）与启动保护级别（`dwLaunchProtected`）判断能否修改启动类型。
+pub fn start_type_block(service_type: u32, launch_protected: u32) -> Option<StartTypeBlock> {
+    if service_type & SERVICE_DRIVER.0 != 0 {
+        Some(StartTypeBlock::Driver)
+    } else if launch_protected != SERVICE_LAUNCH_PROTECTED_NONE {
+        Some(StartTypeBlock::Protected)
+    } else {
+        None
+    }
 }
 
 /// 按需读取并缓存的配置：启动类型、描述与组（svchost 的 `-k` 参数，与原生任务管理器的“组”列一致）。
@@ -114,30 +163,44 @@ impl Service {
     }
 }
 
-/// 启动、停止、重启。
+/// 启动、停止、重启、修改启动类型。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Start,
     Stop,
     Restart,
+    /// 修改启动类型，只接受 [`StartType::SETTABLE`] 中的值。
+    SetStartType(StartType),
 }
 
 impl Action {
+    /// 解析提权子进程命令行里的动作：`start`、`stop`、`restart`、`start-type=<auto|auto-delayed|manual|disabled>`。
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "start" => Some(Self::Start),
             "stop" => Some(Self::Stop),
             "restart" => Some(Self::Restart),
-            _ => None,
+            _ => s.strip_prefix("start-type=").and_then(StartType::parse_key).map(Self::SetStartType),
         }
     }
-    fn arg(self) -> &'static str {
+    fn arg(self) -> String {
         match self {
-            Self::Start => "start",
-            Self::Stop => "stop",
-            Self::Restart => "restart",
+            Self::Start => "start".into(),
+            Self::Stop => "stop".into(),
+            Self::Restart => "restart".into(),
+            Self::SetStartType(t) => format!("start-type={}", t.key().unwrap_or("invalid")),
         }
     }
+}
+
+/// 提权子进程的参数（不含 exe）：`--service-control <动作> <十六进制服务名>`。
+fn elevated_args(name: &str, action: Action) -> String {
+    format!("--service-control {} {}", action.arg(), crate::startup::hex(name))
+}
+
+/// 直接执行失败后是否改走 UAC 提权子进程：仅在允许提权、当前未提权、且失败原因是“拒绝访问”时。
+fn should_elevate(e: &ServiceError, elevate: bool, elevated: bool) -> bool {
+    elevate && !elevated && matches!(e, ServiceError::System(s) if s.win32_code() == Some(ERROR_ACCESS_DENIED.0 as i32))
 }
 
 struct Handle(SC_HANDLE);
@@ -170,6 +233,10 @@ pub enum ServiceError {
     BadAction,
     /// 提权子进程命令行：服务名编码错误。
     BadNameEncoding,
+    /// 不能修改该服务的启动类型（驱动或受保护的服务）。
+    StartTypeBlocked(StartTypeBlock),
+    /// 目标启动类型不可设置（引导、系统、未知）。
+    BadStartType,
 }
 
 impl ServiceError {
@@ -194,6 +261,8 @@ impl std::fmt::Display for ServiceError {
             Self::BadArgumentCount => f.write_str("bad argument count"),
             Self::BadAction => f.write_str("bad action"),
             Self::BadNameEncoding => f.write_str("bad name encoding"),
+            Self::StartTypeBlocked(b) => write!(f, "start type cannot be changed: {b:?}"),
+            Self::BadStartType => f.write_str("start type cannot be set"),
         }
     }
 }
@@ -412,6 +481,11 @@ impl ServiceList {
         self.cache.clear();
     }
 
+    /// 让某个服务的配置在下次枚举时重新读取（修改启动类型后调用）。
+    pub fn forget(&mut self, name: &str) {
+        self.cache.remove(&name.to_lowercase());
+    }
+
     pub fn list(&mut self) -> Result<Vec<Service>> {
         let mut services = enumerate()?;
         let scm = manager(SC_MANAGER_CONNECT)?;
@@ -489,46 +563,117 @@ fn stop(svc: &Handle) -> Result<()> {
     }
 }
 
+/// 读服务类型与启动保护级别，判断能否修改启动类型（只需 `SERVICE_QUERY_CONFIG`，普通权限即可）。
+fn read_block(svc: &Handle) -> Result<Option<StartTypeBlock>> {
+    let buf = query(|b, n| unsafe {
+        let len = b.as_ref().map_or(0, |b| b.len() as u32);
+        QueryServiceConfigW(svc.0, b.map(|b| b.as_mut_ptr().cast::<QUERY_SERVICE_CONFIGW>()), len, n)
+    })?;
+    if buf.is_empty() {
+        return Err(ServiceError::EmptyConfig);
+    }
+    let service_type = unsafe { (*buf.as_ptr().cast::<QUERY_SERVICE_CONFIGW>()).dwServiceType.0 };
+    // 早于 Windows 8.1 的系统没有这一级别，读不到按未保护处理。
+    let protected = query(|b, n| unsafe { QueryServiceConfig2W(svc.0, SERVICE_CONFIG_LAUNCH_PROTECTED, b, n) })
+        .ok()
+        .filter(|b| !b.is_empty())
+        .map_or(SERVICE_LAUNCH_PROTECTED_NONE, |b| unsafe {
+            (*b.as_ptr().cast::<SERVICE_LAUNCH_PROTECTED_INFO>()).dwLaunchProtected
+        });
+    Ok(start_type_block(service_type, protected))
+}
+
+/// 右键菜单弹出前调用：能否修改该服务的启动类型。读不到配置时返回错误（菜单按可用处理，执行时再报告原因）。
+pub fn start_type_block_of(name: &str) -> Result<Option<StartTypeBlock>> {
+    let scm = manager(SC_MANAGER_CONNECT)?;
+    read_block(&open(&scm, name, SERVICE_QUERY_CONFIG)?)
+}
+
+fn set_delayed(svc: &Handle, delayed: bool) -> Result<()> {
+    let info = SERVICE_DELAYED_AUTO_START_INFO { fDelayedAutostart: delayed.into() };
+    unsafe {
+        ChangeServiceConfig2W(
+            svc.0,
+            SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
+            Some((&info as *const SERVICE_DELAYED_AUTO_START_INFO).cast()),
+        )
+    }
+    .map_err(win)
+}
+
+/// 修改启动类型。延迟标志只对自动启动有意义：改成自动 / 自动（延迟）时先改类型再设标志；
+/// 改成手动 / 禁用时先清掉标志（此时还是自动则必须成功，否则系统会忽略），再改类型，保证读回一致。
+fn set_start_type(svc: &Handle, target: StartType) -> Result<()> {
+    let (raw, delayed) = target.to_raw().ok_or(ServiceError::BadStartType)?;
+    let change = || unsafe {
+        ChangeServiceConfigW(
+            svc.0,
+            ENUM_SERVICE_TYPE(SERVICE_NO_CHANGE),
+            SERVICE_START_TYPE(raw),
+            SERVICE_ERROR(SERVICE_NO_CHANGE),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            None,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            PCWSTR::null(),
+        )
+        .map_err(win)
+    };
+    if raw == SERVICE_AUTO_START.0 {
+        change()?;
+        set_delayed(svc, delayed)
+    } else {
+        // 当前不是自动启动时系统可能拒绝设置延迟标志（不影响读回），忽略这一步的失败；
+        // 拒绝访问则照常返回，交给提权路径。
+        match set_delayed(svc, false) {
+            Err(e) if should_elevate(&e, true, false) => return Err(e),
+            _ => {}
+        }
+        change()
+    }
+}
+
 fn control_direct(name: &str, action: Action) -> Result<()> {
     if name.is_empty() || name.contains(['\0', '/', '\\']) {
         return Err(ServiceError::InvalidName);
     }
     let scm = manager(SC_MANAGER_CONNECT)?;
-    let access = SERVICE_QUERY_STATUS
-        | match action {
-            Action::Start => SERVICE_START,
-            Action::Stop => SERVICE_STOP,
-            Action::Restart => SERVICE_START | SERVICE_STOP,
-        };
+    let access = match action {
+        Action::Start => SERVICE_QUERY_STATUS | SERVICE_START,
+        Action::Stop => SERVICE_QUERY_STATUS | SERVICE_STOP,
+        Action::Restart => SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP,
+        Action::SetStartType(_) => SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG,
+    };
+    // 修改启动类型：先用只读权限判断驱动 / 受保护服务，避免为注定失败的修改弹 UAC。
+    if let Action::SetStartType(t) = action {
+        t.to_raw().ok_or(ServiceError::BadStartType)?;
+        if let Some(block) = start_type_block_of(name)? {
+            return Err(ServiceError::StartTypeBlocked(block));
+        }
+    }
     let svc = open(&scm, name, access)?;
     match action {
         Action::Start => start(&svc),
         Action::Stop => stop(&svc),
         Action::Restart => stop(&svc).and_then(|()| start(&svc)),
+        Action::SetStartType(t) => set_start_type(&svc, t),
     }
 }
 
-/// 执行操作并等待服务到达目标状态。未提权时先直接尝试，权限不足且 `elevate` 为真时
+/// 执行操作（启停时等待服务到达目标状态）。未提权时先直接尝试，权限不足且 `elevate` 为真时
 /// 通过固定参数的提权子进程执行（弹出 UAC）；`elevate` 为假时直接返回“拒绝访问”。
 pub fn control(name: &str, action: Action, elevate: bool) -> Result<()> {
     match control_direct(name, action) {
-        Err(e)
-            if elevate
-                && !crate::is_elevated()
-                && matches!(&e, ServiceError::System(s) if s.win32_code() == Some(ERROR_ACCESS_DENIED.0 as i32)) =>
-        {
-            crate::startup::run_elevated(&format!(
-                "--service-control {} {}",
-                action.arg(),
-                crate::startup::hex(name)
-            ))
-            .map_err(ServiceError::Elevation)
+        Err(e) if should_elevate(&e, elevate, crate::is_elevated()) => {
+            crate::startup::run_elevated(&elevated_args(name, action)).map_err(ServiceError::Elevation)
         }
         r => r,
     }
 }
 
-/// 提权子进程入口：`--service-control <start|stop|restart> <十六进制服务名>`。
+/// 提权子进程入口：`--service-control <start|stop|restart|start-type=<类型>> <十六进制服务名>`。
 pub fn run_cli(args: &[String]) -> Option<i32> {
     if args.get(1).map(String::as_str) != Some("--service-control") {
         return None;
@@ -610,6 +755,73 @@ mod tests {
             assert_eq!(a.arg(), arg);
         }
         assert_eq!(Action::parse("pause"), None);
+    }
+
+    #[test]
+    fn settable_start_types_round_trip_through_raw_and_key() {
+        use StartType as T;
+        for t in T::SETTABLE {
+            let (raw, delayed) = t.to_raw().unwrap();
+            assert_eq!(T::from_raw(raw, delayed), t, "{t:?}");
+            let key = t.key().unwrap();
+            assert_eq!(T::parse_key(key), Some(t));
+            let action = Action::SetStartType(t);
+            assert_eq!(Action::parse(&action.arg()), Some(action));
+        }
+        assert_eq!(T::AutoDelayed.to_raw(), Some((2, true)));
+        assert_eq!(T::Auto.to_raw(), Some((2, false)));
+        assert_eq!(T::Manual.to_raw(), Some((3, false)));
+        assert_eq!(T::Disabled.to_raw(), Some((4, false)));
+        for t in [T::Boot, T::System, T::Unknown] {
+            assert_eq!((t.to_raw(), t.key()), (None, None));
+        }
+        assert_eq!(T::parse_key("boot"), None);
+        assert_eq!(Action::parse("start-type=boot"), None);
+        assert_eq!(Action::parse("start-type="), None);
+        assert_eq!(Action::SetStartType(T::AutoDelayed).arg(), "start-type=auto-delayed");
+    }
+
+    #[test]
+    fn drivers_and_protected_services_block_start_type_changes() {
+        let own = SERVICE_WIN32_OWN_PROCESS.0;
+        assert_eq!(start_type_block(own, SERVICE_LAUNCH_PROTECTED_NONE), None);
+        assert_eq!(start_type_block(SERVICE_WIN32_SHARE_PROCESS.0, 0), None);
+        assert_eq!(start_type_block(SERVICE_KERNEL_DRIVER.0, 0), Some(StartTypeBlock::Driver));
+        assert_eq!(start_type_block(SERVICE_FILE_SYSTEM_DRIVER.0, 0), Some(StartTypeBlock::Driver));
+        assert_eq!(start_type_block(own, SERVICE_LAUNCH_PROTECTED_ANTIMALWARE_LIGHT), Some(StartTypeBlock::Protected));
+        assert_eq!(start_type_block(own, SERVICE_LAUNCH_PROTECTED_WINDOWS), Some(StartTypeBlock::Protected));
+    }
+
+    #[test]
+    fn only_access_denied_without_elevation_goes_to_uac_child() {
+        let denied = ServiceError::System(SystemError::Win32(ERROR_ACCESS_DENIED.0 as i32));
+        assert!(should_elevate(&denied, true, false));
+        assert!(!should_elevate(&denied, false, false), "测试钩子不弹 UAC");
+        assert!(!should_elevate(&denied, true, true), "已提权不再提权");
+        assert!(!should_elevate(&ServiceError::StartTypeBlocked(StartTypeBlock::Protected), true, false));
+        assert!(!should_elevate(&ServiceError::System(SystemError::Win32(1060)), true, false));
+        let args = elevated_args("Spooler", Action::SetStartType(StartType::Manual));
+        assert_eq!(args, format!("--service-control start-type=manual {}", crate::startup::hex("Spooler")));
+        // 子进程能解析回同一动作与服务名。
+        let parts: Vec<String> = std::iter::once("tml".to_owned()).chain(args.split(' ').map(str::to_owned)).collect();
+        assert_eq!(Action::parse(&parts[2]), Some(Action::SetStartType(StartType::Manual)));
+        assert_eq!(crate::startup::unhex(&parts[3]).as_deref(), Some("Spooler"));
+    }
+
+    #[test]
+    fn real_start_type_checks_are_read_only() {
+        // 普通 Win32 服务可以修改；WinDefend 在装有 Defender 的系统上是受保护服务（没有时跳过）。
+        assert_eq!(start_type_block_of("RpcSs").unwrap(), None);
+        if let Ok(b) = start_type_block_of("WinDefend") {
+            eprintln!("WinDefend: {b:?}");
+        }
+        // 未提权时修改被拒绝访问（不弹 UAC）；已提权时跳过，避免改动真实服务。
+        if !crate::is_elevated() {
+            let r = control("RpcSs", Action::SetStartType(StartType::Auto), false);
+            assert!(matches!(&r, Err(ServiceError::System(s)) if s.is_access_denied()), "{r:?}");
+        }
+        assert_eq!(control("RpcSs", Action::SetStartType(StartType::Boot), false), Err(ServiceError::BadStartType));
+        assert!(start_type_block_of("tml-no-such-service-xyz").is_err());
     }
 
     #[test]
@@ -735,7 +947,7 @@ mod tests {
 
     #[test]
     fn invalid_cli_cannot_control() {
-        for tail in [vec!["pause", "61"], vec!["start", "a"], vec!["start"], vec!["stop", "2f78"]] {
+        for tail in [vec!["pause", "61"], vec!["start", "a"], vec!["start"], vec!["stop", "2f78"], vec!["start-type=boot", "61"], vec!["start-type=manual", "2f78"]] {
             let args = [vec!["tml", "--service-control"], tail]
                 .concat()
                 .into_iter()

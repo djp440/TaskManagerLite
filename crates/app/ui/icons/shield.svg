@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- 盾牌：需要管理员权限（与 controls.slint 的 ShieldIcon 同形），用于原生样式菜单项的 icon。 -->
+  <path d="M 8 1.6 L 8 14.6 C 4.9 13.7 2.6 11 2.6 7.6 L 2.6 3.6 Z" fill="#8a8a8a"/>
+  <path d="M 8 1.6 L 13.4 3.6 L 13.4 7.6 C 13.4 11 11.1 13.7 8 14.6 C 4.9 13.7 2.6 11 2.6 7.6 L 2.6 3.6 Z" fill="none" stroke="#8a8a8a" stroke-width="1.3"/>
+</svg>

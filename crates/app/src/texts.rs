@@ -10,7 +10,7 @@
 use std::borrow::Cow;
 
 use tml_core::ConnectionKind;
-use tml_core::services::{Action, ServiceError, ServiceState, StartType};
+use tml_core::services::{Action, ServiceError, ServiceState, StartType, StartTypeBlock};
 use tml_core::startup::{SourceError, StartupError, StartupSource};
 use tml_core::{
     AutostartError, DebuggerValue, ElevationError, IfeoError, MediaType, PriorityClass, ProcessControlError, RunError,
@@ -50,6 +50,39 @@ pub fn service_action(action: Action) -> &'static str {
         Action::Start => "启动",
         Action::Stop => "停止",
         Action::Restart => "重启",
+        Action::SetStartType(_) => "修改启动类型",
+    }
+}
+
+/// 服务操作进行中的提示（`hint` 为提权说明，可为空）。
+pub fn service_pending(action: Action, name: &str, hint: &str) -> String {
+    match action {
+        Action::SetStartType(t) => format!("正在将服务“{name}”的启动类型改为“{}”{hint}…", start_type(t)),
+        a => format!("正在{}服务“{name}”{hint}…", service_action(a)),
+    }
+}
+
+/// 服务操作成功的提示。
+pub fn service_done(action: Action, name: &str) -> String {
+    match action {
+        Action::SetStartType(t) => format!("已将服务“{name}”的启动类型改为“{}”", start_type(t)),
+        a => format!("已{}服务“{name}”", service_action(a)),
+    }
+}
+
+/// 服务操作失败的提示。
+pub fn service_failed(action: Action, name: &str, e: &ServiceError) -> String {
+    match action {
+        Action::SetStartType(t) => format!("无法将服务“{name}”的启动类型改为“{}”：{}", start_type(t), service_error(e)),
+        a => format!("无法{}服务“{name}”：{}", service_action(a), service_error(e)),
+    }
+}
+
+/// 不能修改启动类型的原因（菜单标题后缀与失败提示）。
+pub fn start_type_block(b: StartTypeBlock) -> &'static str {
+    match b {
+        StartTypeBlock::Driver => "驱动服务不能在此修改启动类型",
+        StartTypeBlock::Protected => "受系统保护的服务，不能修改启动类型",
     }
 }
 
@@ -104,6 +137,8 @@ pub fn service_error(e: &ServiceError) -> String {
         ServiceError::BadArgumentCount => "参数数量错误".into(),
         ServiceError::BadAction => "操作错误".into(),
         ServiceError::BadNameEncoding => "名称编码错误".into(),
+        ServiceError::StartTypeBlocked(b) => start_type_block(*b).into(),
+        ServiceError::BadStartType => "不支持的启动类型".into(),
     }
 }
 
@@ -616,6 +651,21 @@ mod tests {
         assert_eq!(service_action(Action::Start), "启动");
         assert_eq!(service_action(Action::Stop), "停止");
         assert_eq!(service_action(Action::Restart), "重启");
+    }
+
+    #[test]
+    fn start_type_change_notes_name_service_target_and_reason() {
+        let a = Action::SetStartType(StartType::AutoDelayed);
+        assert_eq!(service_pending(a, "打印", ""), "正在将服务“打印”的启动类型改为“自动（延迟启动）”…");
+        assert_eq!(service_done(a, "打印"), "已将服务“打印”的启动类型改为“自动（延迟启动）”");
+        let blocked = ServiceError::StartTypeBlocked(StartTypeBlock::Protected);
+        assert_eq!(service_failed(a, "打印", &blocked), "无法将服务“打印”的启动类型改为“自动（延迟启动）”：受系统保护的服务，不能修改启动类型");
+        assert_eq!(service_error(&ServiceError::StartTypeBlocked(StartTypeBlock::Driver)), "驱动服务不能在此修改启动类型");
+        assert_eq!(service_error(&ServiceError::BadStartType), "不支持的启动类型");
+        // 启停的提示与改动前逐字相同。
+        assert_eq!(service_pending(Action::Start, "X", "（提权）"), "正在启动服务“X”（提权）…");
+        assert_eq!(service_done(Action::Stop, "X"), "已停止服务“X”");
+        assert_eq!(service_failed(Action::Restart, "X", &ServiceError::NotStopped), "无法重启服务“X”：服务没有停止");
     }
 
     #[test]
