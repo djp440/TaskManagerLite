@@ -1,7 +1,7 @@
 //! 界面线程上的状态与交互逻辑。
 
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -20,11 +20,14 @@ mod cpu;
 mod export;
 mod memory;
 mod mini;
+mod process_control;
 mod process_menu;
 mod run_task;
 mod services_page;
 mod settings_page;
 mod startup_page;
+mod suspend;
+mod window_ops;
 
 pub use services_page::SERVICES_PAGE;
 
@@ -55,6 +58,14 @@ const CONFIRM_CRITICAL: i32 = 1;
 const CONFIRM_TREE: i32 = 2;
 /// 导出的 CSV 含命令行、路径等敏感列：导出前提示（`name` 为列名）。
 const CONFIRM_EXPORT: i32 = 3;
+/// 把进程优先级设为“实时”（`name` 为进程名，目标进程在 `pending` 里）。
+const CONFIRM_REALTIME: i32 = 4;
+/// 对应用及其全部后代开启 / 关闭效率模式（`name` 为应用名，目标进程在 `pending` 里，`descendants` 为进程总数）。
+const CONFIRM_ECO: i32 = 5;
+/// 挂起关键进程或多个进程（`name` 为进程名 / 应用名，目标进程在 `pending` 里，`descendants` 为进程总数）。
+const CONFIRM_SUSPEND: i32 = 6;
+/// 退出前提示：本程序挂起的进程退出后仍保持挂起（`descendants` 为这些进程的个数）。
+const CONFIRM_EXIT_SUSPENDED: i32 = 7;
 /// 隐藏启动时托盘图标创建失败的重试次数（每秒一次）。
 const TRAY_RETRIES: u32 = 30;
 
@@ -65,6 +76,12 @@ pub struct Controller {
     startup_all: RefCell<Vec<(tml_core::startup::Entry, Option<tml_core::IconBitmap>)>>,
     services: services_page::ServicesState,
     export: export::ExportState,
+    /// “设置亲和性”对话框当前针对的进程。
+    affinity_target: RefCell<Option<ProcessKey>>,
+    /// 效率模式的优先级联动记忆与待确认的批量操作（#68）。
+    eco: process_control::EcoState,
+    /// 本程序挂起的进程与退出前提示（#67）。
+    suspend: suspend::SuspendState,
     ui: slint::Weak<AppWindow>,
     rows: Rc<VecModel<ProcRow>>,
     resources: Rc<VecModel<Resource>>,
@@ -104,6 +121,8 @@ struct State {
     snapshot: ProcessSnapshot,
     /// 应用进程的 PID；采样线程只在分组视图下枚举窗口，其余时候为 `None`。
     app_pids: Option<HashSet<u32>>,
+    /// 应用进程的主窗口句柄（HWND 裸值，#70 窗口操作用）；与 app_pids 同来同去。
+    app_windows: Option<HashMap<u32, isize>>,
     view: Vec<ViewRow>,
     opts: ViewOptions,
     selected: Option<ProcessKey>,
@@ -275,6 +294,9 @@ impl Controller {
             startup_all: RefCell::new(Vec::new()),
             services: Default::default(),
             export: Default::default(),
+            affinity_target: RefCell::new(None),
+            eco: Default::default(),
+            suspend: Default::default(),
             ui: ui.as_weak(),
             rows,
             resources,
@@ -322,6 +344,9 @@ impl Controller {
         c.bind_startup(ui);
         c.bind_services(ui);
         c.bind_run_task(ui);
+        c.bind_process_control(ui);
+        c.bind_suspend(ui);
+        c.bind_window_ops(ui);
         c.bind_export(ui);
         ui.set_pinned(settings.always_on_top);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
@@ -489,6 +514,7 @@ impl Controller {
             s.opts.mode = mode;
             if mode != ViewMode::Group {
                 s.app_pids = None;
+                s.app_windows = None;
             }
             was
         };
@@ -602,8 +628,11 @@ impl Controller {
             self.hidden.set(true);
             self.set_visible(false);
             self.log_hidden();
-        } else {
+        } else if self.try_exit() {
             let _ = slint::quit_event_loop();
+        } else {
+            // 退出前提示（#67）已弹出：窗口留着，等用户选“仍然退出”或“取消”。
+            return CloseRequestResponse::KeepWindowShown;
         }
         CloseRequestResponse::HideWindow
     }
@@ -651,8 +680,15 @@ impl Controller {
         }
     }
 
-    /// 托盘菜单“退出”：保存设置后结束事件循环。
+    /// 托盘菜单“退出”（迷你窗口的退出同）：本程序挂起的进程仍保持挂起时先提示（#67），否则保存设置后结束事件循环。
     fn quit(&self) {
+        if self.try_exit() {
+            self.quit_now();
+        }
+    }
+
+    /// 不再询问，保存设置后结束事件循环。
+    fn quit_now(&self) {
         self.save_settings();
         let _ = slint::quit_event_loop();
     }
@@ -818,6 +854,7 @@ impl Controller {
             if fresh {
                 s.snapshot = sample.snapshot;
                 s.app_pids = sample.app_pids;
+                s.app_windows = sample.app_windows;
             }
             s.system = m;
             s.disks = sample.disks;
@@ -1327,6 +1364,22 @@ impl Controller {
             self.confirm_export();
             return;
         }
+        if kind == CONFIRM_REALTIME {
+            self.confirm_realtime();
+            return;
+        }
+        if kind == CONFIRM_ECO {
+            self.confirm_eco();
+            return;
+        }
+        if kind == CONFIRM_SUSPEND {
+            self.confirm_suspend();
+            return;
+        }
+        if kind == CONFIRM_EXIT_SUSPENDED {
+            self.confirm_exit_suspended();
+            return;
+        }
         let keys = std::mem::take(&mut self.state.borrow_mut().pending);
         let name = ui.get_confirm_name().to_string();
         self.end(keys, &name);
@@ -1419,6 +1472,8 @@ mod tests {
             private_working_set: 0,
             disk_rate: 0.0,
             gpu_usage: None,
+            eco_mode: None,
+            services: None,
             critical: false,
             counters: Default::default(),
             info: None,

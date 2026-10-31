@@ -12,7 +12,7 @@ use slint::{
 };
 
 use crate::controller::SERVICES_PAGE;
-use crate::{AppWindow, Columns, CpuData, MiniWindow, ProcessMenu, SettingsData};
+use crate::{AffinityData, AppWindow, Columns, CpuData, MiniWindow, ProcessMenu, ServiceData, SettingsData};
 
 type Step = (&'static str, fn(&AppWindow));
 
@@ -783,7 +783,13 @@ pub fn run_menu(ui: &AppWindow, spec: &str, warmup: Duration) {
 }
 
 /// `--menu-action <动作>:<pid>`：选中指定 PID 的进程并直接触发一个右键菜单动作
-/// （`open-location`、`properties`、`copy-path`、`copy-command-line`、`copy-row`），用于 `scripts/test-menu-actions.ps1`
+/// （`open-location`、`properties`、`copy-path`、`copy-command-line`、`copy-row`，以及 #66 的
+/// `set-priority:<pid>:<优先级键>`、`set-affinity:<pid>:<十六进制掩码>`、`affinity-shot:<pid>`，以及 #68 的 `eco-mode:<pid>:<on|off>`：先走一遍菜单弹出前的探测，
+/// 当前状态与目标不同才触发“效率模式”，应用行出现确认框时自动点确认；#67 的 `suspend:<pid>` / `resume:<pid>`：先走一遍菜单弹出前的探测，
+/// 菜单项置灰时仍强行触发一次（核对受保护进程被拒绝），出现确认框时自动点确认，`suspend-ask:<pid>` 只触发不点确认
+/// （核对关键进程 / 应用行先弹确认框，日志记“需要确认”），`exit-prompt:<pid>` 先挂起该进程再模拟一次退出（开发模式下也走
+/// “仍保持挂起”提示，弹出后自动点“仍然退出”；`exit-prompt-cancel:<pid>` 点“取消”后继续运行；`exit-prompt-twice:<pid>` 连续退出两次、
+/// 只应弹一次提示；`exit-noprompt:<pid>` 本程序没挂起过任何进程，应直接退出），用于 `scripts/test-menu-actions.ps1`
 /// 自动验收，免去点击原生菜单。末尾可加 `:group` 先切到分组视图（验证分组视图里选中的是正确的进程）。
 /// 动作执行后不退出，由脚本检查结果并结束进程。
 pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
@@ -796,6 +802,8 @@ pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
         .and_then(|p| p.parse::<i32>().ok())
         .unwrap_or(0);
     let group = parts.contains(&"group");
+    // 第三段（优先级键 / 十六进制掩码）；闭包要 'static，所以先转成拥有所有权的字符串。
+    let arg: Option<String> = parts.get(2).map(|s| s.to_string());
     let weak = ui.as_weak();
     Timer::single_shot(warmup, move || {
         let Some(ui) = weak.upgrade() else { return };
@@ -824,6 +832,173 @@ pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
                 "copy-path" => menu.invoke_copy_path(),
                 "copy-command-line" => menu.invoke_copy_command_line(),
                 "copy-row" => menu.invoke_copy_row(),
+                "set-priority" => {
+                    // 第三段是优先级的键（realtime / high / above-normal / normal / below-normal / low）。
+                    match arg.as_deref().and_then(tml_core::PriorityClass::from_key) {
+                        Some(class) => menu.invoke_set_priority(class.index() as i32),
+                        None => eprintln!("未知优先级 {arg:?}"),
+                    }
+                }
+                "set-affinity" => {
+                    // 第三段是十六进制掩码：打开对话框、按掩码勾选，再点“确定”。
+                    match arg.as_deref().and_then(|m| u64::from_str_radix(m.trim_start_matches("0x"), 16).ok()) {
+                        Some(mask) => {
+                            menu.invoke_set_affinity();
+                            let data = ui.global::<AffinityData>();
+                            let cpus = data.get_cpus();
+                            for i in 0..cpus.row_count() {
+                                if let Some(mut c) = cpus.row_data(i) {
+                                    c.on = c.index < 64 && mask & (1u64 << c.index) != 0;
+                                    cpus.set_row_data(i, c);
+                                }
+                            }
+                            data.invoke_submit();
+                        }
+                        None => eprintln!("未知亲和性掩码 {arg:?}"),
+                    }
+                }
+                "eco-mode" => {
+                    let want = match arg.as_deref() {
+                        Some("on") => true,
+                        Some("off") => false,
+                        _ => {
+                            eprintln!("未知效率模式目标 {arg:?}");
+                            return;
+                        }
+                    };
+                    menu.invoke_opening();
+                    if !menu.get_eco_visible() || !menu.get_can_eco() {
+                        // 菜单项置灰时用户点不了；钩子仍强行触发一次，核对受保护进程会被拒绝并留下日志。
+                        eprintln!("效率模式菜单项不可用（visible={} enabled={}）", menu.get_eco_visible(), menu.get_can_eco());
+                        menu.invoke_toggle_eco();
+                    } else if menu.get_eco_checked() != want {
+                        menu.invoke_toggle_eco();
+                        if ui.get_confirm_kind() != 0 {
+                            ui.invoke_confirm_accepted();
+                        }
+                    }
+                }
+                "suspend" | "resume" | "suspend-ask" => {
+                    let suspend = action != "resume";
+                    menu.invoke_opening();
+                    let (can, title) = if suspend {
+                        (menu.get_can_suspend(), menu.get_suspend_title())
+                    } else {
+                        (menu.get_can_resume(), menu.get_resume_title())
+                    };
+                    eprintln!("{action} 菜单项 enabled={can} 标题={title}");
+                    if suspend {
+                        menu.invoke_suspend();
+                    } else {
+                        menu.invoke_resume();
+                    }
+                    if action != "suspend-ask" && ui.get_confirm_kind() != 0 {
+                        ui.invoke_confirm_accepted();
+                    }
+                }
+"window-activate" | "window-maximize" | "window-minimize" | "window-restore" => {
+                    // 与右键菜单一致：先按弹出前的逻辑设置各项状态（应用行需要 `:group`），再触发动作；
+                    // 置灰时钩子仍触发一次，核对被拒绝的路径。
+                    menu.invoke_opening();
+                    let (op, can, title) = match action.as_str() {
+                        "window-activate" => (0, menu.get_can_window_activate(), menu.get_window_activate_title()),
+                        "window-maximize" => (1, menu.get_can_window_maximize(), menu.get_window_maximize_title()),
+                        "window-minimize" => (2, menu.get_can_window_minimize(), menu.get_window_minimize_title()),
+                        _ => (3, menu.get_can_window_restore(), menu.get_window_restore_title()),
+                    };
+                    eprintln!("{action} 菜单项 visible={} enabled={can} 标题={title}", menu.get_window_visible());
+                    menu.invoke_window_op(op);
+                }
+                "exit-prompt" | "exit-prompt-cancel" | "exit-prompt-twice" | "exit-noprompt" => {
+                    if action != "exit-noprompt" {
+                        menu.invoke_opening();
+                        menu.invoke_suspend();
+                        if ui.get_confirm_kind() != 0 {
+                            ui.invoke_confirm_accepted();
+                        }
+                    }
+                    // 挂起是异步生效的（线程要等到下一次被调度才进入挂起等待），稍等再退出。
+                    let weak = ui.as_weak();
+                    let action = action.clone();
+                    Timer::single_shot(Duration::from_millis(1500), move || {
+                        let Some(ui) = weak.upgrade() else { return };
+                        let exit = || {
+                            crate::CONTROLLER.with(|c| {
+                                if let Some(c) = c.borrow().as_ref() {
+                                    c.exit_hook();
+                                }
+                            })
+                        };
+                        exit();
+                        if action == "exit-prompt-twice" {
+                            exit();
+                        }
+                        eprintln!("退出前提示 confirm_kind={}", ui.get_confirm_kind());
+                        if ui.get_confirm_kind() == 7 {
+                            if action == "exit-prompt" {
+                                ui.invoke_confirm_accepted();
+                            } else {
+                                // 取消：与对话框里的“取消”按钮相同，把确认框关掉。
+                                ui.set_confirm_kind(0);
+                            }
+                        }
+                    });
+                }
+                "goto-service" => {
+                    // 与右键菜单一致：先按弹出前的逻辑判断是否可用，再触发“转到服务”（置灰时钩子仍触发一次，核对不会跳转）。
+                    menu.invoke_opening();
+                    eprintln!("转到服务 菜单项 enabled={}", menu.get_can_goto_service());
+                    menu.invoke_goto_service();
+                    // 服务页枚举是异步的：等一会儿再读服务页状态；设置了 TML_GOTO_SHOT 时顺便把窗口截图写到该 BMP。
+                    let weak = ui.as_weak();
+                    Timer::single_shot(Duration::from_millis(2500), move || {
+                        let Some(ui) = weak.upgrade() else { return };
+                        let data = ui.global::<ServiceData>();
+                        let rows = data.get_rows();
+                        let names: Vec<String> = (0..rows.row_count())
+                            .filter_map(|i| rows.row_data(i))
+                            .map(|r| format!("{}={}", r.name, r.pid))
+                            .collect();
+                        eprintln!(
+                            "服务页状态 page={} filter_pid={} 行数={} 选中={} 提示条={:?}",
+                            ui.get_page(),
+                            data.get_filter_pid(),
+                            rows.row_count(),
+                            data.get_selected(),
+                            data.get_filter_process().as_str()
+                        );
+                        eprintln!("服务页行 {}", names.join(","));
+                        if let Some(path) = std::env::var_os("TML_GOTO_SHOT") {
+                            match ui.window().take_snapshot() {
+                                Ok(buf) => {
+                                    if let Err(e) = write_bmp(Path::new(&path), &buf) {
+                                        eprintln!("写入截图失败：{e}");
+                                    }
+                                }
+                                Err(e) => eprintln!("截图失败：{e}"),
+                            }
+                        }
+                        let _ = slint::quit_event_loop();
+                    });
+                }
+                "affinity-shot" => {
+                    // 打开亲和性对话框并把窗口截图写到环境变量 TML_AFFINITY_SHOT 指定的 BMP，随后退出。
+                    menu.invoke_set_affinity();
+                    let weak = ui.as_weak();
+                    Timer::single_shot(Duration::from_millis(600), move || {
+                        let Some(ui) = weak.upgrade() else { return };
+                        match (std::env::var_os("TML_AFFINITY_SHOT"), ui.window().take_snapshot()) {
+                            (Some(path), Ok(buf)) => {
+                                if let Err(e) = write_bmp(Path::new(&path), &buf) {
+                                    eprintln!("写入截图失败：{e}");
+                                }
+                            }
+                            (None, _) => eprintln!("未设置 TML_AFFINITY_SHOT"),
+                            (_, Err(e)) => eprintln!("截图失败：{e}"),
+                        }
+                        let _ = slint::quit_event_loop();
+                    });
+                }
                 other => eprintln!("未知动作 {other}"),
             }
         });

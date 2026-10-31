@@ -8,6 +8,7 @@ license.workspace = true
 windows = { version = "0.62", features = [
     "Wdk_System_Threading",
     "Wdk_System_SystemInformation",
+    "Wdk_System_SystemServices",
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Dxgi",

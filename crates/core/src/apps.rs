@@ -9,9 +9,14 @@
 //! 用户确实有至少两个虚拟桌面时才去问：只有一个桌面的机器（绝大多数）完全不会触碰 COM。
 //! UWP 应用的顶层窗口属于 `ApplicationFrameHost.exe`，真实进程要从它的
 //! `Windows.UI.Core.CoreWindow` 子窗口取得。
+//!
+//! 判定时顺带记下每个应用的“主窗口”句柄（#70 窗口操作用）：`EnumWindows` 按 Z 序从上到下枚举，
+//! 一个进程的第一个应用窗口即最上层的那个；UWP 应用记的是 `ApplicationFrameHost` 的外层
+//! `ApplicationFrameWindow`（`ShowWindow` 等要作用于外层窗口，`CoreWindow` 只是里面的内容）。
+//! 只多一次 `HashMap` 插入，不增加任何系统调用。句柄会失效，使用前由 [`crate::winops`] 校验。
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HWND, LPARAM, RPC_E_CHANGED_MODE};
@@ -250,25 +255,30 @@ fn uwp_pid(frame: HWND) -> Option<u32> {
 
 /// 当前所有应用进程的 PID。
 pub fn app_pids() -> HashSet<u32> {
+    app_windows().into_keys().collect()
+}
+
+/// 当前所有应用进程的 PID 与其主窗口句柄（`HWND` 裸值；多个窗口时取 Z 序最上层的，UWP 取外层框架窗口）。
+pub fn app_windows() -> HashMap<u32, isize> {
     unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        // SAFETY: lparam 是 `app_pids` 传入的 `&mut HashSet<u32>`，枚举期间一直有效。
-        let pids = unsafe { &mut *(lparam.0 as *mut HashSet<u32>) };
+        // SAFETY: lparam 是 `app_windows` 传入的 `&mut HashMap<u32, isize>`，枚举期间一直有效。
+        let apps = unsafe { &mut *(lparam.0 as *mut HashMap<u32, isize>) };
         if is_app_window(facts(hwnd)) {
             if class_name(hwnd) == UWP_FRAME_CLASS {
                 // 找不到 CoreWindow（正在启动或退出）时不记录：框架宿主本身不是应用。
                 if let Some(pid) = uwp_pid(hwnd) {
-                    pids.insert(pid);
+                    apps.entry(pid).or_insert(hwnd.0 as isize);
                 }
             } else {
-                pids.insert(window_pid(hwnd));
+                apps.entry(window_pid(hwnd)).or_insert(hwnd.0 as isize);
             }
         }
         true.into()
     }
-    let mut pids = HashSet::new();
+    let mut apps = HashMap::new();
     DESKTOP.with(|d| d.borrow_mut().multiple_desktops = None);
-    let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut pids as *mut HashSet<u32> as isize)) };
-    pids
+    let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut apps as *mut HashMap<u32, isize> as isize)) };
+    apps
 }
 
 #[cfg(test)]

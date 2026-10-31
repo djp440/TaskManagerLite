@@ -1,0 +1,204 @@
+import { Button, Palette, ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// 一个逻辑处理器的勾选状态；`index` 是在所属处理器组内的编号。
+export struct CpuBox {
+    index: int,
+    on: bool,
+}
+
+// “设置亲和性”对话框的数据与事件（进程右键菜单“设置亲和性…”打开，#66）。
+export global AffinityData {
+    in-out property <bool> open;
+    // 目标进程的显示名与 PID（标题用）。
+    in property <string> process-name;
+    in property <int> pid;
+    // 当前处理器组内的逻辑处理器，每个一个勾选框。
+    in property <[CpuBox]> cpus;
+    in property <int> selected-count;
+    // 全系统逻辑处理器总数；超过一个处理器组（64）时提示只支持当前处理器组。
+    in property <int> total;
+    in property <bool> truncated;
+    // 应用失败的原因；非空时显示在按钮上方，对话框保持打开。
+    in-out property <string> error;
+    callback toggle(int);
+    callback select-all();
+    callback select-none();
+    callback submit();
+}
+
+export component AffinityDialog inherits Rectangle {
+    callback cancelled();
+
+    background: #00000066;
+    TouchArea { }
+
+    function submit() {
+        if AffinityData.selected-count > 0 {
+            AffinityData.submit();
+        }
+    }
+
+    // Esc 取消、回车确认。
+    scope := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.cancelled();
+                return accept;
+            }
+            if event.text == Key.Return {
+                root.submit();
+                return accept;
+            }
+            reject
+        }
+
+        card := Rectangle {
+            width: min(480px, parent.width - 48px);
+            height: body.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: max(24px, (parent.height - self.height) / 2);
+            border-radius: 10px;
+            background: Theme.surface-raised;
+            border-width: 1px;
+            border-color: Theme.divider;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000050;
+
+            body := VerticalLayout {
+                padding: 24px;
+                spacing: 12px;
+                Text {
+                    text: @tr("设置亲和性");
+                    font-size: 18px;
+                    font-weight: 600;
+                    color: Palette.foreground;
+                }
+
+                Text {
+                    text: @tr("{} (PID {}) 允许运行在以下逻辑处理器上。", AffinityData.process-name, AffinityData.pid);
+                    wrap: word-wrap;
+                    color: Theme.subtle-text;
+                }
+
+                if AffinityData.truncated: Text {
+                    text: @tr("本机共有 {} 个逻辑处理器，超过 64 个；目前只支持进程所在的当前处理器组，下面只列出这一组。", AffinityData.total);
+                    wrap: word-wrap;
+                    color: Theme.heat;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: @tr("全选");
+                        clicked => {
+                            AffinityData.select-all();
+                        }
+                    }
+
+                    Button {
+                        text: @tr("全不选");
+                        clicked => {
+                            AffinityData.select-none();
+                        }
+                    }
+
+                    Rectangle { }
+                }
+
+                ScrollView {
+                    height: min(216px, ceil(AffinityData.cpus.length / 4) * 28px);
+                    content-height: ceil(AffinityData.cpus.length / 4) * 28px;
+                    for cpu[i] in AffinityData.cpus: Rectangle {
+                        x: mod(i, 4) * 100px;
+                        y: floor(i / 4) * 28px;
+                        width: 100px;
+                        height: 28px;
+                        touch := TouchArea {
+                            clicked => {
+                                AffinityData.toggle(i);
+                            }
+                        }
+
+                        Rectangle {
+                            width: parent.width - 4px;
+                            height: parent.height - 2px;
+                            border-radius: 4px;
+                            background: touch.has-hover ? Theme.hover : transparent;
+                        }
+
+                        Rectangle {
+                            x: 6px;
+                            y: 6px;
+                            width: 16px;
+                            height: 16px;
+                            border-radius: 3px;
+                            border-width: 1px;
+                            border-color: cpu.on ? Theme.cpu : Theme.popup-border;
+                            background: cpu.on ? Theme.cpu : transparent;
+                            // 勾号用路径画，不依赖字体里有没有“✓”字形。
+                            if cpu.on: Path {
+                                x: 3px;
+                                y: 4px;
+                                width: 10px;
+                                height: 8px;
+                                viewbox-width: 10;
+                                viewbox-height: 8;
+                                stroke: #ffffff;
+                                stroke-width: 1.6px;
+                                fill: transparent;
+                                MoveTo { x: 0; y: 4; }
+                                LineTo { x: 3.5; y: 7.5; }
+                                LineTo { x: 10; y: 0.5; }
+                            }
+                        }
+
+                        Text {
+                            x: 30px;
+                            text: @tr("CPU {}", cpu.index);
+                            vertical-alignment: center;
+                            color: Palette.foreground;
+                        }
+                    }
+                }
+
+                if AffinityData.selected-count == 0: Text {
+                    text: @tr("至少要选择一个逻辑处理器。");
+                    wrap: word-wrap;
+                    color: Theme.subtle-text;
+                }
+
+                if AffinityData.error != "": Text {
+                    text: AffinityData.error;
+                    wrap: word-wrap;
+                    color: Theme.danger;
+                }
+
+                HorizontalLayout {
+                    padding-top: 8px;
+                    alignment: end;
+                    spacing: 8px;
+                    Button {
+                        text: @tr("取消");
+                        clicked => {
+                            root.cancelled();
+                        }
+                    }
+
+                    Button {
+                        text: @tr("确定");
+                        primary: true;
+                        enabled: AffinityData.selected-count > 0;
+                        clicked => {
+                            root.submit();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    init => {
+        scope.focus();
+    }
+}

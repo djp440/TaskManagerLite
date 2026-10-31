@@ -2,6 +2,7 @@
 use crate::error::{ElevationError, SystemError};
 use std::{
     collections::HashMap,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use windows::{
@@ -299,6 +300,37 @@ fn enumerate() -> Result<Vec<Service>> {
     }
     services.sort_by_key(|s| s.name.to_lowercase());
     Ok(services)
+}
+
+/// 进程 PID → 它承载的（正在运行的）服务名，名称按不区分大小写排序。
+pub type HostMap = HashMap<u32, Arc<[String]>>;
+
+/// 由服务列表得出“PID → 承载的服务名”。未运行的服务（PID 为 0）不计入；`services` 已按名称排序时结果也有序。
+pub fn host_map(services: &[Service]) -> HostMap {
+    let mut grouped: HashMap<u32, Vec<String>> = HashMap::new();
+    for s in services.iter().filter(|s| s.pid > 0) {
+        grouped.entry(s.pid).or_default().push(s.name.clone());
+    }
+    grouped
+        .into_iter()
+        .map(|(pid, mut names)| {
+            names.sort_by_key(|n| n.to_lowercase());
+            (pid, Arc::from(names))
+        })
+        .collect()
+}
+
+/// 只做一次服务枚举（不读启动类型、描述、组），得到“PID → 承载的服务名”。
+/// 进程页的“服务”列与右键菜单“转到服务”按需调用，开销是一次 `EnumServicesStatusExW`。
+pub fn hosted_services() -> Result<HostMap> {
+    Ok(host_map(&enumerate()?))
+}
+
+/// 把 `map` 填进进程的 `services` 字段；不承载服务的进程保持 `None`。
+pub fn apply_hosts(processes: &mut [crate::Process], map: &HostMap) {
+    for p in processes {
+        p.services = map.get(&p.key.pid).cloned();
+    }
 }
 
 /// svchost 宿主的服务在命令行里用 `-k <组>` 指定共享进程的组名；其他服务没有组。
@@ -654,6 +686,51 @@ mod tests {
         assert_eq!(rpc.config.group, "rpcss");
         assert!(!rpc.config.description.is_empty());
         assert!(rows.iter().filter(|s| s.state == ServiceState::Stopped).all(|s| s.pid == 0));
+    }
+
+    #[test]
+    fn host_map_groups_running_services_by_pid_and_sorts_names() {
+        let svc = |n: &str, pid| Service { name: n.into(), pid, ..Default::default() };
+        let map = host_map(&[svc("Spooler", 700), svc("bits", 900), svc("Dhcp", 900), svc("Stopped", 0), svc("Alpha", 900)]);
+        assert_eq!(map.len(), 2, "PID 0（未运行）不计入");
+        assert_eq!(&*map[&900], ["Alpha", "bits", "Dhcp"]);
+        assert_eq!(&*map[&700], ["Spooler"]);
+        assert!(host_map(&[]).is_empty());
+    }
+
+    #[test]
+    fn apply_hosts_fills_only_hosting_processes() {
+        use crate::snapshot::{Process, ProcessKey};
+        let mk = |pid| Process {
+            key: ProcessKey { pid, create_time: 1 },
+            parent_pid: 0,
+            name: "p".into(),
+            cpu_usage: 0.0,
+            private_working_set: 0,
+            disk_rate: 0.0,
+            gpu_usage: None,
+            eco_mode: None,
+            services: Some(Arc::from(vec!["旧".to_owned()])),
+            critical: false,
+            counters: Default::default(),
+            info: None,
+        };
+        let mut procs = vec![mk(5), mk(6)];
+        let map: HostMap = [(5, Arc::from(vec!["A".to_owned(), "B".to_owned()]))].into_iter().collect();
+        apply_hosts(&mut procs, &map);
+        assert_eq!(procs[0].services.as_deref().map(<[String]>::len), Some(2));
+        // 不承载服务的进程清回 None（不残留上一轮的值）。
+        assert!(procs[1].services.is_none());
+    }
+
+    #[test]
+    fn real_hosts_include_rpcss_process_and_are_cheap() {
+        let started = Instant::now();
+        let map = hosted_services().unwrap();
+        eprintln!("hosted_services {} ms，{} 个宿主进程", started.elapsed().as_millis(), map.len());
+        let rpc = ServiceList::new().list().unwrap().into_iter().find(|s| s.name.eq_ignore_ascii_case("RpcSs")).unwrap();
+        assert!(map[&rpc.pid].iter().any(|n| n.eq_ignore_ascii_case("RpcSs")));
+        assert!(map.values().all(|v| !v.is_empty()));
     }
 
     #[test]

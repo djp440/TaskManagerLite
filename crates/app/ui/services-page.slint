@@ -15,6 +15,11 @@ export global ServiceData {
     in property <string> note;
     // 搜索文字，由工具栏的搜索框双向绑定；编辑后 Rust 重新过滤。
     in-out property <string> filter;
+    // 按进程过滤（#85，从进程页“转到服务”进入）：只显示 PID 为 filter-pid 的服务，0 = 不过滤；
+    // filter-process 是提示条里显示的进程描述（名称与 PID）。搜索、点击清除、离开服务页时清除。
+    in-out property <int> filter-pid;
+    in property <string> filter-process;
+    callback process-filter-cleared();
     callback filter-edited();
     // 进入页面：清空配置缓存后重新枚举。
     callback refresh();
@@ -58,6 +63,25 @@ export component ServicesPage inherits Rectangle {
     background: Theme.surface;
     VerticalLayout {
         spacing: 0px;
+        if ServiceData.filter-pid > 0: Rectangle {
+            height: 34px;
+            background: Theme.selected;
+            HorizontalLayout {
+                padding-left: 12px; padding-right: 10px; spacing: 8px;
+                Text {
+                    text: @tr("正在按进程 {0} 过滤", ServiceData.filter-process);
+                    vertical-alignment: center; horizontal-stretch: 1; overflow: elide; color: Palette.foreground;
+                }
+                Rectangle {
+                    width: 72px;
+                    Button {
+                        y: (parent.height - self.height) / 2; width: 100%; height: 26px;
+                        text: @tr("清除过滤");
+                        clicked => { ServiceData.process-filter-cleared(); }
+                    }
+                }
+            }
+        }
         Rectangle {
             height: 34px;
             background: Theme.surface-raised;

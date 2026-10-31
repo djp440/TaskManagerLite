@@ -13,8 +13,8 @@ use tml_core::ConnectionKind;
 use tml_core::services::{Action, ServiceError, ServiceState, StartType};
 use tml_core::startup::{SourceError, StartupError, StartupSource};
 use tml_core::{
-    AutostartError, DebuggerValue, ElevationError, IfeoError, MediaType, RunError, ShellError, SystemError,
-    UnsafeReason,
+    AutostartError, DebuggerValue, ElevationError, IfeoError, MediaType, PriorityClass, ProcessControlError, RunError,
+    ShellError, SystemError, UnsafeReason, WindowError, WindowOp,
 };
 
 /// 服务状态（服务页“状态”列）。
@@ -143,6 +143,192 @@ pub fn run_error(e: &RunError) -> String {
         // 2 找不到文件，3 找不到路径。
         RunError::System(SystemError::Win32(2 | 3)) => "找不到指定的程序、文件、文件夹或网址，请检查输入是否正确".into(),
         RunError::System(e) => format!("无法启动：{e}"),
+    }
+}
+
+/// 进程优先级（菜单项、状态栏）。
+pub fn priority_name(class: PriorityClass) -> &'static str {
+    match class {
+        PriorityClass::Realtime => "实时",
+        PriorityClass::High => "高",
+        PriorityClass::AboveNormal => "高于正常",
+        PriorityClass::Normal => "正常",
+        PriorityClass::BelowNormal => "低于正常",
+        PriorityClass::Low => "低",
+    }
+}
+
+/// 状态栏：优先级设置成功。系统实际生效的类别与请求不同（未提权时“实时”只会变成“高”）时附带说明。
+pub fn priority_applied(name: &str, requested: PriorityClass, actual: PriorityClass) -> String {
+    if requested == actual {
+        format!("{name} → {}", priority_name(actual))
+    } else {
+        format!("{name} → {}（未以管理员身份运行，系统把“{}”降为了“{}”）", priority_name(actual), priority_name(requested), priority_name(actual))
+    }
+}
+
+/// 状态栏：亲和性设置成功。
+pub fn affinity_applied(name: &str, selected: u32, available: u32) -> String {
+    format!("{name} → {selected}/{available} 个逻辑处理器")
+}
+
+/// 设置优先级、CPU 亲和性或效率模式失败的原因。
+pub fn process_control_error(e: &ProcessControlError) -> String {
+    match e {
+        ProcessControlError::Gone => "进程已经退出".into(),
+        ProcessControlError::AccessDenied => "没有权限修改该进程（受保护进程或需要管理员权限），可以以管理员身份重启后再试".into(),
+        ProcessControlError::EmptyAffinity => "至少要选择一个逻辑处理器".into(),
+        ProcessControlError::OutsideProcessorGroup => "所选处理器不在该进程所在的处理器组内".into(),
+        ProcessControlError::Protected => "系统空闲 / System 进程或本程序自身，不允许此操作".into(),
+        ProcessControlError::Unsupported => "当前 Windows 版本不支持效率模式（需要 Windows 10 1709 及以上）".into(),
+        ProcessControlError::System(e) => format!("系统返回错误：{e}"),
+    }
+}
+
+/// 状态栏：效率模式已开启（进程优先级随之降为低）。
+pub fn eco_enabled(name: &str) -> String {
+    format!("{name} → 已开启效率模式（优先级降为“低”）")
+}
+
+/// 状态栏：效率模式已关闭；`restored` 为关闭后的优先级（没有恢复优先级时为 `None`）。
+pub fn eco_disabled(name: &str, restored: Option<PriorityClass>) -> String {
+    match restored {
+        Some(p) => format!("{name} → 已关闭效率模式（优先级恢复为“{}”）", priority_name(p)),
+        None => format!("{name} → 已关闭效率模式"),
+    }
+}
+
+/// 状态栏：对应用及其后代批量切换效率模式的结果。
+pub fn eco_batch(name: &str, on: bool, ok: usize, failed: usize) -> String {
+    let verb = if on { "开启" } else { "关闭" };
+    if failed == 0 {
+        format!("{name} → 已为 {ok} 个进程{verb}效率模式")
+    } else {
+        format!("{name} → 已为 {ok} 个进程{verb}效率模式，{failed} 个失败（权限不足或已退出）")
+    }
+}
+
+/// 右键菜单“效率模式”项的标题；置灰时括号里写原因（`Some(true)` 关键 / 自身，`Some(false)` 无权限）。
+pub fn eco_menu_title(disabled_reason: Option<bool>) -> &'static str {
+    match disabled_reason {
+        None => "效率模式",
+        Some(true) => "效率模式（系统关键进程或本程序，不可开启）",
+        Some(false) => "效率模式（没有权限）",
+    }
+}
+
+/// 菜单项置灰时的原因（效率模式）。
+pub fn eco_disabled_reason(critical: bool) -> &'static str {
+    if critical {
+        "系统关键进程或本程序自身不能开启效率模式"
+    } else {
+        "没有权限修改该进程的效率模式"
+    }
+}
+
+/// 挂起 / 恢复菜单项置灰的原因。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MenuBlock {
+    /// 探测得到的错误（受保护、没有权限、进程已退出）。
+    Error(ProcessControlError),
+    /// 没有符合条件的目标：挂起时目标都已挂起，恢复时目标都没有挂起。
+    NoTarget,
+}
+
+/// 右键菜单“挂起”项的标题；置灰时括号里写原因，`None` 表示可用。
+pub fn suspend_menu_title(block: Option<&MenuBlock>) -> &'static str {
+    match block {
+        None => "挂起",
+        Some(MenuBlock::NoTarget) => "挂起（已挂起）",
+        Some(MenuBlock::Error(ProcessControlError::Protected)) => "挂起（系统进程或本程序，不可挂起）",
+        Some(MenuBlock::Error(ProcessControlError::Gone)) => "挂起（进程已退出）",
+        Some(MenuBlock::Error(_)) => "挂起（没有权限）",
+    }
+}
+
+/// 右键菜单“恢复”项的标题，规则同 [`suspend_menu_title`]。
+pub fn resume_menu_title(block: Option<&MenuBlock>) -> &'static str {
+    match block {
+        None => "恢复",
+        Some(MenuBlock::NoTarget) => "恢复（未挂起）",
+        Some(MenuBlock::Error(ProcessControlError::Protected)) => "恢复（系统进程或本程序，不可操作）",
+        Some(MenuBlock::Error(ProcessControlError::Gone)) => "恢复（进程已退出）",
+        Some(MenuBlock::Error(_)) => "恢复（没有权限）",
+    }
+}
+
+/// 窗口操作菜单项置灰的原因（#70）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowBlock {
+    /// 窗口已处于操作的目标状态（已最大化、已最小化、本来就是正常大小）。
+    State,
+    /// 探测得到的错误（窗口已关闭、需要提权）。
+    Error(WindowError),
+}
+
+/// 窗口操作的动作名（菜单项文字与失败提示的前缀）。
+pub fn window_op_name(op: WindowOp) -> &'static str {
+    match op {
+        WindowOp::Activate => "切换到",
+        WindowOp::Maximize => "最大化",
+        WindowOp::Minimize => "最小化",
+        WindowOp::Restore => "还原",
+    }
+}
+
+/// 窗口操作菜单项的标题；置灰时括号里写原因，`None` 表示可用。
+pub fn window_menu_title(op: WindowOp, block: Option<&WindowBlock>) -> String {
+    let name = window_op_name(op);
+    let reason = match block {
+        None => return name.to_string(),
+        Some(WindowBlock::State) => match op {
+            WindowOp::Maximize => "已最大化",
+            WindowOp::Minimize => "已最小化",
+            WindowOp::Restore => "窗口已是正常大小",
+            WindowOp::Activate => "无需切换",
+        },
+        Some(WindowBlock::Error(WindowError::Gone)) => "窗口已关闭",
+        Some(WindowBlock::Error(WindowError::NeedsElevation)) => "需要提权",
+        Some(WindowBlock::Error(_)) => "无法操作该窗口",
+    };
+    format!("{name}（{reason}）")
+}
+
+/// 窗口操作失败的原因（状态栏“操作失败：{动作}（{原因}）”里的原因）。
+pub fn window_error(e: &WindowError) -> String {
+    match e {
+        WindowError::Gone => "窗口已关闭".into(),
+        WindowError::NeedsElevation => "该应用以更高权限运行，需要以管理员身份重启本程序后才能操作它的窗口".into(),
+        WindowError::NotApplied => "窗口没有响应该操作（可能不支持，或该应用以更高权限运行）".into(),
+        WindowError::System(e) => format!("系统返回错误：{e}"),
+    }
+}
+
+/// 状态栏：窗口操作已完成。
+pub fn window_done(name: &str, op: WindowOp) -> String {
+    let done = match op {
+        WindowOp::Activate => "已切换到该窗口",
+        WindowOp::Maximize => "已最大化",
+        WindowOp::Minimize => "已最小化",
+        WindowOp::Restore => "已还原",
+    };
+    format!("{name} → {done}")
+}
+
+/// 状态栏：前台锁定拒绝了“切换到”，已改为闪烁任务栏按钮。
+pub fn window_flashed(name: &str) -> String {
+    format!("{name} → 系统阻止了自动切换，已闪烁任务栏，请手动切换")
+}
+
+/// 状态栏：挂起 / 恢复的结果；单个进程只写动作结果，多个进程写成功数与失败数。
+pub fn suspend_result(name: &str, suspend: bool, ok: usize, failed: usize) -> String {
+    let verb = if suspend { "挂起" } else { "恢复" };
+    if failed == 0 && ok == 1 {
+        format!("{name} → 已{verb}")
+    } else if failed == 0 {
+        format!("{name} → 已{verb} {ok} 个进程")
+    } else {
+        format!("{name} → 已{verb} {ok} 个进程，{failed} 个失败（权限不足或已退出）")
     }
 }
 
