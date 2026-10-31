@@ -10,12 +10,41 @@
 use std::borrow::Cow;
 
 use tml_core::ConnectionKind;
+use tml_core::connections::{ConnectionError, TcpState};
 use tml_core::services::{Action, ServiceError, ServiceState, StartType, StartTypeBlock};
 use tml_core::startup::{SourceError, StartupError, StartupSource};
 use tml_core::{
     AutostartError, DebuggerValue, ElevationError, IfeoError, MediaType, PriorityClass, ProcessControlError, RunError,
     ShellError, SystemError, UnsafeReason, WindowError, WindowOp,
 };
+
+/// TCP 连接状态（连接页“状态”列）；UDP 没有状态，显示为空。
+pub fn tcp_state(state: Option<TcpState>) -> Cow<'static, str> {
+    let Some(state) = state else { return "".into() };
+    match state {
+        TcpState::Closed => "已关闭".into(),
+        TcpState::Listen => "监听".into(),
+        TcpState::SynSent => "已发送 SYN".into(),
+        TcpState::SynReceived => "已收到 SYN".into(),
+        TcpState::Established => "已建立".into(),
+        TcpState::FinWait1 => "FIN 等待 1".into(),
+        TcpState::FinWait2 => "FIN 等待 2".into(),
+        TcpState::CloseWait => "等待关闭".into(),
+        TcpState::Closing => "正在关闭".into(),
+        TcpState::LastAck => "最后确认".into(),
+        TcpState::TimeWait => "等待超时".into(),
+        TcpState::DeleteTcb => "删除 TCB".into(),
+        TcpState::Unknown(v) => format!("未知（{v}）").into(),
+    }
+}
+
+/// 读取连接表失败的原因（连接页底栏）。
+pub fn connection_error(e: &ConnectionError) -> String {
+    match e {
+        ConnectionError::System { protocol, error } => format!("{} 连接表：{error}", protocol.name()),
+        ConnectionError::KeepsGrowing { protocol } => format!("{} 连接表变化太快，多次重试仍未读到", protocol.name()),
+    }
+}
 
 /// 服务状态（服务页“状态”列）。
 pub fn service_state(state: ServiceState) -> &'static str {

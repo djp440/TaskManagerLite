@@ -13,6 +13,8 @@ import { StartupPage, StartupData, StartupRow } from "startup-page.slint";
 export { StartupData, StartupRow }
 import { ServicesPage, ServiceData, ServiceRow } from "services-page.slint";
 export { ServiceData, ServiceRow }
+import { ConnectionsPage, ConnectionData, ConnectionRow } from "connections-page.slint";
+export { ConnectionData, ConnectionRow }
 import { RunTaskData, RunTaskDialog } from "run-task.slint";
 export { RunTaskData }
 import { AffinityData, AffinityDialog, CpuBox } from "affinity.slint";
@@ -265,12 +267,14 @@ export component AppWindow inherits Window {
     // 3. 仍放不下时收起置顶按钮（设置页里可以切换置顶）。
     // 档位按搜索框的舒适宽度判断；最窄时（约 800 以下）搜索框再缩到只放下简短占位文字。判断只用不随档位变化的量（各部分的首选/最小宽度），避免绑定循环。
     // 进程页、启动项页、服务页各有自己的搜索框（同一位置，按页面显示其一）。
-    private property <bool> search-page: root.page == 0 || root.page == 3 || root.page == 4;
+    private property <bool> search-page: root.page == 0 || root.page == 3 || root.page == 4 || root.page == 5;
     private property <string> search-hint: root.page == 3 ? @tr("搜索名称或发布者（Ctrl+F）")
         : root.page == 4 ? @tr("搜索服务（Ctrl+F）")
+        : root.page == 5 ? @tr("搜索进程、地址或端口（Ctrl+F）")
         : @tr("搜索名称或 PID（Ctrl+F）");
     private property <string> search-hint-short: root.page == 3 ? @tr("搜索启动项")
         : root.page == 4 ? @tr("搜索服务")
+        : root.page == 5 ? @tr("搜索连接")
         : @tr("搜索进程");
     private property <string> elevate-text: @tr("以管理员身份重启");
     private property <string> mini-text: @tr("迷你模式（Ctrl+M）");
@@ -319,9 +323,13 @@ export component AppWindow inherits Window {
         }
     }
 
-    // Ctrl+1…5 对应的页面编号（侧边栏顺序：进程 0、性能 1、启动项 3、服务 4、设置 2）；其他文字返回 -1。
+    // Ctrl+1…6 对应的页面编号（侧边栏顺序：进程 0、性能 1、启动项 3、服务 4、连接 5、设置 2）；其他文字返回 -1。
     pure function shortcut-page(text: string) -> int {
-        return text == "1" ? 0 : text == "2" ? 1 : text == "3" ? 3 : text == "4" ? 4 : text == "5" ? 2 : -1;
+        return text == "1" ? 0 : text == "2" ? 1 : text == "3" ? 3 : text == "4" ? 4 : text == "5" ? 5 : text == "6" ? 2 : -1;
+    }
+    // 供单测读取快捷键映射。
+    public pure function shortcut-page-of(text: string) -> int {
+        return root.shortcut-page(text);
     }
 
     // 快捷键切页：进入设置页前记下来源页（与点侧边栏一致），并把焦点还给列表，避免继续留在已隐藏的搜索框里。
@@ -341,6 +349,9 @@ export component AppWindow inherits Window {
         } else if root.page == 4 {
             services-search.focus();
             services-search.select-all();
+        } else if root.page == 5 {
+            connections-search.focus();
+            connections-search.select-all();
         } else {
             root.page = 0;
             search.focus();
@@ -365,6 +376,12 @@ export component AppWindow inherits Window {
         if root.page == 4 && services-search.has-focus {
             ServiceData.filter = "";
             ServiceData.filter-edited();
+            keys.focus();
+            return true;
+        }
+        if root.page == 5 && connections-search.has-focus {
+            ConnectionData.filter = "";
+            ConnectionData.filter-edited();
             keys.focus();
             return true;
         }
@@ -405,6 +422,8 @@ export component AppWindow inherits Window {
             StartupData.refresh();
         } else if root.page == 4 {
             ServiceData.refresh();
+        } else if root.page == 5 {
+            ConnectionData.refresh();
         } else if root.page == 2 {
             SettingsData.refresh();
         } else {
@@ -652,6 +671,25 @@ export component AppWindow inherits Window {
                                                 root.ui-event("search-focus page=4 focused=" + (self.has-focus ? "1" : "0"));
                                             }
                                         }
+
+                                        connections-search := LineEdit {
+                                            x: 0px;
+                                            y: 0px;
+                                            width: parent.width;
+                                            height: parent.height;
+                                            visible: root.page == 5;
+                                            placeholder-text: self.width >= 219.5px ? root.search-hint : root.search-hint-short;
+                                            text <=> ConnectionData.filter;
+                                            edited(text) => {
+                                                ConnectionData.filter-edited();
+                                            }
+                                            accepted => {
+                                                keys.focus();
+                                            }
+                                            changed has-focus => {
+                                                root.ui-event("search-focus page=5 focused=" + (self.has-focus ? "1" : "0"));
+                                            }
+                                        }
                                     }
                                 }
 
@@ -857,6 +895,7 @@ export component AppWindow inherits Window {
 
                         if root.page == 3: StartupPage { }
                         if root.page == 4: ServicesPage { }
+                        if root.page == 5: ConnectionsPage { }
                         if root.page == 2: SettingsPage {
                             elevated: root.elevated;
                             pinned <=> root.pinned;

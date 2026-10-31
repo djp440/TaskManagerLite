@@ -1,0 +1,104 @@
+import { Button, Palette, ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { HeaderCell } from "process-page.slint";
+// 一条连接（#77）。can-goto：PID 不为 0 且当前进程快照里有该进程，“转到进程”才可用。
+export struct ConnectionRow { name: string, pid: int, protocol: string, local: string, remote: string, state: string, can-goto: bool }
+// 连接页的数据与回调，由 Rust 维护（见 controller/connections_page.rs）。
+export global ConnectionData {
+    in property <[ConnectionRow]> rows;
+    in-out property <int> selected: -1;
+    // 0 进程名，1 PID，2 协议，3 本地地址，4 远程地址，5 状态。
+    in-out property <int> sort-key;
+    in-out property <bool> descending;
+    in property <string> note;
+    // 搜索文字，由工具栏的搜索框双向绑定；编辑后 Rust 重新过滤。
+    in-out property <string> filter;
+    callback filter-edited();
+    // 进入页面与 F5：重新枚举。
+    callback refresh();
+    callback sort(int);
+    callback goto-process();
+}
+component Cell inherits Rectangle {
+    in property <string> text;
+    in property <bool> right;
+    Text { x: 10px; width: parent.width - 20px; height: 100%; text: root.text; overflow: elide; vertical-alignment: center; horizontal-alignment: root.right ? TextHorizontalAlignment.right : TextHorizontalAlignment.left; color: Palette.foreground; }
+}
+export component ConnectionsPage inherits Rectangle {
+    private property <bool> has-selection: ConnectionData.selected >= 0 && ConnectionData.selected < ConnectionData.rows.length;
+    private property <ConnectionRow> current: root.has-selection ? ConnectionData.rows[ConnectionData.selected] : { };
+    init => { ConnectionData.refresh(); }
+    background: Theme.surface;
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            height: 34px;
+            background: Theme.surface-raised;
+            HorizontalLayout {
+                padding-left: 10px; padding-right: 10px; spacing: 0px;
+                HeaderCell { text: @tr("进程名"); min-width: 110px; horizontal-stretch: 1; align: left; resizable: false; active: ConnectionData.sort-key == 0; descending: ConnectionData.descending; clicked => { ConnectionData.sort(0); } }
+                HeaderCell { text: "PID"; width: 72px; resizable: false; active: ConnectionData.sort-key == 1; descending: ConnectionData.descending; clicked => { ConnectionData.sort(1); } }
+                HeaderCell { text: @tr("协议"); width: 64px; align: left; resizable: false; active: ConnectionData.sort-key == 2; descending: ConnectionData.descending; clicked => { ConnectionData.sort(2); } }
+                HeaderCell { text: @tr("本地地址"); min-width: 130px; horizontal-stretch: 1; align: left; resizable: false; active: ConnectionData.sort-key == 3; descending: ConnectionData.descending; clicked => { ConnectionData.sort(3); } }
+                HeaderCell { text: @tr("远程地址"); min-width: 130px; horizontal-stretch: 1; align: left; resizable: false; active: ConnectionData.sort-key == 4; descending: ConnectionData.descending; clicked => { ConnectionData.sort(4); } }
+                HeaderCell { text: @tr("状态"); width: 86px; align: left; resizable: false; active: ConnectionData.sort-key == 5; descending: ConnectionData.descending; clicked => { ConnectionData.sort(5); } }
+            }
+        }
+        ListView {
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+            for row[i] in ConnectionData.rows: Rectangle {
+                height: Theme.row-height;
+                background: ConnectionData.selected == i ? Theme.selected : touch.has-hover ? Theme.hover : transparent;
+                menu := ContextMenuArea {
+                    width: 100%;
+                    height: 100%;
+                    Menu {
+                        MenuItem {
+                            title: @tr("转到进程");
+                            enabled: row.can-goto;
+                            activated => { ConnectionData.goto-process(); }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    padding-left: 10px; padding-right: 10px; spacing: 0px;
+                    Cell { text: row.name; min-width: 110px; horizontal-stretch: 1; }
+                    Cell { text: "\{row.pid}"; width: 72px; right: true; }
+                    Cell { text: row.protocol; width: 64px; }
+                    Cell { text: row.local; min-width: 130px; horizontal-stretch: 1; }
+                    Cell { text: row.remote; min-width: 130px; horizontal-stretch: 1; }
+                    Cell { text: row.state; width: 86px; }
+                }
+                touch := TouchArea {
+                    // TouchArea 会吞掉右键：右键按下时选中该行并弹出菜单。
+                    pointer-event(e) => {
+                        if e.button == PointerEventButton.right && e.kind == PointerEventKind.down {
+                            ConnectionData.selected = i;
+                            menu.show({ x: self.mouse-x, y: self.mouse-y });
+                        }
+                    }
+                    clicked => { ConnectionData.selected = i; }
+                    double-clicked => { ConnectionData.selected = i; ConnectionData.goto-process(); }
+                }
+            }
+        }
+        Rectangle {
+            height: 52px;
+            Rectangle { x: 0px; y: 0px; width: 100%; height: 1px; background: Theme.divider; }
+            HorizontalLayout {
+                padding: 10px; spacing: 8px;
+                Text { text: ConnectionData.note; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; color: Theme.subtle-text; }
+                Rectangle {
+                    width: goto.preferred-width;
+                    goto := Button {
+                        y: (parent.height - self.height) / 2; height: 32px;
+                        text: @tr("转到进程");
+                        enabled: root.has-selection && root.current.can-goto;
+                        clicked => { ConnectionData.goto-process(); }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -305,7 +305,7 @@ export component SettingsPage inherits Rectangle {
                 title: @tr("键盘快捷键");
                 SettingRow {
                     title: @tr("搜索");
-                    description: @tr("进程、启动项、服务页：聚焦搜索框。其他页面跳到进程页的搜索框。");
+                    description: @tr("进程、启动项、服务、连接页：聚焦搜索框。其他页面跳到进程页的搜索框。");
                     KeyCap {
                         text: "Ctrl+F";
                     }
@@ -321,15 +321,15 @@ export component SettingsPage inherits Rectangle {
 
                 SettingRow {
                     title: @tr("切换页面");
-                    description: @tr("依次为进程、性能、启动项、服务、设置。");
+                    description: @tr("依次为进程、性能、启动项、服务、连接、设置。");
                     KeyCap {
-                        text: "Ctrl+1 … 5";
+                        text: "Ctrl+1 … 6";
                     }
                 }
 
                 SettingRow {
                     title: @tr("立即刷新当前页");
-                    description: @tr("进程、性能页立即采样一次；启动项、服务页重新枚举。");
+                    description: @tr("进程、性能页立即采样一次；启动项、服务、连接页重新枚举。");
                     KeyCap {
                         text: "F5";
                     }

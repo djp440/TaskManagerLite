@@ -16,6 +16,7 @@ use tml_core::{
 };
 
 mod columns;
+mod connections_page;
 mod cpu;
 mod export;
 mod graph_hover;
@@ -77,6 +78,8 @@ pub struct Controller {
     /// 启动项页：最近一次枚举到的全部启动项与图标（未过滤）。
     startup_all: RefCell<Vec<(tml_core::startup::Entry, Option<tml_core::IconBitmap>)>>,
     services: services_page::ServicesState,
+    /// 连接页（#77）。
+    connections: connections_page::ConnectionsState,
     export: export::ExportState,
     /// 性能曲线悬停提示的鼠标位置与显示状态（#81）。
     hover: graph_hover::HoverState,
@@ -312,6 +315,7 @@ impl Controller {
             startup_entries: RefCell::new(Vec::new()),
             startup_all: RefCell::new(Vec::new()),
             services: Default::default(),
+            connections: Default::default(),
             export: Default::default(),
             hover: Default::default(),
             affinity_target: RefCell::new(None),
@@ -365,6 +369,7 @@ impl Controller {
         c.bind_settings(ui);
         c.bind_startup(ui);
         c.bind_services(ui);
+        c.bind_connections(ui);
         c.bind_run_task(ui);
         c.bind_process_control(ui);
         c.bind_suspend(ui);
@@ -981,6 +986,7 @@ impl Controller {
             self.track_info();
             self.refresh_rows();
             self.services_tick();
+            self.connections_tick();
         }
     }
 
