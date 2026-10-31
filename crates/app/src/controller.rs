@@ -18,6 +18,7 @@ use tml_core::{
 mod columns;
 mod cpu;
 mod export;
+mod graph_hover;
 mod memory;
 mod mini;
 mod process_control;
@@ -77,6 +78,8 @@ pub struct Controller {
     startup_all: RefCell<Vec<(tml_core::startup::Entry, Option<tml_core::IconBitmap>)>>,
     services: services_page::ServicesState,
     export: export::ExportState,
+    /// 性能曲线悬停提示的鼠标位置与显示状态（#81）。
+    hover: graph_hover::HoverState,
     /// “设置亲和性”对话框当前针对的进程。
     affinity_target: RefCell<Option<ProcessKey>>,
     /// 效率模式的优先级联动记忆与待确认的批量操作（#68）。
@@ -152,6 +155,10 @@ struct State {
     background: bool,
     /// 恢复可见后的下一次完整采样把曲线连续性写进日志（供自动化验收核对）。
     report_history: bool,
+    /// 曲线峰值进程的名称表（#81）：每个历史点只存一个小标识，名字在这里去重保存。
+    peak_names: crate::peak::ProcNames,
+    /// 最近一次画详情大图时的时间基准、量程与区域尺寸，悬停提示据此定位（#81）。
+    drawn: Cell<Option<graph_hover::Drawn>>,
     /// 等待用户确认要结束的进程，按结束顺序排列。
     pending: Vec<ProcessKey>,
     first_data: bool,
@@ -306,6 +313,7 @@ impl Controller {
             startup_all: RefCell::new(Vec::new()),
             services: Default::default(),
             export: Default::default(),
+            hover: Default::default(),
             affinity_target: RefCell::new(None),
             eco: Default::default(),
             suspend: Default::default(),
@@ -362,6 +370,7 @@ impl Controller {
         c.bind_suspend(ui);
         c.bind_window_ops(ui);
         c.bind_export(ui);
+        c.bind_graph_hover(ui);
         ui.set_pinned(settings.always_on_top);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
         if settings.interval_index != 1 {
@@ -912,8 +921,20 @@ impl Controller {
             }
             // 首次采样没有基线，CPU、磁盘、网络都是 0，不画进曲线。
             if s.first_data {
+                // 这次采样 CPU、磁盘占用最高的进程（#81）：采样线程单次扫描已选出，这里只做一次哈希查找，
+                // 同一进程连续成为峰值时不分配；只采系统指标的采样没有进程快照，也就没有峰值进程。
+                let mut who_of = |at: Option<usize>| {
+                    at.and_then(|i| sample.snapshot.processes.get(i))
+                        .map_or(crate::peak::NO_PROC, |p| s.peak_names.intern(p.key, &p.name))
+                };
+                let (cpu_who, disk_who) = (who_of(sample.peaks.cpu), who_of(sample.peaks.disk));
                 for (id, value) in &sample.readings {
-                    s.resources.push(id, now, if resumed { None } else { *value });
+                    let who = match id.as_str() {
+                        resources::CPU => cpu_who,
+                        id if id == resources::DISK || id.starts_with("disk:") => disk_who,
+                        _ => crate::peak::NO_PROC,
+                    };
+                    s.resources.push_with(id, now, if resumed { None } else { *value }, who);
                 }
                 // 恢复后的第一份差值覆盖了暂停区间，只用来刷新读数与基线，不计入窗口统计。
                 if !resumed {
@@ -1118,6 +1139,10 @@ impl Controller {
                         )
                     }
                 };
+                // 悬停提示（#81）按这一次画曲线用的时间基准与量程定位。
+                if !s.mini && s.resources.selected() == inst.id {
+                    s.drawn.set(Some(graph_hover::Drawn { now, scale, size: detail }));
+                }
                 // 迷你模式下完整窗口隐藏，详情大图不画；回到完整模式时 redraw_graphs 立即补画。
                 let (line, area) = if s.mini || s.resources.selected() != inst.id {
                     Default::default()
@@ -1205,6 +1230,7 @@ impl Controller {
             })
             .collect();
         self.apply_resources(s, rows);
+        self.refresh_hover(s);
         if s.mini {
             return;
         }

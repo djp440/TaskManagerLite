@@ -356,9 +356,15 @@ impl ResourceSet {
         &self.histories[id]
     }
 
+    #[cfg(test)]
     pub fn push(&mut self, id: &str, at: Instant, value: Option<f64>) {
+        self.push_with(id, at, value, crate::peak::NO_PROC);
+    }
+
+    /// 同 `push`，并记下这次采样时占用最高的进程（#81，只有 CPU、磁盘曲线有）。
+    pub fn push_with(&mut self, id: &str, at: Instant, value: Option<f64>, who: crate::peak::ProcId) {
         if let Some(h) = self.histories.get_mut(id) {
-            h.push(at, value);
+            h.push_with(at, value, who);
         }
     }
 

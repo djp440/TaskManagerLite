@@ -1,6 +1,6 @@
 import { Button, Palette, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Resource, ResourceKind, ResourceTint } from "types.slint";
+import { GraphHover, Resource, ResourceKind, ResourceTint } from "types.slint";
 import { MemoryDetail, MemoryView } from "memory-detail.slint";
 import { CpuCoreGrid, CpuData, CpuDetail, CpuModeSwitch, Segment } from "cpu-detail.slint";
 
@@ -45,6 +45,53 @@ component Graph inherits Rectangle {
         fit: fill;
         stroke: root.tint;
         stroke-width: 1.5px;
+    }
+}
+
+// 曲线悬停提示（#81）：竖直引导线随鼠标 x 走，曲线上的圆点标出提示对应的那个点，提示卡片放在引导线一侧
+// （靠右时翻到左侧，不压住最新的数据）。位置都由 Rust 算好；覆盖层本身不接收鼠标事件。
+component GraphHoverOverlay inherits Rectangle {
+    in property <GraphHover> hover;
+    in property <color> tint;
+
+    Rectangle {
+        x: root.hover.guide-x - 0.5px;
+        width: 1px;
+        background: Palette.foreground.with-alpha(0.4);
+    }
+
+    if root.hover.dot-visible: Rectangle {
+        x: root.hover.dot-x - 4px;
+        y: root.hover.dot-y - 4px;
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: root.tint;
+        border-width: 1.5px;
+        border-color: Theme.popup;
+    }
+
+    Rectangle {
+        x: root.hover.card-x;
+        y: root.hover.card-y;
+        width: root.hover.card-width;
+        height: root.hover.card-height;
+        border-radius: 6px;
+        background: Theme.popup;
+        border-width: 1px;
+        border-color: Theme.popup-border;
+        VerticalLayout {
+            padding: 8px;
+            for line[i] in root.hover.lines: Text {
+                height: 17px;
+                text: line;
+                font-size: 12px;
+                font-weight: i == 0 ? 600 : 400;
+                color: i == 0 ? Palette.foreground : Theme.subtle-text;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
     }
 }
 
@@ -166,7 +213,14 @@ export component PerformancePage inherits Rectangle {
     in property <MemoryView> memory;
     out property <length> graph-width: detail-graph.width;
     out property <length> graph-height: detail-graph.height;
+    // 曲线区域左上角在窗口中的位置（离屏截图与自动化测试把鼠标放到曲线上用）。
+    out property <length> graph-x: detail-graph.absolute-position.x;
+    out property <length> graph-y: detail-graph.absolute-position.y;
     callback graph-resized();
+    // 曲线悬停提示（#81）：鼠标在曲线区域内的位置（逻辑像素）与离开；提示内容由 Rust 按当前曲线、时间窗口算好后写回 hover。
+    in property <GraphHover> hover;
+    callback hover-moved(length, length);
+    callback hover-left();
 
     changed graph-width => {
         root.graph-resized();
@@ -278,6 +332,27 @@ export component PerformancePage inherits Rectangle {
                     }
 
                     if root.core-grid: CpuCoreGrid { }
+
+                    // 逻辑处理器小图没有悬停提示（每个小图太小）；整体曲线、内存、磁盘、网络、GPU 有。
+                    hover-touch := TouchArea {
+                        enabled: !root.core-grid;
+                        changed mouse-x => {
+                            root.hover-moved(self.mouse-x, self.mouse-y);
+                        }
+                        changed mouse-y => {
+                            root.hover-moved(self.mouse-x, self.mouse-y);
+                        }
+                        changed has-hover => {
+                            if !self.has-hover {
+                                root.hover-left();
+                            }
+                        }
+                    }
+
+                    if hover-touch.has-hover && root.hover.active && !root.core-grid: GraphHoverOverlay {
+                        hover: root.hover;
+                        tint: root.tint;
+                    }
                 }
 
                 HorizontalLayout {

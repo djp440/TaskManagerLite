@@ -118,6 +118,52 @@ pub fn window_name(window: crate::history::Window) -> &'static str {
     }
 }
 
+/// 曲线悬停提示里的“N 秒前”（#81）。不足 1 分钟按秒，不足 1 小时按“M 分 S 秒”，再长按“H 小时 M 分”；
+/// `approx` 为真（聚合点代表一段时间）时前面加“约”。
+pub fn hover_ago(secs: f64, approx: bool) -> String {
+    let n = secs.max(0.0).round() as u64;
+    let text = match n {
+        0..=59 => format!("{n} 秒前"),
+        60..=3599 => match n % 60 {
+            0 => format!("{} 分钟前", n / 60),
+            s => format!("{} 分 {s} 秒前", n / 60),
+        },
+        _ => match n % 3600 / 60 {
+            0 => format!("{} 小时前", n / 3600),
+            m => format!("{} 小时 {m} 分前", n / 3600),
+        },
+    };
+    if approx { format!("约 {text}") } else { text }
+}
+
+/// 悬停处没有数据（采样暂停、窗口不可见且没开后台继续采样，或曲线尚未覆盖到这里）。
+pub fn hover_no_data() -> &'static str {
+    "该时刻没有数据"
+}
+
+/// 聚合点的说明：每个点覆盖的秒数，数值取这段时间内的最大值。
+pub fn hover_bucket(bucket_secs: u64) -> String {
+    format!("每点 {bucket_secs} 秒")
+}
+
+pub fn hover_peak(value: &str) -> String {
+    format!("峰值 {value}")
+}
+
+pub fn hover_mean(value: &str) -> String {
+    format!("均值 {value}")
+}
+
+/// 悬停时刻占用最高的进程。磁盘速率是整机口径（进程的读写不区分物理磁盘），有多块磁盘时注明。
+pub fn hover_top_process(kind: crate::ResourceKind, multi_disk: bool, name: &str, pid: u32) -> String {
+    let label = match kind {
+        crate::ResourceKind::Disk if multi_disk => "全部磁盘读写最高",
+        crate::ResourceKind::Disk => "读写最高",
+        _ => "CPU 最高",
+    };
+    format!("{label}：{name}（PID {pid}）")
+}
+
 /// 物理磁盘介质类型（性能页磁盘详情）。
 pub fn media_type(kind: MediaType) -> &'static str {
     match kind {

@@ -6,11 +6,16 @@
 //! - 所有点按时间戳定位（距“现在”多少秒），而不是按个数，所以采样间隔改变、暂停、窗口不可见之后
 //!   时间轴依然正确。采样中断（暂停、窗口不可见）用“空点”标记，绘制时在此断开，断档处留空不连线。
 //!
+//! - CPU、磁盘曲线的每个点还带一个峰值进程标识（`ProcId`，4 字节，名字在 `peak::ProcNames`）；聚合桶里记的是
+//!   桶内峰值那次采样对应的进程。悬停提示（#81）按 x 位置找到曲线实际绘制的那个点，读出数值、均值与进程。
+//!
 //! 仅存内存，不落盘。纯逻辑，不依赖界面，可直接单测。
 
 use std::collections::VecDeque;
 use std::fmt::Write;
 use std::time::{Duration, Instant};
+
+use crate::peak::{NO_PROC, ProcId};
 
 /// 性能页曲线的时间窗口。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -58,6 +63,11 @@ impl Window {
         Window::ALL.iter().copied().find(|w| w.key() == s)
     }
 
+    /// 聚合桶宽（秒）；60 秒窗口读原始采样，没有桶。
+    pub fn bucket_secs(self) -> Option<u64> {
+        self.layer().map(|i| BUCKET_MS[i] / 1000)
+    }
+
     /// 聚合层的下标；60 秒窗口直接读原始层。
     fn layer(self) -> Option<usize> {
         match self {
@@ -81,6 +91,8 @@ struct Bucket {
     t: u64,
     max: f32,
     mean: f32,
+    /// 桶内取得最大值的那次采样的峰值进程。
+    who: ProcId,
 }
 
 impl Bucket {
@@ -110,20 +122,24 @@ impl Layer {
         (self.span_ms / self.bucket_ms) as usize * 2 + 4
     }
 
-    fn push(&mut self, t: u64, value: Option<f64>) {
+    fn push(&mut self, t: u64, value: Option<f64>, who: ProcId) {
         match value.filter(|v| v.is_finite()) {
             Some(v) => {
                 let id = t / self.bucket_ms;
                 match self.buckets.back_mut() {
                     Some(b) if self.open == id => {
                         b.t = t;
-                        b.max = b.max.max(v as f32);
+                        // 只在刷新最大值时换进程；并列且之前没有记录时补上。
+                        if v as f32 > b.max || (v as f32 == b.max && b.who == NO_PROC) {
+                            b.max = v as f32;
+                            b.who = who;
+                        }
                         self.sum += v;
                         self.count += 1;
                         b.mean = (self.sum / f64::from(self.count)) as f32;
                     }
                     _ => {
-                        self.buckets.push_back(Bucket { t, max: v as f32, mean: v as f32 });
+                        self.buckets.push_back(Bucket { t, max: v as f32, mean: v as f32, who });
                         self.open = id;
                         self.sum = v;
                         self.count = 1;
@@ -134,7 +150,7 @@ impl Layer {
                 self.open = u64::MAX;
                 // 开头的断点与连续的断点没有意义。
                 if self.buckets.back().is_some_and(|b| !b.is_gap()) {
-                    self.buckets.push_back(Bucket { t, max: f32::NAN, mean: f32::NAN });
+                    self.buckets.push_back(Bucket { t, max: f32::NAN, mean: f32::NAN, who: NO_PROC });
                 }
             }
         }
@@ -148,11 +164,19 @@ impl Layer {
     }
 }
 
+/// 原始层的一个采样点。
+#[derive(Clone, Copy, Debug)]
+struct Raw {
+    at: Instant,
+    value: Option<f64>,
+    who: ProcId,
+}
+
 /// 一类资源最近一段时间的取值。`None` 表示采样中断（窗口不可见或暂停），曲线在此断开。
 pub struct History {
     origin: Option<Instant>,
     /// 原始层：最近 60 秒。
-    points: VecDeque<(Instant, Option<f64>)>,
+    points: VecDeque<Raw>,
     layers: [Layer; 3],
 }
 
@@ -169,19 +193,48 @@ impl Default for History {
 /// 原始层保留的时长。
 const RAW_WINDOW: Duration = Duration::from_secs(60);
 
-/// 一段窗口内的数据，统一成“距现在多少秒、取值”的点序列，`None` 是断点。
-type Point = Option<(f64, f64)>;
+/// 曲线上一个实际绘制的点：距“现在”多少秒、取值（长窗口为桶内最大值）、桶均值与峰值进程。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pt {
+    pub age: f64,
+    pub max: f64,
+    /// 原始层的点没有聚合，均值等于取值。
+    pub mean: f64,
+    pub who: ProcId,
+}
+
+/// 一段窗口内的数据，统一成点序列，`None` 是断点。
+type Point = Option<Pt>;
+
+/// 悬停定位的结果。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Hover {
+    /// 鼠标所在位置对应曲线上的这个点。
+    Point(Pt),
+    /// 鼠标在断档（暂停、窗口不可见）里，或在最早的点之前、最新的点之后太远处：该处没有数据。
+    NoData,
+}
+
+/// 原始层：鼠标落在最新的点右侧不超过它时仍算该点（采样间隔最长 2 秒，留出抖动）。
+const RAW_END_REACH_SECS: f64 = 3.0;
+/// 原始层：鼠标落在断档边缘或最早的点之前不超过它时仍算边缘的点。
+const RAW_EDGE_REACH_SECS: f64 = 1.0;
 
 impl History {
     pub fn push(&mut self, at: Instant, value: Option<f64>) {
+        self.push_with(at, value, NO_PROC);
+    }
+
+    /// 写入一个点，并记下这次采样时的峰值进程（没有则 `NO_PROC`）。热路径：每层只做 O(1) 更新，不分配。
+    pub fn push_with(&mut self, at: Instant, value: Option<f64>, who: ProcId) {
         let origin = *self.origin.get_or_insert(at);
         let t = at.saturating_duration_since(origin).as_millis() as u64;
         for layer in &mut self.layers {
-            layer.push(t, value);
+            layer.push(t, value, who);
         }
-        self.points.push_back((at, value));
+        self.points.push_back(Raw { at, value, who });
         // 保留一个窗口外的点，让曲线从左边缘连续进入。
-        while self.points.len() > 2 && at.duration_since(self.points[1].0) > RAW_WINDOW {
+        while self.points.len() > 2 && at.duration_since(self.points[1].at) > RAW_WINDOW {
             self.points.pop_front();
         }
     }
@@ -192,23 +245,77 @@ impl History {
         let raw = window.layer().is_none();
         let origin = self.origin;
         let layer = window.layer().map(|i| &self.layers[i]);
-        let raw_points = self.points.iter().take(if raw { self.points.len() } else { 0 }).map(move |&(at, v)| {
-            v.map(|v| (now.saturating_duration_since(at).as_secs_f64(), v))
+        let raw_points = self.points.iter().take(if raw { self.points.len() } else { 0 }).map(move |r| {
+            r.value.map(|v| Pt { age: now.saturating_duration_since(r.at).as_secs_f64(), max: v, mean: v, who: r.who })
         });
         let layer_points = layer.into_iter().flat_map(|l| l.buckets.iter()).filter_map(move |b| {
             let origin = origin?;
             Some((!b.is_gap()).then(|| {
                 let at = origin + Duration::from_millis(b.t);
-                (now.saturating_duration_since(at).as_secs_f64(), f64::from(b.max))
+                Pt {
+                    age: now.saturating_duration_since(at).as_secs_f64(),
+                    max: f64::from(b.max),
+                    mean: f64::from(b.mean),
+                    who: b.who,
+                }
             }))
         });
         raw_points.chain(layer_points)
     }
 
+    /// 悬停定位（#81）：`age` 是鼠标位置对应的“距现在多少秒”（右边缘为 0，左边缘为窗口时长）。
+    /// 返回曲线上实际绘制的、离鼠标最近的那个点（长窗口是该桶：最大值、均值与峰值进程）。
+    ///
+    /// - 两侧都有点且之间没有断档：取更近的一个；窗口左边缘之外、仅用于连线的那个点不会被选中。
+    /// - 鼠标落在断档里：两侧的点离鼠标都超过 `edge_reach`（原始层 1 秒，长窗口一个桶宽）则没有数据；
+    ///   断档边缘附近仍算断档外的那个点，否则 1 像素的偏差就会让提示忽有忽无。
+    /// - 鼠标在最早的点之前：同样按 `edge_reach`；在最新的点之后：按 `end_reach`（最新的点可能比“现在”旧一个采样间隔）。
+    pub fn hover(&self, now: Instant, window: Window, age: f64) -> Hover {
+        let span = window.duration().as_secs_f64();
+        let bucket = window.bucket_secs().map(|b| b as f64);
+        let edge_reach = bucket.unwrap_or(RAW_EDGE_REACH_SECS);
+        let end_reach = bucket.unwrap_or(0.0).max(RAW_END_REACH_SECS);
+        let age = age.clamp(0.0, span);
+        // 最后一个比鼠标更旧的点，以及它与当前位置之间是否隔着断档。
+        let mut older: Option<Pt> = None;
+        let mut gap = false;
+        let mut newer: Option<Pt> = None;
+        for p in self.series(now, window) {
+            match p {
+                None => gap = true,
+                Some(p) if p.age > age => {
+                    older = Some(p);
+                    gap = false;
+                }
+                Some(p) => {
+                    newer = Some(p);
+                    break;
+                }
+            }
+        }
+        let nearest = |o: Option<Pt>, n: Option<Pt>, reach: f64| {
+            let candidates = [o.map(|o| (o.age - age, o)), n.map(|n| (age - n.age, n))];
+            candidates
+                .into_iter()
+                .flatten()
+                .filter(|(d, _)| *d <= reach)
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map_or(Hover::NoData, |(_, p)| Hover::Point(p))
+        };
+        match (older, newer) {
+            (Some(o), Some(n)) if !gap => {
+                // 并列时取更新的点。
+                if o.age <= span && o.age - age < age - n.age { Hover::Point(o) } else { Hover::Point(n) }
+            }
+            (o, Some(n)) => nearest(o.filter(|o| o.age <= span), Some(n), edge_reach),
+            (o, None) => nearest(o.filter(|o| o.age <= span), None, end_reach),
+        }
+    }
+
     /// 供日志核对曲线是否连续：(点数, 断点数, 相邻记录之间的最大间隔)。原始层。
     pub fn stats(&self) -> (usize, usize, Duration) {
-        let gaps = self.points.iter().filter(|p| p.1.is_none()).count();
-        let step = self.points.iter().zip(self.points.iter().skip(1)).map(|(a, b)| b.0.duration_since(a.0)).max();
+        let gaps = self.points.iter().filter(|p| p.value.is_none()).count();
+        let step = self.points.iter().zip(self.points.iter().skip(1)).map(|(a, b)| b.at.duration_since(a.at)).max();
         (self.points.len(), gaps, step.unwrap_or_default())
     }
 
@@ -218,9 +325,9 @@ impl History {
         let (mut points, mut gaps, mut oldest) = (0, 0, 0f64);
         for p in self.series(now, window) {
             match p {
-                Some((age, _)) => {
+                Some(pt) => {
                     points += 1;
-                    oldest = oldest.max(age);
+                    oldest = oldest.max(pt.age);
                 }
                 None => gaps += 1,
             }
@@ -244,14 +351,14 @@ impl History {
 
     /// 估算占用的堆内存（字节）：各层缓冲区容量之和。
     pub fn heap_bytes(&self) -> usize {
-        self.points.capacity() * std::mem::size_of::<(Instant, Option<f64>)>()
+        self.points.capacity() * std::mem::size_of::<Raw>()
             + self.layers.iter().map(|l| l.buckets.capacity() * std::mem::size_of::<Bucket>()).sum::<usize>()
     }
 
     /// 只统计最近 60 秒内的有效样本，不含用于左边缘连线的过期点。
     pub fn window_stats(&self, now: Instant) -> Option<(f64, f64, f64)> {
-        let values: Vec<_> = self.points.iter().filter(|(at,_)| now.saturating_duration_since(*at) <= RAW_WINDOW)
-            .filter_map(|(_,v)| *v).filter(|v| v.is_finite()).collect();
+        let values: Vec<_> = self.points.iter().filter(|r| now.saturating_duration_since(r.at) <= RAW_WINDOW)
+            .filter_map(|r| r.value).filter(|v| v.is_finite()).collect();
         if values.is_empty() { return None; }
         Some((values.iter().copied().fold(f64::INFINITY, f64::min), values.iter().copied().fold(0.0, f64::max), values.iter().sum::<f64>() / values.len() as f64))
     }
@@ -277,16 +384,16 @@ impl History {
     pub fn samples(&self, now: Instant) -> Vec<(f64, f64)> {
         self.points
             .iter()
-            .filter_map(|&(at, v)| {
-                let age = now.saturating_duration_since(at);
-                v.filter(|v| v.is_finite() && age <= RAW_WINDOW).map(|v| (age.as_secs_f64(), v))
+            .filter_map(|r| {
+                let age = now.saturating_duration_since(r.at);
+                r.value.filter(|v| v.is_finite() && age <= RAW_WINDOW).map(|v| (age.as_secs_f64(), v))
             })
             .collect()
     }
 
     /// 指定窗口内的最大值（较长窗口取聚合层的最大值），用来给纵轴定量程。
     pub fn max_in(&self, now: Instant, window: Window) -> f64 {
-        self.series(now, window).flatten().map(|(_, v)| v).fold(0.0, f64::max)
+        self.series(now, window).flatten().map(|p| p.max).fold(0.0, f64::max)
     }
 
     /// 按图表的实际尺寸（逻辑像素）生成 (折线, 填充区域) 两条 SVG 路径；`scale` 对应图表顶端的取值，
@@ -297,7 +404,7 @@ impl History {
         let mut segments: Vec<Vec<(f64, f64)>> = vec![Vec::new()];
         for p in self.series(now, window) {
             match p {
-                Some((age, v)) => {
+                Some(Pt { age, max: v, .. }) => {
                     let x = view_w * (1.0 - age / span);
                     let y = view_h * (1.0 - (v / scale).clamp(0.0, 1.0));
                     segments.last_mut().unwrap().push((x, y));
@@ -626,5 +733,165 @@ mod tests {
             assert_eq!(area, line);
             assert_eq!(h.max_in(Instant::now(), w), 0.0);
         }
+    }
+
+    // ---- 悬停定位与峰值进程（#81） ----
+
+    fn point(h: &Hover) -> Pt {
+        match h {
+            Hover::Point(p) => *p,
+            Hover::NoData => panic!("应有数据"),
+        }
+    }
+
+    /// 60 秒窗口：x 位置映射到离鼠标最近的原始采样，数值、距现在多少秒与峰值进程都取自那个采样。
+    #[test]
+    fn hover_picks_the_nearest_raw_sample_in_the_short_window() {
+        let t0 = Instant::now();
+        let mut h = History::default();
+        for s in 0..=30u64 {
+            h.push_with(t0 + S(s), Some(s as f64), 100 + s as u32);
+        }
+        let now = t0 + S(30);
+        // 恰好在某个采样上。
+        let p = point(&h.hover(now, Window::Sec60, 10.0));
+        assert_eq!((p.max, p.age, p.who), (20.0, 10.0, 120));
+        // 取更近的一侧：10.3 秒前离 10 秒前的点更近，10.7 秒前离 11 秒前的点更近。
+        assert_eq!(point(&h.hover(now, Window::Sec60, 10.3)).max, 20.0);
+        assert_eq!(point(&h.hover(now, Window::Sec60, 10.7)).max, 19.0);
+        // 最新的采样；鼠标在右边缘（0 秒前）和最新点之后不远处（采样间隔内）都算它。
+        assert_eq!(point(&h.hover(now, Window::Sec60, 0.0)).max, 30.0);
+        assert_eq!(point(&h.hover(now + MS(1500), Window::Sec60, 0.0)).max, 30.0);
+        // 离最新点太远（采样已经停了很久）没有数据。
+        assert_eq!(h.hover(now + S(10), Window::Sec60, 0.0), Hover::NoData);
+        // 曲线开始之前（窗口左端，早于第一个采样）没有数据。
+        assert_eq!(h.hover(now, Window::Sec60, 55.0), Hover::NoData);
+        // 超出窗口范围的鼠标位置按边缘处理，不会 panic。
+        assert_eq!(h.hover(now, Window::Sec60, -3.0), h.hover(now, Window::Sec60, 0.0));
+        assert_eq!(h.hover(now, Window::Sec60, 999.0), Hover::NoData);
+        // 空历史。
+        assert_eq!(History::default().hover(now, Window::Sec60, 0.0), Hover::NoData);
+    }
+
+    /// 窗口左边缘之外、仅用于连线的那个点不能被悬停选中。
+    #[test]
+    fn hover_ignores_the_offscreen_point_kept_for_edge_continuity() {
+        let t0 = Instant::now();
+        let mut h = History::default();
+        for s in 0..=100u64 {
+            h.push(t0 + S(s), Some(s as f64));
+        }
+        let now = t0 + S(100);
+        // 保留的最老点在 61 秒前之外；窗口最左端（60 秒前）选到窗口内的点。
+        let p = point(&h.hover(now, Window::Sec60, 60.0));
+        assert!(p.age <= 60.0, "{p:?}");
+        assert_eq!(p.max, 40.0);
+    }
+
+    /// 长窗口：悬停取曲线上实际绘制的那个桶，数值是桶内最大值（均值另给），位置与路径横坐标一致。
+    #[test]
+    fn hover_in_long_windows_reads_the_bucket_that_is_drawn() {
+        for (window, bucket) in [(Window::Min5, 2u64), (Window::Min10, 4), (Window::Hour1, 20)] {
+            let t0 = Instant::now();
+            let mut h = History::default();
+            for s in 0..=1200u64 {
+                // 每 100 秒一个尖峰：0.5 秒间隔的真实采样在此简化成 1 秒。
+                h.push_with(t0 + S(s), Some(if s % 100 == 50 { 90.0 } else { 10.0 }), if s % 100 == 50 { 7 } else { 1 });
+            }
+            let now = t0 + S(1200);
+            // 对每个绘制的点：鼠标放在它的横坐标上，悬停读到的就是它自己。
+            let span = window.duration().as_secs_f64();
+            let mut checked = 0;
+            for drawn in h.series(now, window).flatten().filter(|p| p.age <= span) {
+                let got = point(&h.hover(now, window, drawn.age));
+                assert_eq!(got, drawn, "{window:?}");
+                checked += 1;
+            }
+            assert!(checked > 5, "{window:?}: {checked}");
+            // 尖峰所在的桶：最大值 90、均值介于基线与尖峰之间，峰值进程是尖峰采样的进程 7，而不是桶里别的采样。
+            let spike_age = 1200.0 - 1150.0;
+            let p = point(&h.hover(now, window, spike_age));
+            assert_eq!((p.max, p.who), (90.0, 7), "{window:?}");
+            assert!(p.mean > 10.0 && p.mean < 90.0, "{window:?}: {}", p.mean);
+            assert!(p.age <= spike_age + bucket as f64 && p.age >= spike_age - bucket as f64, "{window:?}: {}", p.age);
+        }
+    }
+
+    /// 暂停留下的缺口：鼠标在缺口里没有数据，缺口两侧各自读到自己的点，缺口不会把两段“吸”在一起。
+    #[test]
+    fn hover_in_a_gap_has_no_data_in_every_window() {
+        for window in Window::ALL {
+            let t0 = Instant::now();
+            let mut h = History::default();
+            for s in 0..20u64 {
+                h.push(t0 + S(s), Some(20.0));
+            }
+            h.push(t0 + S(20), None);
+            for s in 80..100u64 {
+                h.push(t0 + S(s), Some(70.0));
+            }
+            let now = t0 + S(99);
+            // 缺口在距现在 19～79 秒之间；窗口够长时取中间 50 秒前。
+            assert_eq!(h.hover(now, window, 50.0), Hover::NoData, "{window:?}");
+            assert_eq!(h.hover(now, window, 30.0), Hover::NoData, "{window:?}");
+            assert_eq!(point(&h.hover(now, window, 5.0)).max, 70.0, "{window:?}");
+            if window != Window::Sec60 {
+                assert_eq!(point(&h.hover(now, window, 95.0)).max, 20.0, "{window:?}");
+            }
+        }
+    }
+
+    /// 聚合桶里记的是桶内峰值那次采样的进程：之后出现更小的值不换进程，更大的值换进程，并列时保留先到的。
+    #[test]
+    fn bucket_keeps_the_process_of_its_peak_sample() {
+        let t0 = Instant::now();
+        let mut h = History::default();
+        // 桶宽 2 秒：同一桶里依次来 30(进程 1)、80(进程 2)、50(进程 3)。
+        h.push_with(t0, Some(30.0), 1);
+        h.push_with(t0 + MS(500), Some(80.0), 2);
+        h.push_with(t0 + MS(1000), Some(50.0), 3);
+        let now = t0 + MS(1000);
+        let p = point(&h.hover(now, Window::Min5, 0.0));
+        assert_eq!((p.max, p.who), (80.0, 2));
+        assert!((p.mean - 160.0 / 3.0).abs() < 0.01);
+        // 并列最大值：保留先到的进程。
+        h.push_with(t0 + MS(1500), Some(80.0), 4);
+        assert_eq!(point(&h.hover(t0 + MS(1500), Window::Min5, 0.0)).who, 2);
+        // 没有进程标识的采样（只采系统指标）先到，之后并列的有标识采样补上标识。
+        let mut g = History::default();
+        g.push(t0, Some(60.0));
+        g.push_with(t0 + MS(500), Some(60.0), 9);
+        assert_eq!(point(&g.hover(t0 + MS(500), Window::Min5, 0.0)).who, 9);
+        // 原始层的点就是它自己的进程。
+        assert_eq!(point(&h.hover(t0 + MS(1500), Window::Sec60, 0.0)).who, 4);
+    }
+
+    /// 下一个桶开始后，新桶有自己的峰值进程，旧桶不受影响。
+    #[test]
+    fn each_bucket_has_its_own_peak_process() {
+        let t0 = Instant::now();
+        let mut h = History::default();
+        h.push_with(t0, Some(10.0), 1);
+        h.push_with(t0 + S(2), Some(20.0), 2);
+        h.push_with(t0 + S(4), Some(30.0), 3);
+        let now = t0 + S(4);
+        assert_eq!(point(&h.hover(now, Window::Min5, 4.0)).who, 1);
+        assert_eq!(point(&h.hover(now, Window::Min5, 2.0)).who, 2);
+        assert_eq!(point(&h.hover(now, Window::Min5, 0.0)).who, 3);
+    }
+
+    /// 热路径不分配：窗口填满、桶滚动之后，反复写入点时各层缓冲区容量不再增长。
+    #[test]
+    fn push_with_process_ids_does_not_grow_buffers_once_full() {
+        let t0 = Instant::now();
+        let mut h = History::default();
+        for s in 0..8000u64 {
+            h.push_with(t0 + S(s), Some((s % 100) as f64), (s % 7) as u32);
+        }
+        let bytes = h.heap_bytes();
+        for s in 8000..16000u64 {
+            h.push_with(t0 + S(s), Some((s % 100) as f64), (s % 7) as u32);
+        }
+        assert_eq!(h.heap_bytes(), bytes);
     }
 }

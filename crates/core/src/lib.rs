@@ -53,7 +53,7 @@ pub use procinfo::{command_line, image_path, image_path_of};
 pub use sampler::{DiskSource, Sample, Sampler, Scope};
 pub use runtask::{Command as RunCommand, RunError, expand_env, parse_command, parse_command_with, run_task};
 pub use shellops::{ShellError, reveal_in_explorer, search_online, search_url, show_properties};
-pub use snapshot::{Process, ProcessKey, ProcessSnapshot};
+pub use snapshot::{Peaks, Process, ProcessKey, ProcessSnapshot};
 pub use system::SystemMetrics;
 pub use taskmgr::{
     DebuggerValue, Ifeo, IfeoError, Registration, TEST_KEY_ENV, TEST_KEY_PREFIX, UnsafeReason,
