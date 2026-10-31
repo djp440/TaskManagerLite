@@ -66,6 +66,16 @@ export global ProcessMenu {
     in-out property <string> resume-title;
     // “转到服务”（#85）：所选进程承载服务时可用，否则置灰（菜单弹出前由 Rust 枚举判断）。
     in-out property <bool> can-goto-service;
+    // 应用窗口操作（#70）：只有分组视图的应用行显示；已处于目标状态、窗口已关闭、目标需要提权时置灰（标题里带原因）。
+    in-out property <bool> window-visible;
+    in-out property <bool> can-window-activate;
+    in-out property <bool> can-window-maximize;
+    in-out property <bool> can-window-minimize;
+    in-out property <bool> can-window-restore;
+    in-out property <string> window-activate-title;
+    in-out property <string> window-maximize-title;
+    in-out property <string> window-minimize-title;
+    in-out property <string> window-restore-title;
     callback opening();
     callback open-location();
     callback copy-path();
@@ -86,6 +96,8 @@ export global ProcessMenu {
     callback resume();
     // 切到服务页，按所选进程的 PID 过滤并选中它承载的服务。
     callback goto-service();
+    // 对所选应用行的主窗口操作：0 切换到、1 最大化、2 最小化、3 还原。
+    callback window-op(int);
 }
 
 export component HeaderCell inherits Rectangle {
@@ -220,6 +232,44 @@ component ProcRowView inherits Rectangle {
         width: 100%;
         height: 100%;
         Menu {
+            if ProcessMenu.window-visible: MenuItem {
+                title: ProcessMenu.window-activate-title;
+                enabled: ProcessMenu.can-window-activate;
+                activated => {
+                    root.select();
+                    ProcessMenu.window-op(0);
+                }
+            }
+
+            if ProcessMenu.window-visible: MenuItem {
+                title: ProcessMenu.window-maximize-title;
+                enabled: ProcessMenu.can-window-maximize;
+                activated => {
+                    root.select();
+                    ProcessMenu.window-op(1);
+                }
+            }
+
+            if ProcessMenu.window-visible: MenuItem {
+                title: ProcessMenu.window-minimize-title;
+                enabled: ProcessMenu.can-window-minimize;
+                activated => {
+                    root.select();
+                    ProcessMenu.window-op(2);
+                }
+            }
+
+            if ProcessMenu.window-visible: MenuItem {
+                title: ProcessMenu.window-restore-title;
+                enabled: ProcessMenu.can-window-restore;
+                activated => {
+                    root.select();
+                    ProcessMenu.window-op(3);
+                }
+            }
+
+            if ProcessMenu.window-visible: MenuSeparator {}
+
             MenuItem {
                 title: @tr("结束进程");
                 activated => {

@@ -14,7 +14,7 @@ use tml_core::services::{Action, ServiceError, ServiceState, StartType};
 use tml_core::startup::{SourceError, StartupError, StartupSource};
 use tml_core::{
     AutostartError, DebuggerValue, ElevationError, IfeoError, MediaType, PriorityClass, ProcessControlError, RunError,
-    ShellError, SystemError, UnsafeReason,
+    ShellError, SystemError, UnsafeReason, WindowError, WindowOp,
 };
 
 /// 服务状态（服务页“状态”列）。
@@ -255,6 +255,69 @@ pub fn resume_menu_title(block: Option<&MenuBlock>) -> &'static str {
         Some(MenuBlock::Error(ProcessControlError::Gone)) => "恢复（进程已退出）",
         Some(MenuBlock::Error(_)) => "恢复（没有权限）",
     }
+}
+
+/// 窗口操作菜单项置灰的原因（#70）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowBlock {
+    /// 窗口已处于操作的目标状态（已最大化、已最小化、本来就是正常大小）。
+    State,
+    /// 探测得到的错误（窗口已关闭、需要提权）。
+    Error(WindowError),
+}
+
+/// 窗口操作的动作名（菜单项文字与失败提示的前缀）。
+pub fn window_op_name(op: WindowOp) -> &'static str {
+    match op {
+        WindowOp::Activate => "切换到",
+        WindowOp::Maximize => "最大化",
+        WindowOp::Minimize => "最小化",
+        WindowOp::Restore => "还原",
+    }
+}
+
+/// 窗口操作菜单项的标题；置灰时括号里写原因，`None` 表示可用。
+pub fn window_menu_title(op: WindowOp, block: Option<&WindowBlock>) -> String {
+    let name = window_op_name(op);
+    let reason = match block {
+        None => return name.to_string(),
+        Some(WindowBlock::State) => match op {
+            WindowOp::Maximize => "已最大化",
+            WindowOp::Minimize => "已最小化",
+            WindowOp::Restore => "窗口已是正常大小",
+            WindowOp::Activate => "无需切换",
+        },
+        Some(WindowBlock::Error(WindowError::Gone)) => "窗口已关闭",
+        Some(WindowBlock::Error(WindowError::NeedsElevation)) => "需要提权",
+        Some(WindowBlock::Error(_)) => "无法操作该窗口",
+    };
+    format!("{name}（{reason}）")
+}
+
+/// 窗口操作失败的原因（状态栏“操作失败：{动作}（{原因}）”里的原因）。
+pub fn window_error(e: &WindowError) -> String {
+    match e {
+        WindowError::Gone => "窗口已关闭".into(),
+        WindowError::NeedsElevation => "该应用以更高权限运行，需要以管理员身份重启本程序后才能操作它的窗口".into(),
+        WindowError::NotApplied => "窗口没有响应该操作（可能不支持，或该应用以更高权限运行）".into(),
+        WindowError::System(e) => format!("系统返回错误：{e}"),
+    }
+}
+
+/// 状态栏：窗口操作已完成。
+pub fn window_done(name: &str, op: WindowOp) -> String {
+    let done = match op {
+        WindowOp::Activate => "已切换到该窗口",
+        WindowOp::Maximize => "已最大化",
+        WindowOp::Minimize => "已最小化",
+        WindowOp::Restore => "已还原",
+    };
+    format!("{name} → {done}")
+}
+
+/// 状态栏：前台锁定拒绝了“切换到”，已改为闪烁任务栏按钮。
+pub fn window_flashed(name: &str) -> String {
+    format!("{name} → 系统阻止了自动切换，已闪烁任务栏，请手动切换")
 }
 
 /// 状态栏：挂起 / 恢复的结果；单个进程只写动作结果，多个进程写成功数与失败数。

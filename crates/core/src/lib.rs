@@ -28,8 +28,9 @@ mod snapshot;
 mod system;
 mod taskmgr;
 mod view;
+mod winops;
 
-pub use apps::app_pids;
+pub use apps::{app_pids, app_windows};
 pub use autostart::{AUTOSTART_ARG, AUTOSTART_TEST_KEY_ENV, Autostart, AutostartError, AutostartKey};
 pub use clipboard::{clipboard_text, set_clipboard_text};
 pub use control::{EndError, end_process, is_elevated, relaunch_elevated};
@@ -58,6 +59,11 @@ pub use taskmgr::{
     DebuggerValue, Ifeo, IfeoError, Registration, TEST_KEY_ENV, TEST_KEY_PREFIX, UnsafeReason,
     check_install_location, debugger_value, launched_as_taskmgr_debugger, run_cli,
     set_replace_taskmgr,
+};
+pub use winops::{
+    INTEGRITY_HIGH, INTEGRITY_MEDIUM, Integrity, WindowError, WindowOp, WindowOps, WindowOutcome, WindowState, apply as apply_window_op,
+    integrity_of_pid, is_foreground, needs_elevation, ops_enabled as window_ops_enabled, probe_window,
+    succeeded as window_op_succeeded,
 };
 pub use view::{
     Group, GroupHeader, HEADER_INDEX, SortKey, Totals, ViewMode, ViewOptions, ViewRow,

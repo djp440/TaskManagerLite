@@ -1,7 +1,7 @@
 //! 界面线程上的状态与交互逻辑。
 
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,7 @@ mod services_page;
 mod settings_page;
 mod startup_page;
 mod suspend;
+mod window_ops;
 
 pub use services_page::SERVICES_PAGE;
 
@@ -120,6 +121,8 @@ struct State {
     snapshot: ProcessSnapshot,
     /// 应用进程的 PID；采样线程只在分组视图下枚举窗口，其余时候为 `None`。
     app_pids: Option<HashSet<u32>>,
+    /// 应用进程的主窗口句柄（HWND 裸值，#70 窗口操作用）；与 app_pids 同来同去。
+    app_windows: Option<HashMap<u32, isize>>,
     view: Vec<ViewRow>,
     opts: ViewOptions,
     selected: Option<ProcessKey>,
@@ -343,6 +346,7 @@ impl Controller {
         c.bind_run_task(ui);
         c.bind_process_control(ui);
         c.bind_suspend(ui);
+        c.bind_window_ops(ui);
         c.bind_export(ui);
         ui.set_pinned(settings.always_on_top);
         // 默认的 1 秒与采样线程的初始值一致，无需通知。
@@ -510,6 +514,7 @@ impl Controller {
             s.opts.mode = mode;
             if mode != ViewMode::Group {
                 s.app_pids = None;
+                s.app_windows = None;
             }
             was
         };
@@ -849,6 +854,7 @@ impl Controller {
             if fresh {
                 s.snapshot = sample.snapshot;
                 s.app_pids = sample.app_pids;
+                s.app_windows = sample.app_windows;
             }
             s.system = m;
             s.disks = sample.disks;

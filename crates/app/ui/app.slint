@@ -896,7 +896,7 @@ export component AppWindow inherits Window {
                         vertical-alignment: center;
                         overflow: elide;
                         font-size: 12px;
-                        color: root.status-kind == 1 || (root.status-kind >= 6 && root.status-kind <= 13) ? Theme.subtle-text : Theme.danger;
+                        color: root.status-kind == 1 || (root.status-kind >= 6 && root.status-kind <= 14) ? Theme.subtle-text : Theme.danger;
                         text: root.status-kind == 1 ? @tr("已结束 {0}", root.status-arg)
                             : root.status-kind == 2 ? @tr("没有权限结束 {0}，可以以管理员身份重启后再试", root.status-arg)
                             : root.status-kind == 3 ? @tr("{0} 已经退出", root.status-arg)
@@ -910,6 +910,7 @@ export component AppWindow inherits Window {
                             : root.status-kind == 11 ? @tr("已设置亲和性：{0}", root.status-arg)
                             : root.status-kind == 12 ? @tr("效率模式：{0}", root.status-arg)
                             : root.status-kind == 13 ? @tr("挂起 / 恢复：{0}", root.status-arg)
+                            : root.status-kind == 14 ? @tr("窗口：{0}", root.status-arg)
                             : "";
                     }
                 }

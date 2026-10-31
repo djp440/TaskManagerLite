@@ -896,6 +896,19 @@ pub fn run_menu_action(ui: &AppWindow, spec: &str, warmup: Duration) {
                         ui.invoke_confirm_accepted();
                     }
                 }
+"window-activate" | "window-maximize" | "window-minimize" | "window-restore" => {
+                    // 与右键菜单一致：先按弹出前的逻辑设置各项状态（应用行需要 `:group`），再触发动作；
+                    // 置灰时钩子仍触发一次，核对被拒绝的路径。
+                    menu.invoke_opening();
+                    let (op, can, title) = match action.as_str() {
+                        "window-activate" => (0, menu.get_can_window_activate(), menu.get_window_activate_title()),
+                        "window-maximize" => (1, menu.get_can_window_maximize(), menu.get_window_maximize_title()),
+                        "window-minimize" => (2, menu.get_can_window_minimize(), menu.get_window_minimize_title()),
+                        _ => (3, menu.get_can_window_restore(), menu.get_window_restore_title()),
+                    };
+                    eprintln!("{action} 菜单项 visible={} enabled={can} 标题={title}", menu.get_window_visible());
+                    menu.invoke_window_op(op);
+                }
                 "exit-prompt" | "exit-prompt-cancel" | "exit-prompt-twice" | "exit-noprompt" => {
                     if action != "exit-noprompt" {
                         menu.invoke_opening();

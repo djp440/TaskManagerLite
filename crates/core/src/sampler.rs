@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use crate::apps::app_pids;
+use crate::apps::app_windows;
 use crate::control::is_critical;
 use crate::cpu::{CpuProbe, CpuSample};
 use crate::diskio::rates;
@@ -49,6 +49,8 @@ pub struct Sample {
     pub system: SystemMetrics,
     /// 应用进程的 PID（见 [`crate::apps`]）；未开启 [`Sampler::track_apps`] 时为 `None`。
     pub app_pids: Option<HashSet<u32>>,
+    /// 应用进程的主窗口句柄（`HWND` 裸值，与 `app_pids` 同时出现，键相同；见 [`crate::app_windows`]）。
+    pub app_windows: Option<HashMap<u32, isize>>,
     pub cpu: CpuSample,
     /// 内存详情（组成、提交、内核池）。
     pub memory: MemoryStatus,
@@ -246,7 +248,8 @@ impl Sampler {
         let net_recv = networks.iter().filter(|n| n.hardware).filter_map(|n| n.recv).sum();
         let net_send = networks.iter().filter(|n| n.hardware).filter_map(|n| n.send).sum();
 
-        let app_pids = (full && self.track_apps).then(app_pids);
+        let app_windows = (full && self.track_apps).then(app_windows);
+        let app_pids = app_windows.as_ref().map(|w| w.keys().copied().collect::<HashSet<u32>>());
 
         let mut readings = vec![
             ("cpu".into(), Some(cpu_usage as f64)),
@@ -263,6 +266,7 @@ impl Sampler {
             snapshot,
             processes_fresh: full,
             app_pids,
+            app_windows,
             system: SystemMetrics {
                 cpu_usage,
                 memory_used,

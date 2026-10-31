@@ -9,7 +9,8 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use tml_core::{
-    EndError, Group, ProcessKey, Sampler, ViewMode, ViewOptions, app_pids, build_group_view, end_process, tree_from,
+    EndError, Group, ProcessKey, Sampler, ViewMode, ViewOptions, WindowOp, WindowOutcome, WindowState, app_pids, app_windows,
+    apply_window_op, build_group_view, end_process, probe_window, tree_from,
 };
 use windows::Win32::Foundation::{ERROR_SUCCESS, HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
@@ -128,6 +129,23 @@ fn notepad_is_app_and_windowless_child_is_background() {
     let apps = app_pids();
     assert!(!apps.contains(&bgp), "无窗口的后台进程 {bgp} 不应是应用");
 
+    // 窗口句柄（#70）：与 app_pids 同键，句柄属于记事本，探测得到正常窗口；最小化 / 还原 / 最大化回读状态。
+    let windows = app_windows();
+    assert_eq!(windows.keys().copied().collect::<HashSet<u32>>(), apps, "app_windows 与 app_pids 应是同一组应用");
+    let hwnd = *windows.get(&np).expect("记事本应有主窗口句柄");
+    let mut owner = 0;
+    unsafe { GetWindowThreadProcessId(HWND(hwnd as *mut _), Some(&mut owner)) };
+    assert_eq!(owner, np, "主窗口应属于记事本");
+    assert_eq!(probe_window(hwnd), Ok(WindowState::Normal));
+    assert_eq!(apply_window_op(hwnd, WindowOp::Minimize), Ok(WindowOutcome::Done));
+    assert_eq!(probe_window(hwnd), Ok(WindowState::Minimized));
+    assert_eq!(apply_window_op(hwnd, WindowOp::Restore), Ok(WindowOutcome::Done));
+    assert_eq!(probe_window(hwnd), Ok(WindowState::Normal));
+    assert_eq!(apply_window_op(hwnd, WindowOp::Maximize), Ok(WindowOutcome::Done));
+    assert_eq!(probe_window(hwnd), Ok(WindowState::Maximized));
+    assert_eq!(apply_window_op(hwnd, WindowOp::Restore), Ok(WindowOutcome::Done));
+    assert_eq!(probe_window(hwnd), Ok(WindowState::Normal));
+
     // 同一份快照放进分组视图：记事本是应用组里的一个根，且只出现一次。
     // （后台进程所在的组取决于测试是从哪里启动的：从有窗口的终端 / 编辑器里跑，它们也是那个应用的后代，
     // 所以这里只断言“不是应用”；后代归组的规则由 view.rs 的单元测试覆盖。）
@@ -193,6 +211,17 @@ fn uwp_calculator_is_app_through_core_window() {
     let _guard = OwnedKey(key);
     let appeared = wait_until(Duration::from_secs(15), || app_pids().contains(&key.pid));
     assert!(appeared, "计算器 {} 应通过 CoreWindow 被判定为应用", key.pid);
+    // 窗口句柄（#70）：UWP 记的是 ApplicationFrameHost 的外层 ApplicationFrameWindow，而不是 CoreWindow。
+    let hwnd = *app_windows().get(&key.pid).expect("计算器应有主窗口句柄");
+    let mut frame_owner = 0;
+    unsafe { GetWindowThreadProcessId(HWND(hwnd as *mut _), Some(&mut frame_owner)) };
+    let mut class = [0u16; 64];
+    let n = unsafe { windows::Win32::UI::WindowsAndMessaging::GetClassNameW(HWND(hwnd as *mut _), &mut class) };
+    let class = String::from_utf16_lossy(&class[..n.max(0) as usize]);
+    eprintln!("计算器主窗口类 {class}，窗口所属进程 {frame_owner}（计算器进程 {}）", key.pid);
+    assert_eq!(class, "ApplicationFrameWindow");
+    assert_ne!(frame_owner, key.pid, "外层窗口属于 ApplicationFrameHost，不是计算器进程");
+    assert!(probe_window(hwnd).is_ok(), "外层窗口应可探测：{:?}", probe_window(hwnd));
     eprintln!("计算器 pid={} 通过 CoreWindow 判定为应用", key.pid);
     close_windows_of(key.pid);
     let ended = end_process(key);
